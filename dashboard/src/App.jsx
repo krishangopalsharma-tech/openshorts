@@ -25,7 +25,8 @@ import HistoryTab from './components/HistoryTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
-import { apiFetch, apiJson, QuotaError } from './lib/api';
+import { apiFetch, apiJson, QuotaError, getToken } from './lib/api';
+import { getApiUrl } from './config';
 import { track } from './lib/analytics';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
@@ -634,6 +635,7 @@ function App() {
       alert(`Download failed: ${e.message}`);
     } finally {
       setDownloadingAll(false);
+      setDownloadAllPct(null);
     }
   };
 
@@ -1905,7 +1907,7 @@ function App() {
                         title="Download all clips as a ZIP"
                       >
                         {downloadingAll
-                          ? <><Loader2 size={14} className="animate-spin" />zipping…</>
+                          ? <><Loader2 size={14} className="animate-spin" />{downloadAllPct == null ? 'zipping…' : `downloading ${downloadAllPct}%`}</>
                           : <><Download size={14} />download all</>}
                       </button>
                       {results.clips.length > 1 && (

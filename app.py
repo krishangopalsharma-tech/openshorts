@@ -2848,7 +2848,13 @@ async def download_all_clips(job_id: str, request: Request):
     if not files:
         raise HTTPException(status_code=404, detail="No clip files found for this job")
 
-    zip_path = os.path.join(output_dir, f"clips_{int(time.time())}.zip")
+    # Unique per request, not per second: two download-all calls landing in
+    # the same second (a double click, a retry, a second tab) used to share
+    # this path, so the second build truncated the file the first response
+    # was still streaming and h11 aborted it mid-body ("Too little data for
+    # declared Content-Length", 5-sep-2026) while the first's cleanup then
+    # deleted the file under the second.
+    zip_path = os.path.join(output_dir, f"clips_{int(time.time())}_{uuid.uuid4().hex[:6]}.zip")
 
     def build_zip():
         # Videos are already compressed; store instead of deflate for speed.
