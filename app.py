@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import unicodedata
 import uuid
 import subprocess
 import threading
@@ -9,6 +10,8 @@ import shutil
 import glob
 import time
 import zipfile
+import csv
+import io
 import math
 import itertools
 import functools
@@ -438,6 +441,20 @@ def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
         return True
     except Exception:
         return False
+
+def _sanitize_export_label(text, max_bytes=120):
+    """Filesystem-safe label for an exported (zip/CSV) filename — same rules
+    as main.py's sanitize_filename, kept local rather than importing main.py
+    (which loads the YOLO/MediaPipe models at import time) for one string fn.
+    """
+    text = unicodedata.normalize('NFC', text)
+    text = re.sub(r'[<>:"/\\|?*#]', '', text)
+    text = text.replace(' ', '_')
+    encoded = text.encode('utf-8')
+    if len(encoded) > max_bytes:
+        text = encoded[:max_bytes].decode('utf-8', 'ignore')
+    return text
+
 
 def _canonical_clip_file(output_dir, base_name, index):
     """The file to serve for clip ``index``, preferring a derived version.
@@ -2522,6 +2539,7 @@ async def download_all_clips(job_id: str, request: Request):
     mem_clips = ((jobs.get(job_id) or {}).get('result') or {}).get('clips') or []
 
     files = []
+    csv_rows = []
     for i, clip in enumerate(data.get('shorts', [])):
         url = None
         if i < len(mem_clips):
@@ -2531,7 +2549,30 @@ async def download_all_clips(job_id: str, request: Request):
                     else _canonical_clip_file(output_dir, base_name, i))
         path = os.path.join(output_dir, filename)
         if filename and os.path.exists(path):
-            files.append((i, path))
+            # A random id per clip, independent of the internal storage
+            # filename — it's just an export-time label, so it's free to be
+            # short and to prefix the exported file without touching how the
+            # pipeline names/finds the file internally (see _canonical_clip_file:
+            # that reconstructs the on-disk name from a fixed pattern, so an
+            # unpredictable component in the REAL filename breaks it — this id
+            # only ever lives in the zip's copy and the CSV, never on disk).
+            file_id = uuid.uuid4().hex[:10]
+            title = clip.get("video_title_for_youtube_short", "").strip()
+            ext = os.path.splitext(path)[1] or ".mp4"
+            # The internal filename is the SOURCE VIDEO's title + timestamped
+            # subtitled_/hooked_ prefixes from post-processing, not the clip's
+            # own title — exported name should read like the clip Gemini wrote
+            # copy for, not the pipeline's bookkeeping trail.
+            base_label = _sanitize_export_label(title) if title else os.path.splitext(os.path.basename(path))[0]
+            arcname = f"{file_id}_{base_label}{ext}"
+            files.append((i, path, arcname))
+            csv_rows.append({
+                "id": file_id,
+                "title": clip.get("video_title_for_youtube_short", ""),
+                "description": (clip.get("video_description_for_instagram")
+                                 or clip.get("video_description_for_tiktok") or ""),
+                "tags": clip.get("video_tags", ""),
+            })
 
     if not files:
         raise HTTPException(status_code=404, detail="No clip files found for this job")
@@ -2541,8 +2582,20 @@ async def download_all_clips(job_id: str, request: Request):
     def build_zip():
         # Videos are already compressed; store instead of deflate for speed.
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
-            for i, path in files:
-                zf.write(path, arcname=f"clip_{i + 1:02d}_{os.path.basename(path)}")
+            for i, path, arcname in files:
+                zf.write(path, arcname=arcname)
+
+            # Named per job (not a fixed "clips.csv"): dropping exports from
+            # several source videos into the same Drive folder keeps them all
+            # instead of each one overwriting the last, while re-exporting the
+            # SAME job again produces the same name so Drive/n8n treat it as
+            # an update of that job's sheet rather than a growing pile of
+            # duplicates.
+            csv_buffer = io.StringIO()
+            writer = csv.DictWriter(csv_buffer, fieldnames=["id", "title", "description", "tags"])
+            writer.writeheader()
+            writer.writerows(csv_rows)
+            zf.writestr(f"clips_{job_id}.csv", csv_buffer.getvalue())
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, build_zip)

@@ -39,6 +39,7 @@ class DetailClipModel(BaseModel):
     video_description_for_instagram: str
     video_title_for_youtube_short: str
     viral_hook_text: str
+    video_tags: str
 
 
 class DetailResponse(BaseModel):
@@ -56,6 +57,7 @@ class VisualClipModel(BaseModel):
     video_description_for_instagram: str
     video_title_for_youtube_short: str
     viral_hook_text: str
+    video_tags: str
 
 
 class VisualResponse(BaseModel):
@@ -77,8 +79,10 @@ TIME CONTRACT — STRICT:
 - Cut on visual scene changes, never mid-motion.
 
 For each clip write catchy copy in {language} (a scroll-stopping hook, a TikTok
-and an Instagram description, and a YouTube title ≤100 chars). Order clips best
-to worst by how likely they are to stop a viewer scrolling.
+and an Instagram description, a YouTube title ≤100 chars, and `video_tags`:
+8-15 comma-separated SEO keyword tags for YouTube's tag field — not hashtags,
+no "#" symbol, mixing broad niche terms with specifics unique to this clip).
+Order clips best to worst by how likely they are to stop a viewer scrolling.
 """
 
 
@@ -275,10 +279,14 @@ HOOK PLAYBOOK — pick the strongest fitting pattern for `viral_hook_text` (max 
 - POV / pattern interrupt: "POV: you finally understand it."
 (These are English PATTERNS — always write the actual hook in TRANSCRIPT_LANGUAGE.)
 
-COPY RULES — ALL text fields (descriptions, title, hook) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
+COPY RULES — ALL text fields (descriptions, title, hook, tags) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
 - Descriptions (TikTok + Instagram): 1-2 punchy sentences that tease the payoff
   without spoiling it, then 3-5 topically relevant hashtags. No generic hashtag spam.
 - `video_title_for_youtube_short`: max 100 chars, curiosity-driven, no fake claims.
+- `video_tags`: 8-15 comma-separated SEO keyword tags for YouTube's tag field —
+  NOT hashtags, no "#" symbol. Mix broad niche terms (the general topic) with
+  specific terms unique to this exact clip (names, tools, numbers, claims from
+  the transcript). Never repeat the same tag with different casing/plurals.
 - `predicted_score`: honest 0-100 estimate of viral potential.
 
 TRANSCRIPT_LANGUAGE: {language}
@@ -297,7 +305,8 @@ Return only:
       "video_description_for_tiktok": "<description + hashtags>",
       "video_description_for_instagram": "<description + hashtags>",
       "video_title_for_youtube_short": "<title max 100 chars>",
-      "viral_hook_text": "<short overlay max 10 words>"
+      "viral_hook_text": "<short overlay max 10 words>",
+      "video_tags": "<8-15 comma-separated SEO tags, no # symbol>"
     }}
   ]
 }}
