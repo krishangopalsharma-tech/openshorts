@@ -460,21 +460,11 @@ function App() {
           body: JSON.stringify({
             job_id: jobId,
             clip_index: i,
-            position: options.position,
-            font_size: options.fontSize,
-            font_name: options.fontName,
-            font_color: options.fontColor,
-            border_color: options.borderColor,
-            border_width: options.borderWidth,
-            bg_color: options.bgColor,
-            bg_opacity: options.bgOpacity,
-            style: options.style || 'classic',
-            highlight_color: options.highlightColor || '#FFD700',
-            effect: options.effect || 'none',
-            base_opacity: options.baseOpacity ?? 1.0,
-            uppercase: options.uppercase || false,
+            preset: options.preset,
+            overrides: options.overrides || {},
             // Chain from the clip's current server file (its video_url basename).
             input_filename: (clips[i].video_url || '').split('/').pop(),
+            words: options.captions || null,
           }),
         });
         if (!res.ok) errors++;

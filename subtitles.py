@@ -582,3 +582,318 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
 
     return True
 
+
+
+# --------------------------------------------------------------------------- #
+# Styled captions (ClipForge preset engine)
+# --------------------------------------------------------------------------- #
+def _flat_clip_words(transcript, clip_start, clip_end):
+    """Whisper words inside [clip_start, clip_end] as clip-relative
+    ``{word, start, end}`` with the leading-space convention stripped: the
+    grouping below measures rendered characters and a stray space per word
+    would shorten every line by a word."""
+    words = []
+    for seg in (transcript or {}).get("segments", []) or []:
+        for w in merge_continuation_words(seg.get("words") or []):
+            try:
+                start, end = float(w["start"]), float(w["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end <= clip_start or start >= clip_end or end <= start:
+                continue
+            text = _normalize_subtitle_word(w.get("word", "")).strip()
+            if not text:
+                continue
+            words.append({
+                "word": text,
+                "start": max(0.0, start - clip_start),
+                "end": max(0.0, min(end, clip_end) - clip_start),
+            })
+    words.sort(key=lambda w: w["start"])
+    return [w for w in words if w["end"] > w["start"]]
+
+
+def _styled_line_len(line):
+    return sum(len(w["word"]) for w in line) + max(0, len(line) - 1) if line else 0
+
+
+def _styled_group_events(words, max_chars, max_lines, max_span=2.5):
+    """Pack words into events of up to ``max_lines`` lines of ``max_chars``;
+    ``max_span`` closes an event before it outlives the speech it captions."""
+    events, cur_lines = [], [[]]
+
+    def event_start():
+        for ln in cur_lines:
+            if ln:
+                return ln[0]["start"]
+        return None
+
+    def flush():
+        nonlocal cur_lines
+        filled = [ln for ln in cur_lines if ln]
+        if filled:
+            flat = [w for ln in filled for w in ln]
+            events.append({"start": flat[0]["start"], "end": flat[-1]["end"], "lines": filled})
+        cur_lines = [[]]
+
+    for w in words:
+        start = event_start()
+        if start is not None and (w["end"] - start) > max_span:
+            flush()
+        cur_line = cur_lines[-1]
+        tentative = _styled_line_len(cur_line) + (1 if cur_line else 0) + len(w["word"])
+        if cur_line and tentative > max_chars:
+            if len(cur_lines) < max_lines:
+                cur_lines.append([w])
+            else:
+                flush()
+                cur_lines = [[w]]
+        else:
+            cur_line.append(w)
+    flush()
+    return events
+
+
+def _styled_word_hold_events(words, max_gap=0.7):
+    """One event per word; each holds until the next starts unless the pause
+    is real (> max_gap), so a single word never lingers through silence."""
+    events, n = [], len(words)
+    for i, w in enumerate(words):
+        if i + 1 < n:
+            nxt = words[i + 1]["start"]
+            end = nxt if (nxt - w["end"]) <= max_gap else w["end"] + 0.3
+        else:
+            end = w["end"]
+        events.append({"start": w["start"], "end": max(end, w["end"]), "lines": [[w]]})
+    return events
+
+
+def _ass_bgr(hex_color, alpha=0):
+    """'#RRGGBB' -> '&HAABBGGRR' (alpha 0 = opaque)."""
+    h = str(hex_color or "").lstrip("#")
+    if len(h) != 6:
+        h = "FFFFFF"
+    a = max(0, min(255, int(alpha)))
+    return f"&H{a:02X}{h[4:6]}{h[2:4]}{h[0:2]}".upper()
+
+
+def _styled_tok(word, uppercase):
+    t = _escape_ass_text(word)
+    return t.upper() if uppercase else t
+
+
+def _styled_plain(lines, uppercase):
+    rendered = [" ".join(_styled_tok(w["word"], uppercase) for w in line if w["word"]) for line in lines]
+    return "\\N".join(r for r in rendered if r)
+
+
+def _styled_karaoke(lines, uppercase):
+    out = []
+    for line in lines:
+        parts, prev_end = [], line[0]["start"]
+        for w in line:
+            gap_cs = max(0, int(round((w["start"] - prev_end) * 100)))
+            dur_cs = max(1, int(round((w["end"] - w["start"]) * 100)))
+            if gap_cs > 0:
+                parts.append(f"{{\\k{gap_cs}}}")
+            parts.append(f"{{\\k{dur_cs}}}{_styled_tok(w['word'], uppercase)} ")
+            prev_end = w["end"]
+        out.append("".join(parts).strip())
+    return "\\N".join(out)
+
+
+def _styled_reveal(ev, uppercase):
+    ev_start, out = ev["start"], []
+    for line in ev["lines"]:
+        toks = []
+        for w in line:
+            t = max(0, int(round((w["start"] - ev_start) * 1000)))
+            toks.append(f"{{\\alpha&HFF&\\fscx70\\fscy70\\t({t},{t + 130},\\alpha&H00&\\fscx100\\fscy100)}}"
+                        f"{_styled_tok(w['word'], uppercase)}")
+        out.append(" ".join(toks))
+    return "\\N".join(out)
+
+
+def _styled_highlight(ev, cfg, uppercase):
+    """Whole phrase on screen, the spoken word recoloured: zero-length \\t
+    transforms timed from the event start (the 'Hormozi' look)."""
+    base, hi = _ass_bgr(cfg["primary_color"]), _ass_bgr(cfg["highlight_color"])
+    ev_start, out = ev["start"], []
+    for line in ev["lines"]:
+        toks = []
+        for w in line:
+            t0 = max(0, int(round((w["start"] - ev_start) * 1000)))
+            t1 = max(t0 + 1, int(round((w["end"] - ev_start) * 1000)))
+            toks.append(f"{{\\1c{base}\\t({t0},{t0},\\1c{hi})\\t({t1},{t1},\\1c{base})}}"
+                        f"{_styled_tok(w['word'], uppercase)}")
+        out.append(" ".join(toks))
+    return "\\N".join(out)
+
+
+def _styled_one_word(word, uppercase):
+    return f"{{\\fad(60,0)\\fscx82\\fscy82\\t(0,130,\\fscx100\\fscy100)}}{_styled_tok(word['word'], uppercase)}"
+
+
+def generate_ass_styled(transcript, clip_start, clip_end, output_path, *,
+                        preset=None, overrides=None, cfg=None,
+                        video_w=1080, video_h=1920, split_ranges=None):
+    """Write a caption track in one of the ClipForge looks (caption_styles).
+
+    ``cfg`` is the merged preset+overrides dict (``caption_styles.merge``);
+    ``preset``/``overrides`` are merged here when it is not given. The file
+    declares PlayResX/Y = the real frame and every pixel value in the preset
+    (tuned for 1080x1920) is scaled by video_h/1920, which is what makes one
+    preset look identical on a 9:16, 1:1 or 16:9 render of the same clip.
+
+    Stacked (SPLIT) stretches keep OpenShorts' seam rule: an event that starts
+    inside ``split_ranges`` gets ``\\an5`` unless the style pins an explicit
+    ``pos_x``/``pos_y``, which wins because the user put it there.
+
+    Returns False when the window has no words (silent stretch); the caller
+    then ships the clip uncaptioned rather than burning an empty track.
+    """
+    import caption_styles as _styles
+    cfg = dict(cfg) if cfg else _styles.merge(preset, overrides)
+
+    words = _flat_clip_words(transcript, clip_start, clip_end)
+    if not words:
+        return False
+
+    video_w = max(16, int(video_w or 1080))
+    video_h = max(16, int(video_h or 1920))
+    scale = video_h / 1920.0
+    font_scale = float(cfg.get("font_scale", 1.0) or 1.0)
+    font_size = max(12, int(round(float(cfg["font_size"]) * font_scale * scale)))
+
+    outline_px = cfg.get("outline_width", cfg.get("outline", 5))
+    outline = max(0, int(round(float(outline_px) * scale)))
+
+    shadow_on = cfg.get("shadow_enabled")
+    if shadow_on is None:
+        shadow_on = float(cfg.get("shadow", 0) or 0) > 0
+    shadow_px = cfg.get("shadow_distance", cfg.get("shadow", 0))
+    shadow = max(0, int(round(float(shadow_px) * scale))) if shadow_on else 0
+    shadow_color = cfg.get("shadow_color", "#000000")
+
+    bg_on = bool(cfg.get("background_enabled"))
+    border_style = 3 if bg_on else 1
+    margin_v = int(round(video_h * 0.08))
+
+    primary = _ass_bgr(cfg["primary_color"])
+    highlight = _ass_bgr(cfg["highlight_color"])
+    if bg_on:
+        bg_alpha = int(round((100 - float(cfg.get("background_opacity", 100) or 100)) / 100 * 255))
+        outline_col = _ass_bgr(cfg.get("background_color", "#000000"), alpha=bg_alpha)
+    else:
+        outline_col = _ass_bgr(cfg.get("outline_color", "#000000"))
+    sh_alpha = int(round((100 - float(cfg.get("shadow_opacity", 75) or 75)) / 100 * 255))
+    back_col = _ass_bgr(shadow_color, alpha=sh_alpha)
+    bold_flag = -1 if cfg.get("bold") else 0
+    underline_flag = -1 if cfg.get("underline") else 0
+    strike_flag = -1 if cfg.get("strikethrough") else 0
+    spacing = max(0, int(round(float(cfg.get("tracking", 0) or 0) * scale)))
+    alignment = {"top": 8, "center": 5, "middle": 5, "bottom": 2}.get(
+        str(cfg.get("position", "bottom")).lower(), 2)
+
+    karaoke = bool(cfg.get("karaoke"))
+    # libass fills \k syllables Secondary -> Primary, so the slots swap.
+    style_primary, style_secondary = (highlight, primary) if karaoke else (primary, primary)
+    safe_font = _sanitize_font_name(cfg.get("font_family") or "Roboto")
+
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {video_w}\n"
+        f"PlayResY: {video_h}\n"
+        "WrapStyle: 2\n"
+        "ScaledBorderAndShadow: yes\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{safe_font},{font_size},{style_primary},{style_secondary},"
+        f"{outline_col},{back_col},{bold_flag},0,{underline_flag},{strike_flag},100,100,"
+        f"{spacing},0,{border_style},{outline},{shadow},{alignment},60,60,{margin_v},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    # Explicit placement. A pin (pos_x/pos_y, centre anchor) or an anchored
+    # caption nudged by offset_x/offset_y both become \an<anchor>\pos(x,y):
+    # the anchor keeps its own alignment point (an8 hangs from the top edge,
+    # an2 stands on the bottom edge, an5 is centred) so "bottom, 6% higher"
+    # still grows upward like a bottom caption does. All in % of the frame,
+    # so the same style lands in the same place on a 9:16, 1:1 or 16:9 render.
+    pos_tags = []
+    pos_x, pos_y = cfg.get("pos_x"), cfg.get("pos_y")
+    off_x = float(cfg.get("offset_x") or 0.0)
+    off_y = float(cfg.get("offset_y") or 0.0)
+    pinned = (pos_x is not None and pos_y is not None) or off_x != 0.0 or off_y != 0.0
+    if pinned:
+        if pos_x is not None and pos_y is not None:
+            anchor = 5
+            base_x, base_y = float(pos_x) / 100.0 * video_w, float(pos_y) / 100.0 * video_h
+        else:
+            anchor = alignment
+            base_x = video_w / 2.0
+            base_y = {8: float(margin_v), 5: video_h / 2.0}.get(alignment, video_h - float(margin_v))
+        x = int(round(min(video_w, max(0.0, base_x + off_x / 100.0 * video_w))))
+        y = int(round(min(video_h, max(0.0, base_y + off_y / 100.0 * video_h))))
+        pos_tags.append(f"\\an{anchor}\\pos({x},{y})")
+    rotation = cfg.get("rotation")
+    if rotation:
+        pos_tags.append(f"\\frz{float(rotation):g}")
+    pos_inner = "".join(pos_tags)
+
+    seam_ranges = [(float(a), float(b)) for a, b in (split_ranges or [])]
+
+    def seam(t):
+        return (not pinned) and any(a <= t < b for a, b in seam_ranges)
+
+    uppercase = bool(cfg.get("uppercase"))
+    glow_on = bool(cfg.get("glow_enabled"))
+    glow_px = max(1, int(round(float(cfg.get("glow_intensity", 10) or 10) * scale))) if glow_on else 0
+    glow_col = _ass_bgr(cfg.get("glow_color", "#7C4DFF"))
+    main_layer = 1 if glow_on else 0
+
+    animation = cfg.get("animation") or "none"
+    max_lines = max(1, int(cfg.get("max_lines") or 1))
+    max_chars = max(1, int(cfg.get("max_chars") or 22))
+    if animation == "one_word":
+        events = _styled_word_hold_events(words)
+    else:
+        events = _styled_group_events(words, max_chars=max_chars, max_lines=max_lines)
+
+    rows = []
+    for ev in events:
+        start, end = max(0.0, ev["start"]), ev["end"]
+        if end <= start:
+            continue
+        if animation == "one_word":
+            text = _styled_one_word(ev["lines"][0][0], uppercase)
+        elif animation == "word_reveal":
+            text = _styled_reveal(ev, uppercase)
+        elif animation == "highlight":
+            text = _styled_highlight(ev, cfg, uppercase)
+        elif karaoke:
+            text = _styled_karaoke(ev["lines"], uppercase)
+        else:
+            text = _styled_plain(ev["lines"], uppercase)
+
+        inner = pos_inner + ("\\an5" if seam(start) else "")
+        prefix = "{" + inner + "}" if inner else ""
+        if glow_on:
+            glow_prefix = "{" + inner + f"\\1c{glow_col}\\3c{glow_col}\\bord{glow_px}\\shad0\\blur{glow_px}" + "}"
+            rows.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,"
+                        f"{glow_prefix}{_styled_plain(ev['lines'], uppercase)}")
+        rows.append(f"Dialogue: {main_layer},{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,"
+                    f"{prefix}{text}")
+
+    if not rows:
+        return False
+    with open(output_path, "w", encoding="utf-8-sig") as f:
+        f.write(header + "\n".join(rows) + "\n")
+    return True

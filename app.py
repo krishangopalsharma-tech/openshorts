@@ -1869,6 +1869,19 @@ THUMBNAILS_DIR = os.path.join(OUTPUT_DIR, "thumbnails")
 os.makedirs(THUMBNAILS_DIR, exist_ok=True)
 app.mount("/thumbnails", StaticFiles(directory=THUMBNAILS_DIR), name="thumbnails")
 
+# The bundled caption fonts, so the dashboard can @font-face the exact typeface
+# libass will burn (caption_styles.list_fonts names them by embedded family).
+app.mount("/fonts", StaticFiles(directory=caption_styles.FONTS_DIR), name="fonts")
+
+# The background-music library, so the dashboard can preview a track before
+# mixing it (music.list_tracks names the files).
+os.makedirs(music.MUSIC_DIR, exist_ok=True)
+app.mount("/music", StaticFiles(directory=music.MUSIC_DIR), name="music")
+
+# Logo library for the overlay editor (overlays.list_assets).
+os.makedirs(overlays.OVERLAYS_DIR, exist_ok=True)
+app.mount("/overlays", StaticFiles(directory=overlays.OVERLAYS_DIR), name="overlays")
+
 
 def _safe_under(base_dir: str, user_rel_path: str) -> Optional[str]:
     """Resolve ``user_rel_path`` under ``base_dir`` and reject path traversal.
@@ -4605,7 +4618,11 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     # Define outputs
     generation_id = int(time.time())
     is_karaoke = req.style == "karaoke"
-    srt_filename = f"subs_{req.clip_index}_{generation_id}.{'ass' if is_karaoke else 'srt'}"
+    styled = bool(req.preset)
+    if styled and not caption_styles.is_known_preset(req.preset):
+        raise HTTPException(status_code=400, detail=f"Unknown caption preset: {req.preset}")
+    srt_filename = (f"subs_{req.clip_index}_{generation_id}."
+                    f"{'ass' if (is_karaoke or styled) else 'srt'}")
     srt_path = os.path.join(output_dir, srt_filename)
 
     # Style options shared by the karaoke ASS generator paths.
@@ -4652,12 +4669,31 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         if is_dubbed:
             print(f"🎙️ Dubbed video detected, transcribing audio for subtitles...")
             def run_transcribe_srt():
+                if styled:
+                    import subtitles as _subs
+                    from ffmpeg_utils import probe_dimensions
+                    dubbed = _subs.transcribe_audio(input_path)
+                    dims = probe_dimensions(input_path) or (1080, 1920)
+                    return _subs.generate_ass_styled(
+                        dubbed, 0.0, float("inf"), srt_path,
+                        preset=req.preset, overrides=req.overrides,
+                        video_w=dims[0], video_h=dims[1], split_ranges=seam_ranges)
                 if is_karaoke:
                     return generate_srt_from_video(input_path, srt_path, style="karaoke", **karaoke_opts)
                 return generate_srt_from_video(input_path, srt_path)
 
             loop = asyncio.get_event_loop()
             success = await loop.run_in_executor(None, run_transcribe_srt)
+        elif styled:
+            import subtitles as _subs
+            from ffmpeg_utils import probe_dimensions
+            # PlayRes = the real frame, so one preset renders the same on a
+            # 9:16, 1:1 or 16:9 version of the clip.
+            dims = probe_dimensions(input_path) or (1080, 1920)
+            success = _subs.generate_ass_styled(
+                sub_transcript, sub_start, sub_end, srt_path,
+                preset=req.preset, overrides=req.overrides,
+                video_w=dims[0], video_h=dims[1], split_ranges=seam_ranges)
         elif is_karaoke:
             success = generate_ass(sub_transcript, sub_start, sub_end, srt_path, **karaoke_opts)
         else:

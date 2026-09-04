@@ -460,10 +460,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setIsSubtitling(true);
         setEditError(null);
         try {
-            // Karaoke styles are burned server-side (ASS word-highlight render);
-            // the in-browser Remotion path only handles classic styles, and only
-            // when the server file has no burned-in content to preserve.
-            if (options.remotion && options.style !== 'karaoke' && !hasServerBurns) {
+            // In-browser Remotion preview: only when the caller hands a Remotion
+            // config AND the server file has no burned-in content to preserve.
+            // The current SubtitleModal never does; captions are burned
+            // server-side from a preset. Kept harmless for callers that do.
+            if (options.remotion && !hasServerBurns) {
                 // Accumulate layer and render all layers together
                 const newLayers = { ...activeLayers, subtitles: options.remotion };
                 setActiveLayers(newLayers);
@@ -480,26 +481,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 return;
             }
 
-            // Fallback: legacy FFmpeg
+            // Server-side burn: a named preset plus the user's overrides.
             const res = await apiFetch('/api/subtitle', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: index,
-                    position: options.position,
-                    font_size: options.fontSize,
-                    font_name: options.fontName,
-                    font_color: options.fontColor,
-                    border_color: options.borderColor,
-                    border_width: options.borderWidth,
-                    bg_color: options.bgColor,
-                    bg_opacity: options.bgOpacity,
-                    style: options.style || 'classic',
-                    highlight_color: options.highlightColor || '#FFD700',
-                    effect: options.effect || 'none',
-                    base_opacity: options.baseOpacity ?? 1.0,
-                    uppercase: options.uppercase || false,
+                    preset: options.preset,
+                    overrides: options.overrides || {},
                     input_filename: serverVideoFile,
                     // Edited caption text (clip-relative ms); null = server
                     // regenerates from the transcript as before.
