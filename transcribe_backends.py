@@ -137,15 +137,22 @@ def run_whisper_transcription(media_path, **params):
     iterating, so the gate must wrap list(segments), not just transcribe().
     Returns (segments_list, info).
 
-    A CUDA failure (model load OOM or mid-decode) retries once on CPU and
-    pins CPU for the rest of the process — the GPU is shared with other
-    models, so a job must degrade instead of dying when VRAM runs out.
+    A CUDA failure (model load OOM, mid-decode, or a missing/mismatched
+    library like libcublas) retries once on CPU and pins CPU for the rest of
+    the process — the GPU is shared with other models, so a job must degrade
+    instead of dying when VRAM runs out or the CUDA userspace libs are broken.
+
+    Gated on the configured device rather than sniffing the error message for
+    the word "cuda": CTranslate2's own library-load failure reads "Library
+    libcublas.so.12 is not found or cannot be loaded" — no "cuda" in it — so
+    message-sniffing missed exactly the failure this fallback exists for.
     """
     global _whisper_model, _whisper_force_cpu
+    intended_device = "cpu" if _whisper_force_cpu else get_whisper_config()["device"]
     try:
         return _run_whisper_once(media_path, **params)
     except RuntimeError as e:
-        if _whisper_force_cpu or "cuda" not in str(e).lower():
+        if _whisper_force_cpu or intended_device != "cuda":
             raise
         print(f"⚠️ [ASR] whisper GPU failed ({e}) — retrying on CPU", flush=True)
         _whisper_force_cpu = True
