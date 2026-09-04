@@ -51,10 +51,11 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
-| `cinematic.py` | Static cinematic look (grade/glow/grain/vignette/gradients/letterbox), burned in once per clip |
+| `cinematic.py` | Cinematic look (grade/glow/grain/vignette/gradients/letterbox): one ffmpeg pass, applied per clip after generation (`/api/clip/look`) or at render for API callers |
+| `caption_styles.py` | Caption looks ported from ClipForge: 19 presets, 5 theme bundles, the override schema and the bundled font registry (`fonts/`) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |
-| `subtitles.py` | SRT generation, FFmpeg subtitle burning, and dubbed video transcription |
+| `subtitles.py` | SRT/ASS generation (legacy karaoke + `generate_ass_styled` for the ClipForge presets), FFmpeg subtitle burning, dubbed video transcription |
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
 | `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
@@ -212,29 +213,96 @@ portrait clip cannot reproduce the shrink either.
   `emphasis_times` is a plain list of seconds so the transcript's hook words can
   replace it without touching the module.
 
-### Cinematic effects (`cinematic.py`)
+### Format, look and captions are chosen AFTER generation
 
-Ported from ClipForge's effects stack: color grade (warm/cool/teal_orange/
-vintage/vibrant/bw), glow, grain, vignette, top/bottom gradient scrims and
-letterbox (cinema bars). Unlike captions/hooks these are **not** retroactively
-editable per clip — ClipForge itself only offers them as a pre-generation
-choice, so this ports the same shape: one JSON blob (`cinematic_effects` on
-`POST /api/process`, dashboard advanced options) becomes the per-job
-`CINEMATIC_EFFECTS` env var (same handoff as `WATERMARK`/`AUTO_HOOK`), read
-once in `main.py` and applied with one ffmpeg pass right after `render_clip`
-and before `apply_watermark` — under the watermark/hook/caption layers, same
-order ClipForge composites in. `cinematic.normalize()` clamps every field to
-its valid range/enum server-side, so a malformed request degrades to "no
-effect" instead of a broken filtergraph reaching the subprocess.
+The dashboard no longer asks for an output format, a cinematic look, captions
+or a hook title at upload. `POST /api/process` from the dashboard always sends
+`output_format=vertical`, `captions=false`, `auto_hook=0`, so a job delivers
+plain 9:16 clips (the AI layout picker still runs, it is what makes the 9:16
+worth keeping as the default). The user then decides per clip, or for every
+clip at once (the dashboard loops the per-clip endpoints; there is no bulk
+endpoint), from the clip card: **format & look** (`LookModal.jsx` →
+`/api/clip/look`) and **subtitles** (`SubtitleModal.jsx` → `/api/subtitle`).
+The hook title overlay is gone from the UI; `/api/hook` still serves API
+callers. The pre-generation knobs (`cinematic_effects`, `auto_hook`,
+`captions`, `output_format`) all still work on the API for agents and MCP.
 
-Glow has no native ffmpeg filter: it's a `split` into two branches, one
-`gblur`red, recombined with `blend=all_mode=screen`, which is why
-`build_filter_complex` emits a `-filter_complex` graph (with branch/merge)
-rather than a flat `-vf` chain. Gradient scrims are a handful of stacked
-`drawbox` bars at increasing alpha rather than a true gradient — ffmpeg has no
-per-pixel alpha ramp filter — this reads as smooth at typical clip
-resolutions and reuses the same drawbox approach `edit_builder.py` already
-uses for `flash`.
+**Layers are filename prefixes, innermost first:** `<base>_clip_<n>.mp4`
+(clean reframe) → `recut_<ts>_<hex>_` (a different cut or format) →
+`fx_<hex>_` (cinematic look) → `mu_<hex>_` (background track) →
+`ov_<hex>_` (logos + custom text) → `hooked_<ts>_` → `subtitled_<ts>_`. The three
+new prefixes are short and carry no timestamp on purpose: ext4 caps a filename
+at 255 **bytes**, every layer nests the name below it, and a 120-byte title +
+uuid + `recut_` + captions already leaves ~80 bytes for everything else
+(resolution is by mtime, so the timestamp bought nothing). The under-caption layers are listed in
+`_UNDER_CAPTION_LAYERS`; `_relayer(changed)` re-derives one and everything
+above it while keeping the files below (a music change never re-grades),
+and `_apply_layers` is what `perform_recut`'s `effects` hook runs on a fresh
+render, so every layer survives a trim, a reframe or a format change.
+Nothing is ever burned in place after generation: every change strips back to
+the layer below (`_strip_burned_captions` / `_strip_burned_hook` /
+`_strip_cinematic`, or `_strip_all_layers` for the bare render), re-derives,
+and puts the outer layers back. `_canonical_clip_file` knows every prefix, so
+a restart, the R2 archive and the ZIP export resolve the newest derivative.
+
+- **Format** (`/api/clip/look` with `output_format`): a full re-render of the
+  clip's recipe from the retained source through `recut.perform_recut`, with
+  the clip's framing and hand-set crops, so it costs a reframe (metered like
+  `/rerender`) and answers 409 once retention has removed the source. No
+  transcription, no Gemini. Each clip stores its own `output_format`;
+  `_clip_output_format` resolves it (the job-level `auto` always meant 9:16),
+  and `/rerender` and `/reframe` render in the clip's format, not the job's.
+- **Look** (`/api/clip/look` with `cinematic`): `cinematic.apply_cinematic_effects`
+  into an `fx_` derivative of the bare render (never in place), stored on the
+  clip as `cinematic` (normalized, every key) or `null`. `perform_recut` takes
+  an `effects` hook, so a trim, a reframe or a format change re-applies the
+  look under the captions instead of losing it.
+- **Music** (`/api/clip/music`, `music.py`, library in `assets/music/` +
+  `POST /api/music/upload`, previews at `/music/<file>`): ClipForge's
+  reels-style mix, level in dB. The voice is split, one copy keys a
+  `sidechaincompress` that ducks the track while someone talks (`duck`
+  0-100 scales the ratio 1→20), the other is mixed back with
+  `amix normalize=0` so dialogue stays at unity; the track loops,
+  starts `start` s in and fades out over the last second. Video is
+  stream-copied, so it is a 2 s pass. Stored on the clip as `music`.
+- **Overlays** (`/api/clip/overlays`, `overlays.py`, logo library in
+  `assets/overlays/` + `POST /api/overlays/upload`, served at `/overlays/<file>`):
+  the manual replacement for the removed hook title. Items are logos or
+  text blocks placed with the mouse in the editor; geometry travels as
+  **fractions of the frame** (centre x/y, width; text size as a fraction
+  of the height) so one list lands in the same relative spot on every
+  format and "apply to all" needs no per-clip fixing, which is what makes
+  text in the black band of a 1:1 clip work. Everything is rasterised by
+  PIL into ONE full-frame RGBA image (text through hooks.py's emoji-aware
+  drawing with the caption fonts, so it matches the browser's @font-face
+  preview) and composited in a single ffmpeg `overlay` pass, no drawtext
+  escaping. Stored on the clip as `overlays`.
+- **Captions** (`/api/subtitle` with `preset` + `overrides`): `caption_styles`
+  merges the preset with the normalized overrides and
+  `subtitles.generate_ass_styled` writes the ASS with `PlayResX/Y` = the real
+  frame, every px value scaled by `video_h/1920`, so one preset renders the
+  same on 9:16, 1:1 and 16:9. Animations: `highlight` (spoken word recoloured
+  via zero-length `\t`), `word_reveal`, `one_word`, `karaoke` (`\k`, with the
+  Primary/Secondary colour swap libass needs); glow is a blurred copy on a
+  lower layer; `pos_x/pos_y` pin with `\an5\pos` and win over the SPLIT-seam
+  `\an5` rule; `offset_x`/`offset_y` (±50 % of the frame) nudge an anchored
+  caption while keeping its alignment (`\an<anchor>\pos`), which is what the
+  X/Y sliders and dragging the caption on the preview write. The choice is
+  persisted on the clip as `caption_style`, and
+  `_reapply_captions` / `_clip_layer_hooks` use it, so a later format change
+  or trim brings back the user's captions, not `AUTO_CAPTION_STYLE`. A
+  legacy-field request clears it. Fonts: the 30 TTFs under `fonts/` are the
+  ClipForge set (Google Fonts, OFL); libass finds them through `fontsdir`,
+  the dashboard `@font-face`s them from `/fonts/<file>` for the live preview.
+  `GET /api/caption-styles` is the single source the modal renders from.
+
+Cinematic implementation notes: glow has no native ffmpeg filter, so it is a
+`split` into two branches, one `gblur`red, recombined with
+`blend=all_mode=screen` (hence a `-filter_complex` graph rather than a flat
+`-vf`); gradient scrims are stacked `drawbox` bars at increasing alpha because
+ffmpeg has no per-pixel alpha ramp, same trick `edit_builder.py` uses for
+`flash`. `cinematic.normalize()` clamps every field server-side so a bad
+request degrades to "no effect", never to a broken filtergraph.
 
 ### Key Classes
 - `SmoothedCameraman` - Stabilized camera movement with safe zone logic (prevents jitter)
@@ -246,7 +314,9 @@ uses for `flash`.
 | POST | `/api/process` | Submit video for processing |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |
-| POST | `/api/subtitle` | Generate and apply subtitles (auto-transcribes dubbed videos) |
+| POST | `/api/subtitle` | Burn captions on one clip: `preset` + `overrides` (caption_styles) or the legacy fields; auto-transcribes dubbed videos |
+| GET | `/api/caption-styles` | Presets, themes, override vocabulary, fonts (files under `/fonts/`) |
+| POST | `/api/clip/look` | Change a finished clip's output format (re-render from source) and/or cinematic look (`fx_` layer) |
 | POST | `/api/hook` | Add text hook overlays |
 | POST | `/api/translate` | AI voice dubbing via ElevenLabs |
 | GET | `/api/translate/languages` | List supported dubbing languages |
