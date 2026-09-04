@@ -5965,3 +5965,115 @@ async def saasshorts_voices(
         ],
         "source": "defaults",
     }
+
+
+# ---------------------------------------------------------------------------
+# Compilation tab: turns a full-length source video into one narrated short
+# from an externally-generated script/voiceover, following compilation.py's
+# Task 5 edit-plan JSON (see that module's docstring for the shape). Separate
+# job store from `jobs` — this isn't a clip-generation job, it takes the
+# video, the ElevenLabs VO and the plan directly and runs one ffmpeg pass.
+# ---------------------------------------------------------------------------
+compilation_jobs: Dict[str, Dict] = {}
+
+
+@app.post("/api/compilation/generate")
+async def compilation_generate(
+    request: Request,
+    video: UploadFile = File(...),
+    vo: UploadFile = File(...),
+    plan: str = Form(...),
+    burn_captions: Optional[str] = Form("true"),
+):
+    """Accepts the source video, the ElevenLabs VO and the Task 5 plan JSON;
+    returns a job_id to poll. Self-host only needs ffmpeg — no Gemini/API key
+    involved here, the script and voiceover already came from outside."""
+    await require_managed_entitlement(request)
+
+    try:
+        plan_data = json.loads(plan)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Plan is not valid JSON: {e}")
+
+    for key in ("sequence", "padding", "shots", "vo"):
+        if key not in plan_data:
+            raise HTTPException(status_code=400, detail=f"Plan JSON is missing \"{key}\"")
+
+    job_id = str(uuid.uuid4())
+    job_output_dir = os.path.join(OUTPUT_DIR, f"compilation_{job_id}")
+    os.makedirs(job_output_dir, exist_ok=True)
+
+    video_path = os.path.join(job_output_dir, f"source{os.path.splitext(video.filename or '')[1] or '.mp4'}")
+    vo_path = os.path.join(job_output_dir, f"vo{os.path.splitext(vo.filename or '')[1] or '.mp3'}")
+    plan_path = os.path.join(job_output_dir, "plan.json")
+
+    with open(video_path, "wb") as f:
+        shutil.copyfileobj(video.file, f)
+    with open(vo_path, "wb") as f:
+        shutil.copyfileobj(vo.file, f)
+    with open(plan_path, "w") as f:
+        json.dump(plan_data, f)
+
+    compilation_jobs[job_id] = {
+        "user_id": await _owner_id(request),
+        "status": "processing",
+        "logs": ["Compilation job started."],
+        "result": None,
+        "output_dir": job_output_dir,
+    }
+
+    burn = str(burn_captions).strip().lower() not in ("0", "false", "no")
+
+    async def run_generation():
+        await concurrency_semaphore.acquire()
+        try:
+            import compilation as compilation_module
+
+            loop = asyncio.get_running_loop()
+            output_path = os.path.join(job_output_dir, "compilation_final.mp4")
+
+            def run():
+                return compilation_module.build_compilation(
+                    plan_path, video_path, vo_path, output_path,
+                    workdir=os.path.join(job_output_dir, "work"),
+                    burn_captions=burn,
+                )
+
+            def log_msg(msg):
+                if job_id in compilation_jobs:
+                    compilation_jobs[job_id]["logs"].append(msg)
+
+            log_msg("Detecting silence and fitting shots...")
+            await loop.run_in_executor(None, run)
+
+            if job_id in compilation_jobs:
+                compilation_jobs[job_id]["status"] = "completed"
+                compilation_jobs[job_id]["result"] = {
+                    "video_url": f"/videos/compilation_{job_id}/compilation_final.mp4",
+                }
+                compilation_jobs[job_id]["logs"].append("Compilation complete.")
+        except Exception as e:
+            print(f"❌ Compilation Job {job_id[:8]} Error: {e}")
+            if job_id in compilation_jobs:
+                compilation_jobs[job_id]["status"] = "failed"
+                compilation_jobs[job_id]["logs"].append(f"Error: {str(e)}")
+        finally:
+            concurrency_semaphore.release()
+
+    asyncio.create_task(run_generation())
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/compilation/status/{job_id}")
+async def compilation_status(job_id: str, request: Request):
+    """Poll a compilation job's status."""
+    if job_id not in compilation_jobs:
+        raise HTTPException(status_code=404, detail="Compilation job not found")
+
+    job = compilation_jobs[job_id]
+    await _assert_job_owner(request, job)
+    return {
+        "status": job["status"],
+        "logs": job["logs"],
+        "result": job.get("result"),
+    }
