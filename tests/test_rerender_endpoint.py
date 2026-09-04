@@ -244,7 +244,9 @@ class TestRerenderPaths:
         call = fake_recut[0]
         assert call["input_path"].endswith("src.mp4")
         assert call["reframe"] is True
-        assert call["output_format"] == "auto"
+        # The job was generated with "auto", which always meant 9:16; the
+        # per-clip format (/api/clip/look) resolves it explicitly.
+        assert call["output_format"] == "vertical"
         assert call["watermark"] is False
         # Source-absolute times, not rebased.
         assert call["segments"] == [{"start": 45.0, "end": 55.0}]

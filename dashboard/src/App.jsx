@@ -267,7 +267,11 @@ function App() {
   // Bulk subtitles: apply one style to every clip of the job (triggered from
   // within a clip's subtitle modal via "apply to all").
   const [bulkSub, setBulkSub] = useState({ running: false, current: 0, total: 0, errors: 0 });
+  const [bulkLook, setBulkLook] = useState({ running: false, current: 0, total: 0, errors: 0 });
+  const [bulkMusic, setBulkMusic] = useState({ running: false, current: 0, total: 0, errors: 0 });
+  const [bulkOverlays, setBulkOverlays] = useState({ running: false, current: 0, total: 0, errors: 0 });
   const [downloadingAll, setDownloadingAll] = useState(false);
+  const [downloadAllPct, setDownloadAllPct] = useState(null);
   // Pre-flight quality gate: { info: {max_height, min_height, cookies_invalid}, data }
   const [qualityGate, setQualityGate] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -486,13 +490,148 @@ function App() {
     } catch { /* keep current results */ }
   };
 
+  // Apply one output format / cinematic look to every clip of the job,
+  // sequentially. Only the fields the user changed travel: a null format or
+  // look means "keep what the clip has".
+  const handleBulkLook = async (options) => {
+    const clips = results?.clips || [];
+    const total = clips.length;
+    if (!total) return;
+    setBulkLook({ running: true, current: 0, total, errors: 0 });
+    let errors = 0;
+    for (let i = 0; i < total; i++) {
+      setBulkLook({ running: true, current: i + 1, total, errors });
+      try {
+        const body = { job_id: jobId, clip_index: i, reapply_captions: true };
+        if (options.outputFormat != null) body.output_format = options.outputFormat;
+        if (options.cinematic != null) body.cinematic = options.cinematic;
+        const res = await apiFetch('/api/clip/look', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) errors++;
+      } catch {
+        errors++;
+      }
+    }
+    setBulkLook({ running: false, current: total, total, errors });
+    // Refresh results so each ResultCard picks up its re-rendered video_url,
+    // output_format and cinematic.
+    try {
+      const data = await pollJob(jobId);
+      if (data.result) setResults(data.result);
+    } catch { /* keep current results */ }
+  };
+
+  // Apply one background-music spec to every clip of the job, sequentially.
+  // `spec` is { track, volume_db, duck, start }, or null to remove the music
+  // from every clip.
+  const handleBulkMusic = async (spec) => {
+    const clips = results?.clips || [];
+    const total = clips.length;
+    if (!total) return;
+    setBulkMusic({ running: true, current: 0, total, errors: 0 });
+    let errors = 0;
+    for (let i = 0; i < total; i++) {
+      setBulkMusic({ running: true, current: i + 1, total, errors });
+      try {
+        const res = await apiFetch('/api/clip/music', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId, clip_index: i, music: spec }),
+        });
+        if (!res.ok) errors++;
+      } catch {
+        errors++;
+      }
+    }
+    setBulkMusic({ running: false, current: total, total, errors });
+    // Refresh results so each ResultCard picks up its new video_url and music.
+    try {
+      const data = await pollJob(jobId);
+      if (data.result) setResults(data.result);
+    } catch { /* keep current results */ }
+  };
+
+  // Apply one list of logo/text overlays to every clip of the job,
+  // sequentially. Every geometry is a fraction of the frame, so the same list
+  // lands in the same place whatever each clip's output format is. An empty
+  // list removes the layer from every clip.
+  const handleBulkOverlays = async (items) => {
+    const clips = results?.clips || [];
+    const total = clips.length;
+    if (!total) return;
+    setBulkOverlays({ running: true, current: 0, total, errors: 0 });
+    let errors = 0;
+    for (let i = 0; i < total; i++) {
+      setBulkOverlays({ running: true, current: i + 1, total, errors });
+      try {
+        const res = await apiFetch('/api/clip/overlays', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId, clip_index: i, overlays: items }),
+        });
+        if (!res.ok) errors++;
+      } catch {
+        errors++;
+      }
+    }
+    setBulkOverlays({ running: false, current: total, total, errors });
+    // Refresh results so each ResultCard picks up its new video_url and overlays.
+    try {
+      const data = await pollJob(jobId);
+      if (data.result) setResults(data.result);
+    } catch { /* keep current results */ }
+  };
+
   const handleDownloadAll = async () => {
     if (!jobId) return;
     setDownloadingAll(true);
+    setDownloadAllPct(null);
     try {
-      const res = await apiFetch(`/api/jobs/${jobId}/download-all`);
+      const path = `/api/jobs/${jobId}/download-all`;
+      // Self-host has no bearer token, so the browser can fetch the ZIP itself:
+      // the server answers Content-Disposition: attachment, the download lands
+      // in the browser's own download manager (progress, pause, resume) and a
+      // multi-GB job never has to fit in a JS blob. Buffering it as a blob
+      // showed "zipping…" for a minute with no feedback and then, for a big
+      // job, nothing at all — which read as "download all is broken".
+      if (!getToken()) {
+        const a = document.createElement('a');
+        a.href = getApiUrl(path);
+        a.download = `openshorts_clips_${(jobId || '').slice(0, 8)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // The zip is built server-side before the first byte arrives; keep the
+        // button busy about that long so a second click cannot start a second
+        // build of the same archive.
+        await new Promise((r) => setTimeout(r, 4000));
+        return;
+      }
+      // Cloud mode needs the Authorization header, which a plain link cannot
+      // carry: stream the response and show progress from Content-Length
+      // (exposed through CORS by the API).
+      const res = await apiFetch(path);
       if (!res.ok) throw new Error(await res.text());
-      const blob = await res.blob();
+      const total = Number(res.headers.get('Content-Length')) || 0;
+      const reader = res.body?.getReader?.();
+      let blob;
+      if (reader) {
+        const chunks = [];
+        let received = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.byteLength;
+          if (total) setDownloadAllPct(Math.min(100, Math.round((received / total) * 100)));
+        }
+        blob = new Blob(chunks, { type: 'application/zip' });
+      } else {
+        blob = await res.blob();
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -796,18 +935,19 @@ function App() {
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.
+      //
+      // Clips always render plain 9:16 with no captions and no hook overlay;
+      // format, look and captions are chosen per clip afterwards (LookModal,
+      // SubtitleModal). Stated explicitly rather than relying on the server
+      // defaults so the dashboard's request documents the product choice.
       const advanced = {
         target_clips: data.targetClips || null,
         clip_min_seconds: data.clipMinSeconds || null,
         clip_max_seconds: data.clipMaxSeconds || null,
-        // Sent explicitly both ways: absent means off for raw API callers,
-        // but the dashboard always states the user's choice.
-        auto_hook: data.autoHook ? '1' : '0',
-        auto_hook_style: data.autoHook ? (data.autoHookStyle || 'classic') : null,
+        captions: 'false',
+        auto_hook: '0',
         // 'auto' is the server default, so only a deliberate choice travels.
         layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
-        // null when the user never touched the cinematic panel.
-        cinematic_effects: data.cinematic ? JSON.stringify(data.cinematic) : null,
       };
 
       if (data.type === 'url') {
@@ -815,7 +955,7 @@ function App() {
         body = JSON.stringify({
           url: data.payload,
           acknowledged: !!data.acknowledged,
-          output_format: data.outputFormat || 'auto',
+          output_format: 'vertical',
           force_low_quality: forceLowQuality,
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
         });
@@ -826,14 +966,14 @@ function App() {
         body = JSON.stringify({
           thumbnail_session_id: data.payload,
           acknowledged: !!data.acknowledged,
-          output_format: data.outputFormat || 'auto',
+          output_format: 'vertical',
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
         });
       } else {
         const formData = new FormData();
         formData.append('file', data.payload);
         formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
-        formData.append('output_format', data.outputFormat || 'auto');
+        formData.append('output_format', 'vertical');
         for (const [k, v] of Object.entries(advanced)) {
           if (v != null) formData.append(k, v);
         }
@@ -1883,8 +2023,14 @@ function App() {
                           onPlay={(time) => handleClipPlay(time)}
                           onPause={handleClipPause}
                           onBulkSubtitle={handleBulkSubtitles}
+                          onBulkLook={handleBulkLook}
+                          onBulkMusic={handleBulkMusic}
+                          onBulkOverlays={handleBulkOverlays}
                           clipCount={results.clips.length}
                           bulkProgress={bulkSub}
+                          bulkLookProgress={bulkLook}
+                          bulkMusicProgress={bulkMusic}
+                          bulkOverlaysProgress={bulkOverlays}
                         />
                       ))}
                     </div>

@@ -31,6 +31,10 @@ from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
 import layout_ranges
+import caption_styles
+import cinematic
+import music
+import overlays
 
 load_dotenv()
 
@@ -477,7 +481,16 @@ def _canonical_clip_file(output_dir, base_name, index):
         derived = (glob.glob(os.path.join(output_dir, f"subtitled_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"recut_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hooked_*_{clean}"))
-                   + glob.glob(os.path.join(output_dir, f"hook_{clean}")))
+                   + glob.glob(os.path.join(output_dir, f"hook_{clean}"))
+                   # fx_<ts>_ is the cinematic look (/api/clip/look) and
+                   # music_<ts>_ the background track (/api/clip/music): the
+                   # layers right above the clean reframe, below hook/captions.
+                   + glob.glob(os.path.join(output_dir, f"fx_*_{clean}"))
+                   + glob.glob(os.path.join(output_dir, f"mu_*_{clean}"))
+                   + glob.glob(os.path.join(output_dir, f"ov_*_{clean}"))
+                   # the timestamped spellings a few early clips carry
+                   + glob.glob(os.path.join(output_dir, f"music_*_{clean}"))
+                   + glob.glob(os.path.join(output_dir, f"overlay_*_{clean}")))
     except Exception:
         derived = []
     if not derived:
@@ -512,6 +525,250 @@ def _strip_burned_hook(output_dir, filename):
         filename = m.group(1)
 
 
+def _strip_cinematic(output_dir, filename):
+    """Walk ``fx_<ts>_`` prefixes back to the file without the cinematic look.
+    Same fail-safe contract as _strip_burned_captions."""
+    while True:
+        m = re.match(r'^fx_(?:\d+_)?[0-9a-f]{6}_(.+)$', filename)
+        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
+            return filename
+        filename = m.group(1)
+
+
+def _strip_music(output_dir, filename):
+    """Walk ``music_<ts>_<hex>_`` prefixes back to the file without the
+    background track. Same fail-safe contract as _strip_burned_captions."""
+    while True:
+        m = re.match(r'^(?:music|mu)_(?:\d+_)?[0-9a-f]{6}_(.+)$', filename)
+        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
+            return filename
+        filename = m.group(1)
+
+
+# The layers that live UNDER the hook and the captions, innermost first. Every
+# one is a filename prefix over the one below (see _canonical_clip_file), is
+# rebuilt from a spec stored on the clip (``cinematic``, ``music``), and can be
+# re-derived on its own: changing the music keeps the graded fx_ file under it,
+# changing the look re-derives the music on top of the new grade.
+def _strip_overlay(output_dir, filename):
+    """Walk ``overlay_<ts>_<hex>_`` prefixes back to the file without the
+    logo/text layer. Same fail-safe contract as _strip_burned_captions."""
+    while True:
+        m = re.match(r'^(?:overlay|ov)_(?:\d+_)?[0-9a-f]{6}_(.+)$', filename)
+        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
+            return filename
+        filename = m.group(1)
+
+
+_UNDER_CAPTION_LAYERS = ("fx", "music", "overlay")
+_LAYER_STRIP = {"fx": lambda d, f: _strip_cinematic(d, f),
+                "music": lambda d, f: _strip_music(d, f),
+                "overlay": lambda d, f: _strip_overlay(d, f)}
+
+
+def _strip_all_layers(output_dir, filename):
+    """The bare render under every burned layer: captions, hook, then the
+    under-caption layers outermost first. Loops until stable so a
+    ``subtitled_<ts>_hooked_<ts>_ov_<hex>_mu_<hex>_fx_<hex>_<clean>``
+    resolves in one call."""
+    while True:
+        stripped = _strip_burned_hook(output_dir, _strip_burned_captions(output_dir, filename))
+        for layer in reversed(_UNDER_CAPTION_LAYERS):
+            stripped = _LAYER_STRIP[layer](output_dir, stripped)
+        if stripped == filename:
+            return filename
+        filename = stripped
+
+
+def _current_clip_file(output_dir, base_name, clip, job, clip_index):
+    """The file a clip currently serves. metadata.json only carries video_url
+    once an edit endpoint wrote it: the generation-time captions/hook live in
+    the in-memory job (rebuilt from disk by _canonical_clip_file on a
+    restart), so an untouched clip read as caption-less here and came back
+    from its first edit without its captions."""
+    mem_clips = (job.get('result') or {}).get('clips') or []
+    mem_url = (mem_clips[clip_index].get('video_url')
+               if clip_index < len(mem_clips) else None) or ''
+    return ((clip.get('video_url') or mem_url).split('/')[-1]
+            or _canonical_clip_file(output_dir, base_name, clip_index))
+
+
+_FORMAT_ALIASES = {"9:16": "vertical", "1:1": "square", "16:9": "horizontal",
+                   "auto": "vertical"}
+
+
+def _clip_output_format(clip, data):
+    """A clip's delivered aspect: its own ``output_format`` once /api/clip/look
+    has changed it, else the job-wide one (``auto`` was always rendered 9:16)."""
+    fmt = clip.get('output_format') or data.get('output_format') or 'vertical'
+    return _FORMAT_ALIASES.get(fmt, fmt)
+
+
+def _burn_styled_captions(video_path, transcript, clip_start, clip_end, style,
+                          split_ranges=None):
+    """Styled twin of main.auto_caption_clip: burn the persisted caption look
+    (``{"preset", "overrides"}``, see caption_styles) onto ``video_path`` as
+    ``subtitled_<ts>_<stem>`` and return that path, or None when the window
+    has no words or the burn failed (the caller then serves the file as is).
+    """
+    try:
+        import subtitles as _subs
+        from ffmpeg_utils import probe_dimensions
+        output_dir = os.path.dirname(video_path)
+        stem = os.path.basename(video_path)
+        generation_id = int(time.time())
+        ass_path = os.path.join(
+            output_dir, f"autosubs_{generation_id}_{uuid.uuid4().hex[:8]}.ass")
+        out_path = os.path.join(output_dir, f"subtitled_{generation_id}_{stem}")
+        if split_ranges is None:
+            split_ranges = layout_ranges.split_ranges(layout_ranges.read(video_path))
+        dims = probe_dimensions(video_path) or (1080, 1920)
+        if not _subs.generate_ass_styled(
+                transcript, clip_start, clip_end, ass_path,
+                preset=style.get('preset'), overrides=style.get('overrides'),
+                video_w=dims[0], video_h=dims[1], split_ranges=split_ranges):
+            return None
+        _subs.burn_subtitles(video_path, ass_path, out_path)
+        return out_path
+    except Exception as e:
+        print(f"⚠️  Styled captions failed on {video_path}: {e}")
+        return None
+
+
+def _apply_cinematic_layer(output_dir, clean_name, effects):
+    """Grade ``clean_name`` into ``fx_<ts>_<clean_name>`` and return that
+    name, or None when the look is a no-op or the pass failed — the clean file
+    is then served untouched, the same fail-open contract as generation.
+
+    The stem MUST be the clean (layer-free) name: the modal's walk-back and
+    _canonical_clip_file reconstruct the original from the prefixes, and the
+    look has to sit under hook and captions, never over them.
+    """
+    fx = cinematic.normalize(effects or {})
+    if cinematic.is_noop(fx):
+        return None
+    src = os.path.join(output_dir, clean_name)
+    # A hex token, no timestamp: two same-second looks must not share a name,
+    # and _canonical_clip_file resolves by mtime anyway. Short on purpose —
+    # ext4 caps a filename at 255 BYTES and a max-length title (120 B) plus
+    # uuid, recut_, captions and the three under-caption layers already sits
+    # in the 240s; the timestamped forms overflowed it.
+    out_name = f"fx_{uuid.uuid4().hex[:6]}_{clean_name}"
+    out_path = os.path.join(output_dir, out_name)
+    if not cinematic.apply_cinematic_effects(src, fx, output_path=out_path):
+        return None
+    # Captions on a stacked (SPLIT) stretch follow the layout sidecar; the
+    # graded copy needs the same one or they fall back to the bottom.
+    try:
+        ranges = layout_ranges.read(src)
+        if ranges:
+            layout_ranges.write(out_path, [
+                (r["start"], r["end"], r["layout"]) for r in ranges])
+    except Exception:
+        pass
+    return out_name
+
+
+def _apply_music_layer(output_dir, clean_name, spec):
+    """Mix the clip's background track under ``clean_name`` into
+    ``music_<ts>_<hex>_<clean_name>`` and return that name, or None when
+    there is no track or the mix failed (fail-open, file served as is)."""
+    spec = music.normalize(spec)
+    if not spec:
+        return None
+    src = os.path.join(output_dir, clean_name)
+    out_name = music.derived_name(clean_name)
+    if not music.apply_music(src, spec, os.path.join(output_dir, out_name)):
+        return None
+    try:
+        ranges = layout_ranges.read(src)
+        if ranges:
+            layout_ranges.write(os.path.join(output_dir, out_name), [
+                (r["start"], r["end"], r["layout"]) for r in ranges])
+    except Exception:
+        pass
+    return out_name
+
+
+def _apply_overlay_layer(output_dir, clean_name, items):
+    """Composite the clip's logo/text overlays onto ``clean_name`` into
+    ``overlay_<ts>_<hex>_<clean_name>``; None when the list is empty or the
+    pass failed (fail-open, file served as is)."""
+    items = overlays.normalize(items)
+    if not items:
+        return None
+    src = os.path.join(output_dir, clean_name)
+    out_name = overlays.derived_name(clean_name)
+    if not overlays.apply_overlays(src, items, os.path.join(output_dir, out_name)):
+        return None
+    try:
+        ranges = layout_ranges.read(src)
+        if ranges:
+            layout_ranges.write(os.path.join(output_dir, out_name), [
+                (r["start"], r["end"], r["layout"]) for r in ranges])
+    except Exception:
+        pass
+    return out_name
+
+
+def _apply_layer(layer, output_dir, clip, path):
+    """One under-caption layer from the clip's stored spec. Returns the new
+    path, or None when the spec is empty / the pass failed."""
+    name = os.path.basename(path)
+    if layer == "fx":
+        look = clip.get('cinematic') or {}
+        if cinematic.is_noop(cinematic.normalize(look)):
+            return None
+        new = _apply_cinematic_layer(output_dir, name, look)
+    elif layer == "music":
+        new = _apply_music_layer(output_dir, name, clip.get('music'))
+    elif layer == "overlay":
+        new = _apply_overlay_layer(output_dir, name, clip.get('overlays'))
+    else:
+        return None
+    return os.path.join(output_dir, new) if new else None
+
+
+def _apply_layers(output_dir, clip, path, layers=_UNDER_CAPTION_LAYERS):
+    for layer in layers:
+        new = _apply_layer(layer, output_dir, clip, path)
+        if new:
+            path = new
+    return path
+
+
+def _relayer(output_dir, clip, current_file, changed):
+    """Re-derive ``changed`` and every under-caption layer above it from the
+    clip's specs, keeping the files below it. Captions and hook are stripped
+    (the caller puts captions back). Returns the new served path."""
+    base = _strip_burned_hook(output_dir, _strip_burned_captions(output_dir, current_file))
+    idx = _UNDER_CAPTION_LAYERS.index(changed)
+    for layer in reversed(_UNDER_CAPTION_LAYERS[idx:]):
+        base = _LAYER_STRIP[layer](output_dir, base)
+    return _apply_layers(output_dir, clip, os.path.join(output_dir, base),
+                         _UNDER_CAPTION_LAYERS[idx:])
+
+
+def _clip_layer_hooks(output_dir, clip):
+    """(effects, captioner) for recut.perform_recut, carrying the clip's own
+    look, music and caption style through a re-render so a trim or format
+    change puts back what the user chose instead of the deployment defaults."""
+    style = clip.get('caption_style') or {}
+
+    def effects(clean_path):
+        final = _apply_layers(output_dir, clip, clean_path)
+        return final if final != clean_path else None
+
+    def captioner(video_path, transcript, clip_start, clip_end):
+        if style.get('preset'):
+            return _burn_styled_captions(video_path, transcript, clip_start,
+                                         clip_end, style)
+        import main as _main
+        return _main.auto_caption_clip(video_path, transcript, clip_start, clip_end)
+
+    return effects, captioner
+
+
 def _reapply_captions(job_id, clip_index, video_path):
     """Re-burn the default captions onto a freshly derived file.
 
@@ -534,18 +791,19 @@ def _reapply_captions(job_id, clip_index, video_path):
         if not transcript or clip_index >= len(clips):
             return None
         clip = clips[clip_index]
-        import main as _main
+        # The user's chosen look (preset + overrides, /api/subtitle) beats the
+        # deployment default; without it a format change or a hook edit
+        # silently reset every restyled clip to the stock captions.
+        _fx, caption = _clip_layer_hooks(os.path.dirname(video_path), clip)
         # A recut clip is a concatenation of source segments, so the flat
         # start..end window is wrong for it — caption against the clip-relative
         # remapped transcript instead (same trick /api/subtitle uses).
         recipe_segments = (clip.get('recipe') or {}).get('segments')
         if recipe_segments:
             v_transcript = recut.virtual_transcript(transcript, recipe_segments)
-            return _main.auto_caption_clip(
-                video_path, v_transcript, 0.0,
-                recut.total_duration(recipe_segments))
-        return _main.auto_caption_clip(video_path, transcript,
-                                       clip['start'], clip['end'])
+            return caption(video_path, v_transcript, 0.0,
+                           recut.total_duration(recipe_segments))
+        return caption(video_path, transcript, clip['start'], clip['end'])
     except Exception as e:
         print(f"⚠️  Could not re-apply captions to {video_path}: {e}")
         return None
@@ -2955,6 +3213,12 @@ class SubtitleRequest(BaseModel):
     # instead of regenerating from the stored transcript — without this, text
     # edits in the modal were silently discarded on the server render path.
     words: Optional[List[CaptionWordIn]] = None
+    # The ClipForge-style look (caption_styles): a preset id plus optional
+    # overrides. When ``preset`` is set the legacy fields above are ignored and
+    # the choice is persisted on the clip as ``caption_style`` so later
+    # re-renders (format change, trim, cinematic look) burn the same captions.
+    preset: Optional[str] = None
+    overrides: Optional[Dict[str, Any]] = None
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
@@ -3259,6 +3523,10 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
     v_transcript = (recut.virtual_transcript(transcript, segments)
                     if req.reapply_captions else None)
 
+    # The clip's cinematic look and caption style ride along, so a trim keeps
+    # the grade and the captions come back in the user's style, not the stock one.
+    look_effects, look_captioner = _clip_layer_hooks(output_dir, clip)
+
     def run_recut():
         if fast:
             return recut.perform_recut(
@@ -3266,14 +3534,16 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
                 segments=recut.rebase_segments(
                     segments, canonical_range['start'], canonical_range['end']),
                 output_dir=output_dir, clean_name=clean_name,
-                reframe=False, captions_transcript=v_transcript)
+                reframe=False, captions_transcript=v_transcript,
+                captioner=look_captioner, effects=look_effects)
         return recut.perform_recut(
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
-            reframe=True, output_format=data.get('output_format', 'auto'),
+            reframe=True, output_format=_clip_output_format(clip, data),
             watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
-            captions_transcript=v_transcript)
+            captions_transcript=v_transcript,
+            captioner=look_captioner, effects=look_effects)
 
     try:
         loop = asyncio.get_event_loop()
@@ -3395,7 +3665,7 @@ async def get_clip_scenes(job_id: str, clip_index: int, request: Request):
     if clip_index < 0 or clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
 
-    if data.get('output_format') == 'horizontal':
+    if _clip_output_format(clips[clip_index], data) == 'horizontal':
         raise HTTPException(
             status_code=400,
             detail="Horizontal clips keep the full frame; there is no crop to reframe.")
@@ -3526,6 +3796,409 @@ async def get_clip_scenes(job_id: str, clip_index: int, request: Request):
     }
 
 
+class LookRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    # None = keep the clip's current aspect; vertical | square | horizontal
+    # (9:16 / 1:1 / 16:9 are accepted aliases).
+    output_format: Optional[str] = None
+    # None = keep the clip's current look; a dict with everything off/none
+    # removes it. Keys as cinematic.DEFAULTS.
+    cinematic: Optional[Dict[str, Any]] = None
+    reapply_captions: bool = True
+
+
+@app.post("/api/clip/look")
+async def set_clip_look(req: LookRequest, request: Request):
+    """Change a finished clip's output format and/or cinematic look.
+
+    Both used to be chosen once, before generation, for the whole job. Clips
+    now render plain 9:16 and the user decides per clip (or for all of them,
+    the dashboard just loops) afterwards:
+
+    - A new **format** re-renders the cut from the retained source through
+      the same reframe engine generation used (``recut.perform_recut`` with
+      the clip's recipe, framing and hand-set crops), so it needs the source
+      and answers 409 once retention has removed it. No transcription, no
+      Gemini call.
+    - A new **look** is one ffmpeg pass over the bare render into an
+      ``fx_<ts>_<clean>.mp4`` derivative, never in place: the clean clip
+      stays for the next change, exactly like captions and hooks.
+
+    Captions the clip already had go back on top afterwards, in the style the
+    user picked (``caption_style``); a burned hook does not (the hook overlay
+    is no longer offered in the dashboard, and re-burning it would need the
+    original text and style for API-made hooks).
+    """
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+
+    if req.output_format is None and req.cinematic is None:
+        raise HTTPException(status_code=400, detail="Nothing to change: send output_format and/or cinematic.")
+    target_fmt = None
+    if req.output_format is not None:
+        target_fmt = _FORMAT_ALIASES.get(str(req.output_format).lower(), str(req.output_format).lower())
+        if target_fmt not in ("vertical", "square", "horizontal"):
+            raise HTTPException(status_code=400, detail="output_format must be vertical, square or horizontal.")
+
+    # Same lock as /rerender and /reframe: all three read-modify-write the
+    # job's metadata.json and share the canonical files.
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        return await _look_locked(req, request, job, target_fmt)
+
+
+async def _look_locked(req: LookRequest, request: Request, job, target_fmt):
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+
+    clips = data.get('shorts', [])
+    if req.clip_index < 0 or req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip = clips[req.clip_index]
+
+    current_fmt = _clip_output_format(clip, data)
+    target_fmt = target_fmt or current_fmt
+    rerender = target_fmt != current_fmt
+    effects = cinematic.normalize(req.cinematic if req.cinematic is not None
+                                  else (clip.get('cinematic') or {}))
+    has_look = not cinematic.is_noop(effects)
+
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    clean_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
+    current_file = _current_clip_file(output_dir, base_name, clip, job, req.clip_index)
+    had_captions = current_file.startswith('subtitled_')
+    bare = _strip_all_layers(output_dir, current_file)
+
+    segments, _canonical_range = _clip_recipe_parts(clip)
+    source_path = _locate_source(req.job_id) if rerender else None
+    if rerender and not source_path:
+        raise HTTPException(
+            status_code=409,
+            detail="The source video is no longer on the server; changing the "
+                   "output format needs it.")
+    if not rerender and not os.path.exists(os.path.join(output_dir, bare)):
+        raise HTTPException(status_code=404, detail=f"Clip file not found: {bare}")
+
+    framing = (clip.get('recipe') or {}).get('framing') or 'auto'
+    force_strategy = _FRAMING_STRATEGIES.get(framing)
+    crop_overrides = {}
+    for key, value in (clip.get('crop_overrides') or {}).items():
+        try:
+            crop_overrides[int(key)] = value
+        except (TypeError, ValueError):
+            continue
+
+    # A format change is a full reframe from source, metered like /rerender;
+    # a look on the same cut is one short ffmpeg pass and free, like captions.
+    total = recut.total_duration(segments)
+    minutes = (max(1, math.ceil(total / 60.0)) if (BILLING_ENABLED and rerender) else 0)
+    reservation_id = await reserve_managed_action(request, minutes, req.job_id, "look")
+
+    transcript = data.get('transcript') or {}
+    v_transcript = (recut.virtual_transcript(transcript, segments)
+                    if (req.reapply_captions and had_captions and transcript.get('segments'))
+                    else None)
+    # The hooks read the clip's stored look/style; make them see the new one.
+    hook_clip = dict(clip, cinematic=(effects if has_look else None))
+    look_effects, look_captioner = _clip_layer_hooks(output_dir, hook_clip)
+
+    def run():
+        if rerender:
+            return recut.perform_recut(
+                input_path=source_path, segments=segments,
+                output_dir=output_dir, clean_name=clean_name,
+                reframe=True, output_format=target_fmt,
+                watermark=bool(job.get('watermark')),
+                force_strategy=force_strategy,
+                crop_overrides=crop_overrides or None,
+                captions_transcript=v_transcript,
+                captioner=look_captioner, effects=look_effects)
+        # Same cut, new look: grade the bare render, captions back on top.
+        served = bare
+        graded = look_effects(os.path.join(output_dir, bare))
+        if graded:
+            served = os.path.basename(graded)
+        if v_transcript:
+            captioned = look_captioner(os.path.join(output_dir, served),
+                                       v_transcript, 0.0, total)
+            if captioned:
+                served = os.path.basename(captioned)
+        return served, bare
+
+    try:
+        loop = asyncio.get_event_loop()
+        served_name, clean_used = await loop.run_in_executor(None, run)
+    except Exception as e:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        print(f"Look Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    new_video_url = f"/videos/{req.job_id}/{served_name}"
+    updates = {
+        'video_url': new_video_url,
+        'output_format': target_fmt,
+        'cinematic': effects if has_look else None,
+    }
+    if rerender:
+        # The stacked stretches of THIS render; captions follow them.
+        updates['layout_ranges'] = layout_ranges.read(os.path.join(output_dir, clean_used))
+    clip.update(updates)
+    data['shorts'] = clips
+    with open(json_files[0], 'w') as f:
+        json.dump(data, f, indent=2)
+    mem_clips = (job.get('result') or {}).get('clips') or []
+    if req.clip_index < len(mem_clips):
+        mem_clips[req.clip_index].update(updates)
+
+    _archive_clip_edit_bg(req.job_id, req.clip_index, served_name)
+    if reservation_id:
+        await _metering.commit_reservation(reservation_id)
+    return {
+        "success": True,
+        "new_video_url": new_video_url,
+        "output_format": target_fmt,
+        "cinematic": updates['cinematic'],
+        "captions": served_name.startswith('subtitled_'),
+        "rerendered": rerender,
+    }
+
+
+class MusicRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    # {track, volume_db, duck, start}; None or no track = remove the music.
+    music: Optional[Dict[str, Any]] = None
+    reapply_captions: bool = True
+
+
+@app.get("/api/music")
+async def get_music_tracks():
+    """The background-music library (assets/music), previewable at /music/<file>."""
+    return {"tracks": music.list_tracks()}
+
+
+@app.post("/api/music/upload")
+async def upload_music_track(request: Request, file: UploadFile = File(...)):
+    """Add a track to the library: audio as-is, a video's audio ripped to m4a."""
+    await require_managed_entitlement(request)
+    try:
+        loop = asyncio.get_event_loop()
+        track = await loop.run_in_executor(None, music.save_track, file.filename, file.file)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"track": track}
+
+
+@app.post("/api/clip/music")
+async def set_clip_music(req: MusicRequest, request: Request):
+    """Mix a background track under a finished clip, or remove it.
+
+    One audio-only ffmpeg pass (video stream copied) into a ``music_`` layer
+    right above the cinematic look: the voice keys a sidechain compressor
+    that ducks the track while someone speaks (music.build_audio_graph), the
+    resting level is ``volume_db``. Captions the clip had go back on top in
+    the user's style. Free, like captions: seconds of work, no reframe.
+    """
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+
+    spec = music.normalize(req.music)
+    if spec and not music.resolve_track(spec["track"]):
+        raise HTTPException(status_code=404, detail=f"Music track not found: {spec['track']}")
+
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        return await _music_locked(req, request, job, spec)
+
+
+async def _music_locked(req: MusicRequest, request: Request, job, spec):
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if req.clip_index < 0 or req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip = clips[req.clip_index]
+
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    current_file = _current_clip_file(output_dir, base_name, clip, job, req.clip_index)
+    if not os.path.exists(os.path.join(output_dir, current_file)):
+        raise HTTPException(status_code=404, detail=f"Clip file not found: {current_file}")
+    had_captions = current_file.startswith('subtitled_')
+
+    segments, _range = _clip_recipe_parts(clip)
+    total = recut.total_duration(segments)
+    transcript = data.get('transcript') or {}
+    v_transcript = (recut.virtual_transcript(transcript, segments)
+                    if (req.reapply_captions and had_captions and transcript.get('segments'))
+                    else None)
+    hook_clip = dict(clip, music=spec)
+    _fx, captioner = _clip_layer_hooks(output_dir, hook_clip)
+
+    def run():
+        path = _relayer(output_dir, hook_clip, current_file, "music")
+        served = os.path.basename(path)
+        if v_transcript:
+            captioned = captioner(path, v_transcript, 0.0, total)
+            if captioned:
+                served = os.path.basename(captioned)
+        return served
+
+    try:
+        loop = asyncio.get_event_loop()
+        served_name = await loop.run_in_executor(None, run)
+    except Exception as e:
+        print(f"Music Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    new_video_url = f"/videos/{req.job_id}/{served_name}"
+    updates = {'video_url': new_video_url, 'music': spec}
+    clip.update(updates)
+    data['shorts'] = clips
+    with open(json_files[0], 'w') as f:
+        json.dump(data, f, indent=2)
+    mem_clips = (job.get('result') or {}).get('clips') or []
+    if req.clip_index < len(mem_clips):
+        mem_clips[req.clip_index].update(updates)
+    _archive_clip_edit_bg(req.job_id, req.clip_index, served_name)
+    return {
+        "success": True,
+        "new_video_url": new_video_url,
+        "music": spec,
+        "captions": served_name.startswith('subtitled_'),
+    }
+
+
+class OverlaysRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    # overlays.normalize schema; [] removes the layer.
+    overlays: Optional[List[Dict[str, Any]]] = None
+    reapply_captions: bool = True
+
+
+@app.get("/api/overlays/assets")
+async def get_overlay_assets():
+    """The logo library (assets/overlays), served at /overlays/<file>."""
+    return {"assets": overlays.list_assets()}
+
+
+@app.post("/api/overlays/upload")
+async def upload_overlay_asset(request: Request, file: UploadFile = File(...)):
+    await require_managed_entitlement(request)
+    try:
+        loop = asyncio.get_event_loop()
+        asset = await loop.run_in_executor(None, overlays.save_asset, file.filename, file.file)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"asset": asset}
+
+
+@app.post("/api/clip/overlays")
+async def set_clip_overlays(req: OverlaysRequest, request: Request):
+    """Burn logo/text overlays onto a finished clip, or remove them.
+
+    Every item is placed in fractions of the frame, rasterised by PIL into one
+    RGBA layer and composited in a single ffmpeg pass (overlays.apply_overlays)
+    into an ``overlay_`` derivative above music/look and below the captions,
+    which go back on top in the user's style. Same list on every clip of a
+    job lands in the same relative spot whatever the clip's format.
+    """
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+
+    items = overlays.normalize(req.overlays or [])
+    for item in items:
+        if item["type"] == "image" and not overlays.resolve_asset(item["asset"]):
+            raise HTTPException(status_code=404, detail=f"Overlay image not found: {item['asset']}")
+
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        return await _overlays_locked(req, request, job, items)
+
+
+async def _overlays_locked(req: OverlaysRequest, request: Request, job, items):
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if req.clip_index < 0 or req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip = clips[req.clip_index]
+
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    current_file = _current_clip_file(output_dir, base_name, clip, job, req.clip_index)
+    if not os.path.exists(os.path.join(output_dir, current_file)):
+        raise HTTPException(status_code=404, detail=f"Clip file not found: {current_file}")
+    had_captions = current_file.startswith('subtitled_')
+
+    segments, _range = _clip_recipe_parts(clip)
+    total = recut.total_duration(segments)
+    transcript = data.get('transcript') or {}
+    v_transcript = (recut.virtual_transcript(transcript, segments)
+                    if (req.reapply_captions and had_captions and transcript.get('segments'))
+                    else None)
+    hook_clip = dict(clip, overlays=items)
+    _fx, captioner = _clip_layer_hooks(output_dir, hook_clip)
+
+    def run():
+        path = _relayer(output_dir, hook_clip, current_file, "overlay")
+        served = os.path.basename(path)
+        if v_transcript:
+            captioned = captioner(path, v_transcript, 0.0, total)
+            if captioned:
+                served = os.path.basename(captioned)
+        return served
+
+    try:
+        loop = asyncio.get_event_loop()
+        served_name = await loop.run_in_executor(None, run)
+    except Exception as e:
+        print(f"Overlay Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    new_video_url = f"/videos/{req.job_id}/{served_name}"
+    updates = {'video_url': new_video_url, 'overlays': items}
+    clip.update(updates)
+    data['shorts'] = clips
+    with open(json_files[0], 'w') as f:
+        json.dump(data, f, indent=2)
+    mem_clips = (job.get('result') or {}).get('clips') or []
+    if req.clip_index < len(mem_clips):
+        mem_clips[req.clip_index].update(updates)
+    _archive_clip_edit_bg(req.job_id, req.clip_index, served_name)
+    return {
+        "success": True,
+        "new_video_url": new_video_url,
+        "overlays": items,
+        "captions": served_name.startswith('subtitled_'),
+    }
+
+
 @app.post("/api/clip/reframe")
 async def reframe_clip(req: ReframeRequest, request: Request):
     """Re-render a clip with hand-framed scenes, leaving its cut untouched.
@@ -3585,7 +4258,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
         raise HTTPException(status_code=404, detail="Clip not found")
     clip = clips[req.clip_index]
 
-    if data.get('output_format') == 'horizontal':
+    if _clip_output_format(clip, data) == 'horizontal':
         raise HTTPException(
             status_code=400,
             detail="Horizontal clips keep the full frame; there is no crop to reframe.")
@@ -3625,16 +4298,18 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
     # and captioning and the path blew past the filesystem limit:
     # "Error opening output ...: File name too long".
     clean_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
+    look_effects, look_captioner = _clip_layer_hooks(output_dir, clip)
 
     def run():
         return recut.perform_recut(
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
-            reframe=True, output_format=data.get('output_format', 'auto'),
+            reframe=True, output_format=_clip_output_format(clip, data),
             watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
             crop_overrides=overrides,
-            captions_transcript=v_transcript)
+            captions_transcript=v_transcript,
+            captioner=look_captioner, effects=look_effects)
 
     try:
         loop = asyncio.get_event_loop()
@@ -4013,14 +4688,22 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         await _metering.commit_reservation(reservation_id)
 
     # 3. Update Result and Metadata
+    # The chosen look travels with the clip so every later re-render
+    # (/api/clip/look, /rerender, /reframe, /hook) burns these captions back.
+    # A legacy-field request clears it: those fields are not persisted.
+    caption_style = ({"preset": req.preset,
+                      "overrides": caption_styles.normalize_overrides(req.overrides)}
+                     if styled else None)
     # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):
          job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-    
+         job['result']['clips'][req.clip_index]['caption_style'] = caption_style
+
     # Update Metadata on Disk (Persistence)
     try:
         if req.clip_index < len(clips):
             clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+            clips[req.clip_index]['caption_style'] = caption_style
             # Update the main data structure
             data['shorts'] = clips
             
@@ -4038,6 +4721,28 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         "success": True,
         "new_video_url": f"/videos/{req.job_id}/{output_filename}"
     }
+
+@app.get("/api/caption-styles")
+async def get_caption_styles():
+    """The caption looks the dashboard offers: presets, theme bundles, the
+    override vocabulary and the bundled fonts (served under /fonts). Static
+    data, so no auth — same as /api/translate/languages."""
+    return {
+        "presets": caption_styles.presets_for_api(),
+        "themes": caption_styles.themes_for_api(),
+        "default": caption_styles.DEFAULT_PRESET,
+        "swatches": caption_styles.SWATCHES,
+        "animations": list(caption_styles.ANIMATIONS),
+        "positions": list(caption_styles.POSITIONS),
+        "position_grid": caption_styles.POSITION_GRID,
+        "fonts": caption_styles.list_fonts(),
+    }
+
+
+@app.get("/api/fonts")
+async def get_fonts():
+    return {"fonts": caption_styles.list_fonts()}
+
 
 class RemoveSubtitlesRequest(BaseModel):
     job_id: str

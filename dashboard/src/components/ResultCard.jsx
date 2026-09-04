@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Clapperboard, Music, ImagePlus } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import SubtitleModal from './SubtitleModal';
-import HookModal from './HookModal';
+import LookModal from './LookModal';
+import MusicModal from './MusicModal';
+import OverlayEditor from './OverlayEditor';
 import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
@@ -36,11 +38,50 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+// Badge labels for the clip's output format and colour grade. Mirrors the
+// option lists in LookModal (kept local: component files may only export
+// components under the react-refresh lint rule).
+const FORMAT_LABELS = { vertical: '9:16', square: '1:1', horizontal: '16:9' };
+const GRADE_LABELS = {
+    warm: 'Warm', cool: 'Cool', teal_orange: 'Teal & Orange',
+    vintage: 'Vintage', vibrant: 'Vibrant', bw: 'Black & White',
+};
+
+// Tailwind classes for the preview column per output format. Written out in
+// full (not composed) so the JIT scanner finds them.
+const PREVIEW_ASPECT = {
+    vertical: 'aspect-[9/16] md:w-[236px]',
+    square: 'aspect-square md:w-[320px]',
+    horizontal: 'aspect-video md:w-[320px]',
+};
+
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, onBulkLook, onBulkMusic, onBulkOverlays, clipCount = 1, bulkProgress, bulkLookProgress, bulkMusicProgress, bulkOverlaysProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
+    const [showLookModal, setShowLookModal] = useState(false);
+    const [showMusicModal, setShowMusicModal] = useState(false);
+    const [showOverlayEditor, setShowOverlayEditor] = useState(false);
     const [showWatermarkModal, setShowWatermarkModal] = useState(false);
+    // The clip's output format, mirrored locally so the card reflects a look
+    // change before the parent refreshes the job result.
+    const [outputFormat, setOutputFormat] = useState(clip.output_format || 'vertical');
+    useEffect(() => {
+        setOutputFormat(clip.output_format || 'vertical');
+    }, [clip.output_format]);
+    // The clip's background music ({ track, volume_db, duck, start } or null),
+    // mirrored locally for the same reason: the badge and the modal reflect an
+    // apply before the parent refreshes the job result.
+    const [music, setMusic] = useState(clip.music || null);
+    useEffect(() => {
+        setMusic(clip.music || null);
+    }, [clip.music]);
+    // The clip's logo/text overlays (array of items or []), mirrored locally
+    // for the badge and the editor's initial state.
+    const [overlays, setOverlays] = useState(Array.isArray(clip.overlays) ? clip.overlays : []);
+    useEffect(() => {
+        setOverlays(Array.isArray(clip.overlays) ? clip.overlays : []);
+    }, [clip.overlays]);
     const { plan } = useAuth();
     const videoRef = React.useRef(null);
     // Pristine base clip (no burned subtitles/hook), stable regardless of how
@@ -195,9 +236,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
-    const [isHooking, setIsHooking] = useState(false);
+    const [isLooking, setIsLooking] = useState(false);
+    const [isApplyingMusic, setIsApplyingMusic] = useState(false);
+    const [isApplyingOverlays, setIsApplyingOverlays] = useState(false);
     const [isTranslating, setIsTranslating] = useState(false);
-    const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [editError, setEditError] = useState(null);
 
@@ -225,10 +267,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // here would silently drop those burns — chain via server FFmpeg instead.
     const hasServerBurns = /(^|_)(subtitled|hook|hooked)_/.test(serverVideoFile || '');
 
-    // The hook currently burned into the server file (auto-hook or a manual
-    // one). /api/hook REPLACES it; tracked locally so the modal stays honest
-    // after edits without refetching the job.
-    const [burnedHook, setBurnedHook] = useState(clip.auto_hook?.text || null);
+    // The file UNDER the caption and overlay layers, for the overlay editor's
+    // stage: previewing the current file would show the burned overlays under
+    // the editable copies of the same items. Same prefix scheme the server
+    // walks back (subtitled_<ts>_ outermost, then the legacy hook, then the
+    // ov_<hex>_ layer); the stripped name is still served from /videos/.
+    const overlayStageFile = (serverVideoFile || '')
+        .replace(/^subtitled_\d+_/, '')
+        .replace(/^(?:hooked_\d+_|hook_)/, '')
+        .replace(/^(?:ov|overlay)_(?:\d+_)?[0-9a-f]{6}_/, '');
+    const overlayStageUrl = (serverVideoFile && overlayStageFile !== serverVideoFile && jobId)
+        ? getApiUrl(`/videos/${jobId}/${overlayStageFile}`)
+        : currentVideoUrl;
 
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
@@ -490,93 +540,116 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         }
     };
 
-    const handleHook = async (hookData) => {
-        setIsHooking(true);
+    // Output format and/or cinematic look for this clip. The server re-renders
+    // from the source video (a format change) or re-grades the current render
+    // and re-applies any captions the clip already had. Only the fields the
+    // user changed travel; the modal decides which those are.
+    const handleLook = async (options) => {
+        setIsLooking(true);
         setEditError(null);
         try {
-            if (hookData.remotion && !hasServerBurns) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, hook: hookData.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-                return;
-            }
+            const body = { job_id: jobId, clip_index: index, reapply_captions: true };
+            if (options.outputFormat != null) body.output_format = options.outputFormat;
+            if (options.cinematic != null) body.cinematic = options.cinematic;
 
-            // Fallback: legacy FFmpeg
-            const payload = typeof hookData === 'string'
-                ? { text: hookData, position: 'top', size: 'M' }
-                : hookData;
-
-            const res = await apiFetch('/api/hook', {
+            const res = await apiFetch('/api/clip/look', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    text: payload.text,
-                    position: payload.position,
-                    size: payload.size,
-                    style: payload.style || 'classic',
-                    duration_seconds: payload.remotion?.displayDurationSec ?? null,
-                    input_filename: serverVideoFile
-                })
+                body: JSON.stringify(body),
             });
 
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) {
+                // 409 = the source video is gone (retention sweep), so a format
+                // change has nothing to re-render from. Its detail says so.
+                const errText = await res.text();
+                let detail = errText;
+                try { detail = JSON.parse(errText).detail || errText; } catch { /* plain text */ }
+                throw new Error(detail);
+            }
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
-                setBurnedHook(data.burned_hook?.text ?? payload.text ?? null);
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                if (options.outputFormat) setOutputFormat(options.outputFormat);
                 if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
+                setShowLookModal(false);
             }
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
         } finally {
-            setIsHooking(false);
+            setIsLooking(false);
         }
     };
 
-    // Strip the burned hook (auto-hook or manual) off the server file.
-    const handleRemoveHook = async () => {
-        setIsHooking(true);
+    // Background music for this clip. `spec` is { track, volume_db, duck,
+    // start } or null to remove it; the server mixes it under the current
+    // render (ducked under speech) and answers with the new file.
+    const handleMusic = async (spec) => {
+        setIsApplyingMusic(true);
         setEditError(null);
         try {
-            const res = await apiFetch('/api/hook', {
+            const res = await apiFetch('/api/clip/music', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    remove: true,
-                    input_filename: serverVideoFile,
-                }),
+                body: JSON.stringify({ job_id: jobId, clip_index: index, music: spec }),
             });
-            if (!res.ok) throw new Error(await res.text());
+
+            if (!res.ok) {
+                const errText = await res.text();
+                let detail = errText;
+                try { detail = JSON.parse(errText).detail || errText; } catch { /* plain text */ }
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
-                setBurnedHook(null);
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                setMusic(data.music ?? spec ?? null);
                 if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
+                setShowMusicModal(false);
             }
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
         } finally {
-            setIsHooking(false);
+            setIsApplyingMusic(false);
+        }
+    };
+
+    // Logo and text overlays for this clip. `items` is the full list (every
+    // geometry a fraction of the frame); an empty list removes the layer. The
+    // server composites it over the current render and answers with the new
+    // file plus the list it kept.
+    const handleOverlays = async (items) => {
+        setIsApplyingOverlays(true);
+        setEditError(null);
+        try {
+            const res = await apiFetch('/api/clip/overlays', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ job_id: jobId, clip_index: index, overlays: items }),
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                let detail = errText;
+                try { detail = JSON.parse(errText).detail || errText; } catch { /* plain text */ }
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+            const data = await res.json();
+            if (data.new_video_url) {
+                setServerVideoFile(data.new_video_url.split('/').pop());
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                setOverlays(Array.isArray(data.overlays) ? data.overlays : items);
+                if (videoRef.current) videoRef.current.load();
+                setShowOverlayEditor(false);
+            }
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsApplyingOverlays(false);
         }
     };
 
@@ -726,15 +799,38 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         : currentVideoUrl;
 
     const durationReadout = formatDuration(clip);
+    // Track name for the badge: the spec stores the file, so strip the
+    // extension and keep it short enough not to wrap the badge row.
+    const musicLabel = music?.track
+        ? (() => {
+            const name = String(music.track).replace(/\.[a-z0-9]{2,5}$/i, '');
+            return name.length > 18 ? `${name.slice(0, 17)}…` : name;
+        })()
+        : null;
+
+    // The actions grid is 2 columns on phones and 3 from md up. Download is
+    // the last cell, so it stretches to fill whatever the row is short by.
+    // Written out in full so the Tailwind scanner finds every class.
+    const actionCount = 8 + (onEditClip ? 1 : 0) + (onReframeClip ? 1 : 0);
+    const downloadSpan = [
+        actionCount % 2 === 1 ? 'col-span-2' : 'col-span-1',
+        { 0: 'md:col-span-1', 1: 'md:col-span-3', 2: 'md:col-span-2' }[actionCount % 3],
+    ].join(' ');
+
+    const gradeLabel = clip.cinematic?.color_grade && clip.cinematic.color_grade !== 'none'
+        ? (GRADE_LABELS[clip.cinematic.color_grade] || clip.cinematic.color_grade)
+        : null;
 
     return (
         <div className="card overflow-hidden flex flex-col md:flex-row group hover:border-rule2 transition-colors animate-fade md:min-h-[420px]" style={{ animationDelay: `${index * 0.1}s` }}>
-            {/* Left: Video Preview — 9:16 column matching the fixed card height */}
+            {/* Left: Video Preview — a column in the clip's aspect on a phone, a
+                fixed width matching the card height from md up (wider for 1:1
+                and 16:9 so the preview is not a sliver). */}
             {/* A full-width 9:16 preview on a phone is ~640px tall on its own,
                 which pushed the title, captions and every action off-screen.
                 Capping the height and centring keeps the whole card scannable
                 without letterboxing the clip. */}
-            <div className="w-full max-w-[calc(64vh*0.5625)] md:max-w-none mx-auto md:mx-0 md:w-[236px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
+            <div className={`w-full max-w-[calc(64vh*0.5625)] md:max-w-none mx-auto md:mx-0 bg-black relative shrink-0 md:aspect-auto group/video ${PREVIEW_ASPECT[outputFormat] || PREVIEW_ASPECT.vertical}`}>
                 <video
                     ref={videoRef}
                     src={playbackUrl}
@@ -819,6 +915,20 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     <div className="flex flex-wrap gap-1.5">
                         {durationReadout && <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0">{durationReadout}</span>}
                         {resolution && <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0">{resolution}</span>}
+                        <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0" title="output format">{FORMAT_LABELS[outputFormat] || FORMAT_LABELS.vertical}</span>
+                        {gradeLabel && <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0" title="cinematic look">{gradeLabel}</span>}
+                        {musicLabel && (
+                            <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1" title={`background music: ${music.track}`}>
+                                <Music size={10} className="shrink-0 text-muted" />
+                                {musicLabel}
+                            </span>
+                        )}
+                        {overlays.length > 0 && (
+                            <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1" title="logo and text overlays burned into this clip">
+                                <ImagePlus size={10} className="shrink-0 text-muted" />
+                                {overlays.length} {overlays.length === 1 ? 'overlay' : 'overlays'}
+                            </span>
+                        )}
                         <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0">#shorts</span>
                         <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0">#viral</span>
                     </div>
@@ -911,12 +1021,30 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </button>
 
                     <button
-                        onClick={() => setShowHookModal(true)}
-                        disabled={isHooking}
+                        onClick={() => setShowLookModal(true)}
+                        disabled={isLooking}
                         className={QUIET_BTN}
                     >
-                        {isHooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isHooking ? 'adding…' : 'viral hook'}
+                        {isLooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Clapperboard size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isLooking ? 'applying…' : 'format & look'}
+                    </button>
+
+                    <button
+                        onClick={() => setShowMusicModal(true)}
+                        disabled={isApplyingMusic}
+                        className={QUIET_BTN}
+                    >
+                        {isApplyingMusic ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Music size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isApplyingMusic ? 'applying…' : 'music'}
+                    </button>
+
+                    <button
+                        onClick={() => setShowOverlayEditor(true)}
+                        disabled={isApplyingOverlays}
+                        className={QUIET_BTN}
+                    >
+                        {isApplyingOverlays ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <ImagePlus size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isApplyingOverlays ? 'applying…' : 'logo & text'}
                     </button>
 
                     <button
@@ -1132,19 +1260,48 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 existingHook={activeLayers.hook}
             />
 
-            <HookModal
-                isOpen={showHookModal}
-                onClose={() => setShowHookModal(false)}
-                onGenerate={handleHook}
-                isProcessing={isHooking}
-                videoUrl={originalVideoUrl}
-                initialText={clip.viral_hook_text}
-                durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
-                existingSubtitles={activeLayers.subtitles}
-                hasCaptions={!!activeLayers.subtitles || /(^|_)subtitled_/.test(serverVideoFile || '')}
-                serverRender={hasServerBurns}
-                burnedHook={burnedHook}
-                onRemove={burnedHook ? handleRemoveHook : null}
+            <LookModal
+                isOpen={showLookModal}
+                onClose={() => setShowLookModal(false)}
+                clip={{ ...clip, output_format: outputFormat }}
+                clipCount={clipCount}
+                bulkProgress={bulkLookProgress}
+                isProcessing={isLooking || (bulkLookProgress?.running ?? false)}
+                onApply={handleLook}
+                onApplyAll={onBulkLook ? async (options) => {
+                    await onBulkLook(options);
+                    setShowLookModal(false);
+                } : undefined}
+            />
+
+            <MusicModal
+                isOpen={showMusicModal}
+                onClose={() => setShowMusicModal(false)}
+                clip={{ ...clip, music }}
+                clipCount={clipCount}
+                bulkProgress={bulkMusicProgress}
+                isProcessing={isApplyingMusic || (bulkMusicProgress?.running ?? false)}
+                onApply={handleMusic}
+                onApplyAll={onBulkMusic ? async (spec) => {
+                    await onBulkMusic(spec);
+                    setShowMusicModal(false);
+                } : undefined}
+                videoUrl={currentVideoUrl}
+            />
+
+            <OverlayEditor
+                isOpen={showOverlayEditor}
+                onClose={() => setShowOverlayEditor(false)}
+                clip={{ ...clip, output_format: outputFormat, overlays }}
+                clipCount={clipCount}
+                bulkProgress={bulkOverlaysProgress}
+                isProcessing={isApplyingOverlays || (bulkOverlaysProgress?.running ?? false)}
+                onApply={handleOverlays}
+                onApplyAll={onBulkOverlays ? async (items) => {
+                    await onBulkOverlays(items);
+                    setShowOverlayEditor(false);
+                } : undefined}
+                videoUrl={overlayStageUrl}
             />
 
             <TranslateModal

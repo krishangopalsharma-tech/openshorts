@@ -158,10 +158,16 @@ def build_filter_complex(effects, width, height):
     return ";".join(graph)
 
 
-def apply_cinematic_effects(video_path, effects):
-    """Burns the cinematic look into ``video_path`` in place. Returns True on
-    success, False (clip kept untouched) on any failure — matches
-    apply_watermark's fail-open contract so a bad filter never kills the job.
+def apply_cinematic_effects(video_path, effects, output_path=None):
+    """Burns the cinematic look into ``video_path``. Returns True on success,
+    False (input kept untouched) on any failure — matches apply_watermark's
+    fail-open contract so a bad filter never kills the job.
+
+    In place by default (the generation-time path, where the clip is about to
+    become the canonical file anyway). With ``output_path`` the graded copy is
+    written there and the input is left alone: the post-generation look
+    endpoint uses that to keep the clean clip for later re-styling, the same
+    way captions and hooks live in ``subtitled_``/``hooked_`` derivatives.
     """
     if is_noop(effects):
         return False
@@ -181,14 +187,14 @@ def apply_cinematic_effects(video_path, effects):
     if graph is None:
         return False
 
-    tmp_path = video_path + ".fx.mp4"
+    tmp_path = (output_path or video_path) + ".fx.mp4"
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", video_path,
            "-filter_complex", graph, "-map", "[fx]", "-map", "0:a?",
            *video_encode_args(QUALITY_FAST), "-c:a", "copy", *METADATA_SCRUB,
            "-movflags", "+faststart", tmp_path]
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800)
     if result.returncode == 0 and os.path.exists(tmp_path):
-        os.replace(tmp_path, video_path)
+        os.replace(tmp_path, output_path or video_path)
         return True
     err = (result.stderr or b"").decode(errors="ignore")[-300:]
     print(f"   ⚠️ Cinematic effects pass failed (clip kept plain): {err}")

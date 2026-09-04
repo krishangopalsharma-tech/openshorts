@@ -266,7 +266,7 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
                   reframe=False, output_format="auto", watermark=False,
                   captions_transcript=None, force_strategy=None,
                   crop_overrides=None, runner=None, renderer=None,
-                  watermarker=None, captioner=None):
+                  watermarker=None, captioner=None, effects=None):
     """Render a recut clip. Returns (served_filename, clean_filename).
 
     - ``input_path``/``segments``: the file to cut from and the times ON THAT
@@ -283,6 +283,11 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
       source width, for scenes the user framed by hand. Source path only, for
       the same reason as ``reframe``: the canonical file is already cropped, so
       its framing can no longer be changed.
+    - ``effects``: ``callable(clean_path) -> derived path or None``, run after
+      the watermark and before the captions. The clip's cinematic look lives
+      here (app.py hands in cinematic.apply on an ``fx_<ts>_`` derivative), so
+      a trim or a format change keeps the grade and the captions still land
+      on top of it.
 
     The renderer/watermarker/captioner hooks default to main.py's
     implementations, imported lazily so this module stays importable without
@@ -325,9 +330,15 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
             (watermarker or _main_attr("apply_watermark"))(out_path)
 
         served_name = out_name
+        caption_target = out_path
+        if effects is not None:
+            graded = effects(out_path)
+            if graded:
+                served_name = os.path.basename(graded)
+                caption_target = graded
         if captions_transcript and captions_transcript.get("segments"):
             caption = captioner or _main_attr("auto_caption_clip")
-            captioned = caption(out_path, captions_transcript,
+            captioned = caption(caption_target, captions_transcript,
                                 0.0, total_duration(segments))
             if captioned:
                 served_name = os.path.basename(captioned)

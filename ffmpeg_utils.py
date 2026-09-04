@@ -174,3 +174,24 @@ def escape_filter_value(value):
     control this: use a neutral name, never one derived from a video title.
     """
     return value.replace('\\', '/').replace(':', '\\:').replace("'", "\\'")
+
+
+def probe_dimensions(video_path, timeout=60):
+    """(width, height) of the first video stream, or None when ffprobe fails.
+
+    One probe for every stage that sizes something to the frame (caption
+    PlayRes, cinematic bar heights) so they cannot disagree about the clip.
+    """
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", video_path],
+            stderr=subprocess.STDOUT, timeout=timeout,
+        ).decode().strip().split("x")
+        w, h = int(out[0]), int(out[1])
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
+    return None

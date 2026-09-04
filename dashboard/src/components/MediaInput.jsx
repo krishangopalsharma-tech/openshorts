@@ -14,7 +14,6 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [acknowledged, setAcknowledged] = useState(false);
-    const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | horizontal | square
     const [showInfo, setShowInfo] = useState(false);
     // Advanced generation controls — empty string means "let the AI decide",
     // which keeps the default pipeline behavior untouched.
@@ -22,42 +21,15 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [targetClips, setTargetClips] = useState('');
     const [clipMinSeconds, setClipMinSeconds] = useState('');
     const [clipMaxSeconds, setClipMaxSeconds] = useState('');
-    // Auto-hook: burn the AI hook text into every clip. On by default; the
-    // choice persists so turning it off sticks across sessions.
-    const [autoHook, setAutoHook] = useState(() => {
-        try { return localStorage.getItem('os_auto_hook') !== '0'; } catch { return true; }
-    });
-    const [autoHookStyle, setAutoHookStyle] = useState(() => {
-        try { return localStorage.getItem('os_auto_hook_style') || 'classic'; } catch { return 'classic'; }
-    });
     // Layout: 'auto' lets the AI pick per video (server default); the others
     // force one on so a podcast host who knows what they uploaded doesn't
     // depend on the detector, and 'none' keeps the plain single crop.
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
-    // Cinematic look: a static grade/glow/grain/vignette/gradient/letterbox
-    // pass burned in once per clip, ported from ClipForge. 'none' + every
-    // toggle off means the request omits the field entirely (see advanced
-    // below), so a user who never opens this stays byte-identical.
-    const [colorGrade, setColorGrade] = useState(() => {
-        try { return localStorage.getItem('os_color_grade') || 'none'; } catch { return 'none'; }
-    });
-    const [glow, setGlow] = useState(() => {
-        try { return localStorage.getItem('os_fx_glow') === '1'; } catch { return false; }
-    });
-    const [grain, setGrain] = useState(() => {
-        try { return localStorage.getItem('os_fx_grain') === '1'; } catch { return false; }
-    });
-    const [vignette, setVignette] = useState(() => {
-        try { return localStorage.getItem('os_fx_vignette') === '1'; } catch { return false; }
-    });
-    const [letterbox, setLetterbox] = useState(() => {
-        try { return localStorage.getItem('os_fx_letterbox') === '1'; } catch { return false; }
-    });
-    const [bottomGradient, setBottomGradient] = useState(() => {
-        try { return localStorage.getItem('os_fx_bottom_gradient') === '1'; } catch { return false; }
-    });
+    // Output format, cinematic look, captions and hook titles are no longer
+    // chosen here: every clip renders plain 9:16 and the user picks those per
+    // clip (or for all clips) from the result card afterwards.
     const infoRef = useRef(null);
 
     // Close the compatibility popover on any outside click.
@@ -100,39 +72,19 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const handleSubmit = (e) => {
         e.preventDefault();
         if (!acknowledged) return;
-        // Omit entirely when every knob is at its off/default value, so a
-        // user who never opens this panel gets the pre-feature request.
-        const cinematic = (colorGrade !== 'none' || glow || grain || vignette || letterbox || bottomGradient)
-            ? {
-                color_grade: colorGrade,
-                glow, grain, vignette, letterbox,
-                bottom_gradient: bottomGradient,
-            }
-            : null;
         const advanced = {
             targetClips: targetClips || null,
             clipMinSeconds: clipMinSeconds || null,
             clipMaxSeconds: clipMaxSeconds || null,
-            autoHook,
-            autoHookStyle,
             layout,
-            cinematic,
         };
         try {
-            localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
-            localStorage.setItem('os_auto_hook_style', autoHookStyle);
             localStorage.setItem('os_layout', layout);
-            localStorage.setItem('os_color_grade', colorGrade);
-            localStorage.setItem('os_fx_glow', glow ? '1' : '0');
-            localStorage.setItem('os_fx_grain', grain ? '1' : '0');
-            localStorage.setItem('os_fx_vignette', vignette ? '1' : '0');
-            localStorage.setItem('os_fx_letterbox', letterbox ? '1' : '0');
-            localStorage.setItem('os_fx_bottom_gradient', bottomGradient ? '1' : '0');
         } catch { /* ignore */ }
         if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...advanced });
+            onProcess({ type: 'url', payload: url, acknowledged: true, ...advanced });
         } else if (mode === 'file' && file) {
-            onProcess({ type: 'file', payload: file, acknowledged: true, outputFormat, ...advanced });
+            onProcess({ type: 'file', payload: file, acknowledged: true, ...advanced });
         }
     };
 
@@ -245,44 +197,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </div>
                 )}
 
-                {/* Output format selector */}
-                <div className="mt-5">
-                    <p className="eyebrow mb-2">Output format</p>
-                    <div className="grid grid-cols-3 gap-2">
-                        {[
-                            { value: 'vertical', label: '9:16', hint: 'Shorts · Reels · TikTok', w: 18, h: 32 },
-                            { value: 'square', label: '1:1', hint: 'Feed posts', w: 28, h: 28 },
-                            { value: 'horizontal', label: '16:9', hint: 'Keep landscape · YouTube', w: 36, h: 20 },
-                        ].map((f) => {
-                            const active = outputFormat === f.value;
-                            return (
-                                <button
-                                    key={f.value}
-                                    type="button"
-                                    onClick={() => setOutputFormat(f.value)}
-                                    className={`py-3 px-2 rounded-input border flex flex-col items-center gap-2 transition-colors
-                                        ${active ? 'border-[color:var(--color-accent)] text-ink' : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
-                                >
-                                    {/* Aspect-ratio glyph */}
-                                    <span
-                                        className="rounded-[3px] border-2 transition-colors"
-                                        style={{
-                                            width: `${f.w}px`,
-                                            height: `${f.h}px`,
-                                            borderColor: active ? 'var(--color-accent)' : 'var(--color-rule-2)',
-                                            backgroundColor: active ? 'color-mix(in srgb, var(--color-accent) 22%, transparent)' : 'transparent',
-                                        }}
-                                    />
-                                    <span className="block font-mono text-sm leading-none">{f.label}</span>
-                                    <span className="block text-[11px] sm:text-[10px] leading-tight text-center text-muted">{f.hint}</span>
-                                </button>
-                            );
-                        })}
-                    </div>
-                </div>
-
                 {/* Advanced generation controls — collapsed by default; blank = AI decides */}
-                <div className="mt-4">
+                <div className="mt-5">
                     <button
                         type="button"
                         onClick={() => setShowAdvanced((v) => !v)}
@@ -290,8 +206,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     >
                         <ChevronDown size={14} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                         advanced options
-                        {(targetClips || clipMinSeconds || clipMaxSeconds || !autoHook
-                            || colorGrade !== 'none' || glow || grain || vignette || letterbox || bottomGradient) && (
+                        {(targetClips || clipMinSeconds || clipMaxSeconds || layout !== 'auto') && (
                             <span className="text-brass">·</span>
                         )}
                     </button>
@@ -347,71 +262,12 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     <option value="none">Single crop only</option>
                                 </select>
                             </div>
-                            <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
-                                <label className="flex items-center gap-2 text-xs text-ink2 cursor-pointer select-none">
-                                    <input
-                                        type="checkbox"
-                                        checked={autoHook}
-                                        onChange={(e) => setAutoHook(e.target.checked)}
-                                        className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
-                                    />
-                                    auto hook titles on clips
-                                </label>
-                                {autoHook && (
-                                    <select
-                                        value={autoHookStyle}
-                                        onChange={(e) => setAutoHookStyle(e.target.value)}
-                                        className="input-field !w-auto text-xs py-1.5"
-                                    >
-                                        <option value="classic">Classic</option>
-                                        <option value="dark">Dark</option>
-                                        <option value="yellow">Yellow</option>
-                                        <option value="red">Red</option>
-                                        <option value="outline">Outline</option>
-                                        <option value="outline_yellow">Outline+</option>
-                                    </select>
-                                )}
-                            </div>
-                            <div className="col-span-1 sm:col-span-3 pt-3 sm:pt-1 border-t border-rule">
-                                <div className="flex flex-wrap items-center justify-between gap-3">
-                                    <span className="text-xs text-ink2">cinematic look</span>
-                                    <select
-                                        value={colorGrade}
-                                        onChange={(e) => setColorGrade(e.target.value)}
-                                        className="input-field !w-auto text-xs py-1.5"
-                                        aria-label="cinematic color grade"
-                                    >
-                                        <option value="none">No grade</option>
-                                        <option value="warm">Warm</option>
-                                        <option value="cool">Cool</option>
-                                        <option value="teal_orange">Teal & Orange</option>
-                                        <option value="vintage">Vintage</option>
-                                        <option value="vibrant">Vibrant</option>
-                                        <option value="bw">Black & White</option>
-                                    </select>
-                                </div>
-                                <div className="flex flex-wrap gap-x-4 gap-y-2 mt-2.5">
-                                    {[
-                                        { label: 'glow', v: glow, set: setGlow },
-                                        { label: 'grain', v: grain, set: setGrain },
-                                        { label: 'vignette', v: vignette, set: setVignette },
-                                        { label: 'cinema bars', v: letterbox, set: setLetterbox },
-                                        { label: 'caption scrim', v: bottomGradient, set: setBottomGradient },
-                                    ].map((t) => (
-                                        <label key={t.label} className="flex items-center gap-1.5 text-xs text-ink2 cursor-pointer select-none">
-                                            <input
-                                                type="checkbox"
-                                                checked={t.v}
-                                                onChange={(e) => t.set(e.target.checked)}
-                                                className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
-                                            />
-                                            {t.label}
-                                        </label>
-                                    ))}
-                                </div>
-                            </div>
                         </div>
                     )}
+                    <p className="mt-3 text-[11px] leading-relaxed text-muted">
+                        Clips render as plain 9:16 without captions. Pick the output
+                        format, cinematic look and captions per clip once they are done.
+                    </p>
                 </div>
 
                 <label className="flex items-start gap-2.5 mt-5 text-left text-[13px] sm:text-xs leading-relaxed text-muted cursor-pointer select-none">
