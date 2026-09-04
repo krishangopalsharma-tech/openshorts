@@ -47,3 +47,6 @@ skills-lock.json
 # Cloud env example kept local only (avoid leaking infra hints)
 .env.cloud.example
 .worktrees
+
+# User-uploaded logos for the overlay editor (private; the dir is created at startup)
+assets/overlays/

@@ -971,7 +971,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 )}
 
                 {/* Actions Footer */}
-                <div className="grid grid-cols-2 gap-2 mt-auto pt-4 border-t border-rule">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-auto pt-4 border-t border-rule">
                     {onEditClip && (
                         <button
                             onClick={() => onEditClip(index)}
@@ -1063,7 +1063,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             }
                             downloadClip();
                         }}
-                        className={`${QUIET_BTN}${onEditClip ? ' col-span-2' : ''}`}
+                        className={`${QUIET_BTN} ${downloadSpan}`}
                     >
                         <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
                         {downloadPct === null ? 'download' : `downloading ${downloadPct}%`}
