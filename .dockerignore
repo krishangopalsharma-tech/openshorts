@@ -15,6 +15,13 @@ ENV/
 *.egg-info/
 .pytest_cache/
 
+# Local caches (huggingface/whisper model cache alone runs multiple GB) —
+# mirrors .gitignore's .cache/ entry, which this file never picked up. A
+# 2.2GB .cache/huggingface/ leaking into the build context is what blew up
+# `docker compose up --build`'s context transfer (Docker Desktop's buildkit
+# gRPC connection died mid-transfer past ~1.6GB).
+.cache/
+
 # Node
 node_modules/
 remotion/node_modules/
