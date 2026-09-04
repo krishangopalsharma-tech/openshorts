@@ -803,6 +803,8 @@ function App() {
         auto_hook_style: data.autoHook ? (data.autoHookStyle || 'classic') : null,
         // 'auto' is the server default, so only a deliberate choice travels.
         layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
+        // null when the user never touched the cinematic panel.
+        cinematic_effects: data.cinematic ? JSON.stringify(data.cinematic) : null,
       };
 
       if (data.type === 'url') {

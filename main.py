@@ -23,6 +23,7 @@ from google.genai import types as genai_types
 
 import gemini_worker
 import layout_picker
+import cinematic
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words,
                             trim_to_best)
@@ -1750,6 +1751,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
     output_format = args.format
 
+    # Cinematic look is per-job (like WATERMARK/AUTO_HOOK), read once here and
+    # closed over by every worker in _process_one_clip below.
+    try:
+        cinematic_effects = json.loads(os.environ.get("CINEMATIC_EFFECTS") or "{}")
+    except (TypeError, ValueError):
+        cinematic_effects = {}
+
     script_start_time = time.time()
     
     def _ensure_dir(path: str) -> str:
@@ -1930,6 +1938,12 @@ if __name__ == '__main__':
                     subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
                     success = render_clip(clip_temp_path, clip_final_path, output_format)
+                    # Cinematic grade/glow/grain/vignette/gradients/letterbox
+                    # burn in right after the reframe and before every other
+                    # layer, so watermark/hook/captions composite on top of
+                    # the graded picture rather than under it.
+                    if success and cinematic_effects and not cinematic.is_noop(cinematic_effects):
+                        cinematic.apply_cinematic_effects(clip_final_path, cinematic_effects)
                     # Layer order: watermark burns into the canonical (so any
                     # later hook replacement, which re-derives from it, keeps
                     # the branding), the hook is a derived hooked_ file, and

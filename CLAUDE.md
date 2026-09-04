@@ -51,6 +51,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
+| `cinematic.py` | Static cinematic look (grade/glow/grain/vignette/gradients/letterbox), burned in once per clip |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT generation, FFmpeg subtitle burning, and dubbed video transcription |
@@ -210,6 +211,30 @@ portrait clip cannot reproduce the shrink either.
   from x-only to w/h/x/y. Beats currently come from the audio envelope;
   `emphasis_times` is a plain list of seconds so the transcript's hook words can
   replace it without touching the module.
+
+### Cinematic effects (`cinematic.py`)
+
+Ported from ClipForge's effects stack: color grade (warm/cool/teal_orange/
+vintage/vibrant/bw), glow, grain, vignette, top/bottom gradient scrims and
+letterbox (cinema bars). Unlike captions/hooks these are **not** retroactively
+editable per clip — ClipForge itself only offers them as a pre-generation
+choice, so this ports the same shape: one JSON blob (`cinematic_effects` on
+`POST /api/process`, dashboard advanced options) becomes the per-job
+`CINEMATIC_EFFECTS` env var (same handoff as `WATERMARK`/`AUTO_HOOK`), read
+once in `main.py` and applied with one ffmpeg pass right after `render_clip`
+and before `apply_watermark` — under the watermark/hook/caption layers, same
+order ClipForge composites in. `cinematic.normalize()` clamps every field to
+its valid range/enum server-side, so a malformed request degrades to "no
+effect" instead of a broken filtergraph reaching the subprocess.
+
+Glow has no native ffmpeg filter: it's a `split` into two branches, one
+`gblur`red, recombined with `blend=all_mode=screen`, which is why
+`build_filter_complex` emits a `-filter_complex` graph (with branch/merge)
+rather than a flat `-vf` chain. Gradient scrims are a handful of stacked
+`drawbox` bars at increasing alpha rather than a true gradient — ffmpeg has no
+per-pixel alpha ramp filter — this reads as smooth at typical clip
+resolutions and reuses the same drawbox approach `edit_builder.py` already
+uses for `flash`.
 
 ### Key Classes
 - `SmoothedCameraman` - Stabilized camera movement with safe zone logic (prevents jitter)

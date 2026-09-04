@@ -36,6 +36,28 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
+    // Cinematic look: a static grade/glow/grain/vignette/gradient/letterbox
+    // pass burned in once per clip, ported from ClipForge. 'none' + every
+    // toggle off means the request omits the field entirely (see advanced
+    // below), so a user who never opens this stays byte-identical.
+    const [colorGrade, setColorGrade] = useState(() => {
+        try { return localStorage.getItem('os_color_grade') || 'none'; } catch { return 'none'; }
+    });
+    const [glow, setGlow] = useState(() => {
+        try { return localStorage.getItem('os_fx_glow') === '1'; } catch { return false; }
+    });
+    const [grain, setGrain] = useState(() => {
+        try { return localStorage.getItem('os_fx_grain') === '1'; } catch { return false; }
+    });
+    const [vignette, setVignette] = useState(() => {
+        try { return localStorage.getItem('os_fx_vignette') === '1'; } catch { return false; }
+    });
+    const [letterbox, setLetterbox] = useState(() => {
+        try { return localStorage.getItem('os_fx_letterbox') === '1'; } catch { return false; }
+    });
+    const [bottomGradient, setBottomGradient] = useState(() => {
+        try { return localStorage.getItem('os_fx_bottom_gradient') === '1'; } catch { return false; }
+    });
     const infoRef = useRef(null);
 
     // Close the compatibility popover on any outside click.
@@ -78,6 +100,15 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const handleSubmit = (e) => {
         e.preventDefault();
         if (!acknowledged) return;
+        // Omit entirely when every knob is at its off/default value, so a
+        // user who never opens this panel gets the pre-feature request.
+        const cinematic = (colorGrade !== 'none' || glow || grain || vignette || letterbox || bottomGradient)
+            ? {
+                color_grade: colorGrade,
+                glow, grain, vignette, letterbox,
+                bottom_gradient: bottomGradient,
+            }
+            : null;
         const advanced = {
             targetClips: targetClips || null,
             clipMinSeconds: clipMinSeconds || null,
@@ -85,11 +116,18 @@ export default function MediaInput({ onProcess, isProcessing }) {
             autoHook,
             autoHookStyle,
             layout,
+            cinematic,
         };
         try {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style', autoHookStyle);
             localStorage.setItem('os_layout', layout);
+            localStorage.setItem('os_color_grade', colorGrade);
+            localStorage.setItem('os_fx_glow', glow ? '1' : '0');
+            localStorage.setItem('os_fx_grain', grain ? '1' : '0');
+            localStorage.setItem('os_fx_vignette', vignette ? '1' : '0');
+            localStorage.setItem('os_fx_letterbox', letterbox ? '1' : '0');
+            localStorage.setItem('os_fx_bottom_gradient', bottomGradient ? '1' : '0');
         } catch { /* ignore */ }
         if (mode === 'url' && url) {
             onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...advanced });
@@ -252,7 +290,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     >
                         <ChevronDown size={14} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                         advanced options
-                        {(targetClips || clipMinSeconds || clipMaxSeconds || !autoHook) && (
+                        {(targetClips || clipMinSeconds || clipMaxSeconds || !autoHook
+                            || colorGrade !== 'none' || glow || grain || vignette || letterbox || bottomGradient) && (
                             <span className="text-brass">·</span>
                         )}
                     </button>
@@ -332,6 +371,44 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                         <option value="outline_yellow">Outline+</option>
                                     </select>
                                 )}
+                            </div>
+                            <div className="col-span-1 sm:col-span-3 pt-3 sm:pt-1 border-t border-rule">
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <span className="text-xs text-ink2">cinematic look</span>
+                                    <select
+                                        value={colorGrade}
+                                        onChange={(e) => setColorGrade(e.target.value)}
+                                        className="input-field !w-auto text-xs py-1.5"
+                                        aria-label="cinematic color grade"
+                                    >
+                                        <option value="none">No grade</option>
+                                        <option value="warm">Warm</option>
+                                        <option value="cool">Cool</option>
+                                        <option value="teal_orange">Teal & Orange</option>
+                                        <option value="vintage">Vintage</option>
+                                        <option value="vibrant">Vibrant</option>
+                                        <option value="bw">Black & White</option>
+                                    </select>
+                                </div>
+                                <div className="flex flex-wrap gap-x-4 gap-y-2 mt-2.5">
+                                    {[
+                                        { label: 'glow', v: glow, set: setGlow },
+                                        { label: 'grain', v: grain, set: setGrain },
+                                        { label: 'vignette', v: vignette, set: setVignette },
+                                        { label: 'cinema bars', v: letterbox, set: setLetterbox },
+                                        { label: 'caption scrim', v: bottomGradient, set: setBottomGradient },
+                                    ].map((t) => (
+                                        <label key={t.label} className="flex items-center gap-1.5 text-xs text-ink2 cursor-pointer select-none">
+                                            <input
+                                                type="checkbox"
+                                                checked={t.v}
+                                                onChange={(e) => t.set(e.target.checked)}
+                                                className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
+                                            />
+                                            {t.label}
+                                        </label>
+                                    ))}
+                                </div>
                             </div>
                         </div>
                     )}

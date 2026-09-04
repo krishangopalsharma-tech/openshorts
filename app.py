@@ -2069,6 +2069,7 @@ async def process_endpoint(
     thumbnail_session_id: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
+    cinematic_effects: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key:
@@ -2096,6 +2097,7 @@ async def process_endpoint(
         thumbnail_session_id = body.get("thumbnail_session_id")
         captions = body.get("captions")
         upload_id = body.get("upload_id")
+        cinematic_effects = body.get("cinematic_effects")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -2209,6 +2211,23 @@ async def process_endpoint(
     env.update(chosen)
     if chosen:
         print(f"[layouts] job={job_id} enabled={sorted(chosen)}")
+
+    # Cinematic look (grade/glow/grain/vignette/gradients/letterbox) is a
+    # per-job style choice, same shape as WATERMARK/AUTO_HOOK: normalized here
+    # so a malformed request can't reach the subprocess as a broken filter,
+    # then handed down as one JSON env var main.py reads once per job.
+    fx = cinematic_effects
+    if isinstance(fx, str):
+        try:
+            fx = json.loads(fx) if fx.strip() else None
+        except ValueError:
+            fx = None
+    if fx and isinstance(fx, dict):
+        import cinematic as _cinematic
+        normalized_fx = _cinematic.normalize(fx)
+        if not _cinematic.is_noop(normalized_fx):
+            env["CINEMATIC_EFFECTS"] = json.dumps(normalized_fx)
+            print(f"[cinematic] job={job_id} effects={normalized_fx}")
 
     # Auto-hook: burn each clip's Gemini hook text during the render. Off when
     # the field is absent, so API/MCP/webhook callers keep their old output
