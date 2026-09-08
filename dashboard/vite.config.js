@@ -24,6 +24,14 @@ export default defineConfig({
       '/videos': { target: backend, changeOrigin: true },
       '/thumbnails': { target: backend, changeOrigin: true },
       '/gallery': { target: backend, changeOrigin: true },
+      // Asset mounts the app links to directly (app.py mounts all three):
+      // the logo library the overlay editor previews, the music previews, and
+      // the TTFs the caption modal @font-faces for its live preview. Without
+      // these the dev server answers with index.html and every one of them
+      // silently degrades — a broken <img>, a dead player, a fallback font.
+      '/overlays': { target: backend, changeOrigin: true },
+      '/music': { target: backend, changeOrigin: true },
+      '/fonts': { target: backend, changeOrigin: true },
       '/video': { target: backend, changeOrigin: true },
       '/render': { target: renderer, changeOrigin: true },
     }
