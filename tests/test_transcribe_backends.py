@@ -210,3 +210,64 @@ def test_run_whisper_transcription_materializes_segments(fake_faster_whisper, mo
     segments, info = tb.run_whisper_transcription("video.mp4")
     assert isinstance(segments, list)
     assert info.language == "es"
+
+
+# --- forced language --------------------------------------------------------
+
+def test_language_defaults_to_auto_detect(monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_LANGUAGE", raising=False)
+    assert tb.transcribe_language() is None
+    monkeypatch.setenv("TRANSCRIBE_LANGUAGE", "auto")
+    assert tb.transcribe_language() is None
+
+
+def test_forced_language_reaches_whisper(fake_faster_whisper, monkeypatch):
+    monkeypatch.delenv("WHISPER_MODEL", raising=False)
+    monkeypatch.setenv("TRANSCRIBE_LANGUAGE", "es")
+    seen = {}
+
+    def fake_run(path, **params):
+        seen.update(params)
+        return [], SimpleNamespace(language="es", duration=1.0)
+
+    monkeypatch.setattr(tb, "run_whisper_transcription", fake_run)
+    tb._transcribe_with_whisper("video.mp4")
+    assert seen["language"] == "es"
+    # The shared defaults still ride along.
+    assert seen["word_timestamps"] is True
+
+
+def test_hinglish_transcribes_as_hindi_and_romanises(monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_LANGUAGE", "hinglish")
+    seen = {}
+
+    def fake_run(path, **params):
+        seen.update(params)
+        seg = SimpleNamespace(
+            start=0.0, end=1.0, text="आप कैसे हैं",
+            words=[SimpleNamespace(word=" आप", start=0.0, end=0.4),
+                   SimpleNamespace(word=" कैसे", start=0.4, end=0.7),
+                   SimpleNamespace(word=" हैं", start=0.7, end=1.0)],
+        )
+        return [seg], SimpleNamespace(language="hi", duration=1.0)
+
+    monkeypatch.setattr(tb, "run_whisper_transcription", fake_run)
+    transcript = tb._transcribe_with_whisper("video.mp4")
+
+    assert seen["language"] == "hi"  # not "hinglish": whisper has no such code
+    assert transcript["language"] == "hinglish"
+    assert transcript["segments"][0]["text"] == "aap kaise hain"
+    assert [w["word"] for w in transcript["segments"][0]["words"]] == [
+        " aap", " kaise", " hain"]
+
+
+def test_parakeet_is_skipped_for_a_language_it_cannot_speak(monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_BACKEND", "parakeet")
+    monkeypatch.setenv("TRANSCRIBE_LANGUAGE", "hinglish")
+    monkeypatch.setattr(tb, "_has_audio_stream", lambda path: True)
+    monkeypatch.setattr(
+        tb, "_transcribe_with_parakeet",
+        lambda path: (_ for _ in ()).throw(AssertionError("should not run")))
+    sentinel = {"text": "ok", "language": "hinglish", "segments": []}
+    monkeypatch.setattr(tb, "_transcribe_with_whisper", lambda path: sentinel)
+    assert tb.transcribe_media("video.mp4") is sentinel

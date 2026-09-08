@@ -27,6 +27,14 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
+    // Spoken language. 'auto' is whisper's own detection, right almost
+    // everywhere; naming the language matters on Hindi/Urdu, where auto-detect
+    // slides into English translation. 'hinglish' transcribes Hindi and writes
+    // it in Latin letters, so the caption presets (all Latin display faces)
+    // still apply.
+    const [language, setLanguage] = useState(() => {
+        try { return localStorage.getItem('os_language') || 'auto'; } catch { return 'auto'; }
+    });
     // Output format, cinematic look, captions and hook titles are no longer
     // chosen here: every clip renders plain 9:16 and the user picks those per
     // clip (or for all clips) from the result card afterwards.
@@ -77,9 +85,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
             clipMinSeconds: clipMinSeconds || null,
             clipMaxSeconds: clipMaxSeconds || null,
             layout,
+            language,
         };
         try {
             localStorage.setItem('os_layout', layout);
+            localStorage.setItem('os_language', language);
         } catch { /* ignore */ }
         if (mode === 'url' && url) {
             onProcess({ type: 'url', payload: url, acknowledged: true, ...advanced });
@@ -206,7 +216,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     >
                         <ChevronDown size={14} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                         advanced options
-                        {(targetClips || clipMinSeconds || clipMaxSeconds || layout !== 'auto') && (
+                        {(targetClips || clipMinSeconds || clipMaxSeconds || layout !== 'auto' || language !== 'auto') && (
                             <span className="text-brass">·</span>
                         )}
                     </button>
@@ -262,6 +272,37 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     <option value="none">Single crop only</option>
                                 </select>
                             </div>
+                            <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
+                                <span className="text-xs text-ink2">spoken language</span>
+                                <select
+                                    value={language}
+                                    onChange={(e) => setLanguage(e.target.value)}
+                                    className="input-field !w-auto text-xs py-1.5"
+                                    aria-label="spoken language"
+                                >
+                                    <option value="auto">Auto-detect</option>
+                                    <option value="hinglish">Hinglish (Hindi in Latin letters)</option>
+                                    <option value="hi">Hindi (Devanagari)</option>
+                                    <option value="ur">Urdu</option>
+                                    <option value="en">English</option>
+                                    <option value="es">Spanish</option>
+                                    <option value="pt">Portuguese</option>
+                                    <option value="fr">French</option>
+                                    <option value="de">German</option>
+                                    <option value="it">Italian</option>
+                                    <option value="ar">Arabic</option>
+                                    <option value="ru">Russian</option>
+                                    <option value="ja">Japanese</option>
+                                    <option value="ko">Korean</option>
+                                    <option value="zh">Chinese</option>
+                                </select>
+                            </div>
+                            <p className="col-span-1 sm:col-span-3 text-[11px] leading-relaxed text-muted">
+                                Naming the language stops auto-detect from translating a Hindi
+                                or Urdu video into English. Hinglish keeps the words but writes
+                                them in Latin letters ("aap kaise hain"), so the caption styles
+                                still work.
+                            </p>
                         </div>
                     )}
                     <p className="mt-3 text-[11px] leading-relaxed text-muted">

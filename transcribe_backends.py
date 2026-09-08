@@ -18,6 +18,13 @@ Invariants the consumers rely on (clip cutting, karaoke subtitles, Remotion):
   - all numerics are native Python floats (json.dump of the transcript).
   - words sorted by start, segments chronological, absolute file timestamps.
 
+TRANSCRIBE_LANGUAGE env forces the spoken language instead of letting whisper
+detect it (unset/"auto" = detect). Worth forcing on Hindustani sources: whisper
+auto-detect on Hindi frequently slides into ENGLISH TRANSLATION mid-file, which
+is how a Hindi upload comes back with English captions. The extra value
+"hinglish" is not a whisper language — it transcribes as Hindi (Devanagari) and
+romanises the result (translit.py), so the Latin caption presets still apply.
+
 TRANSCRIBE_BACKEND env: "whisper" (default) | "parakeet".
 The parakeet path falls back to whisper automatically when the model errors,
 produces no usable words, or the detected language is outside its 25
@@ -39,12 +46,26 @@ from subtitles import (
 
 PARAKEET_MODEL_ID = "nemo-parakeet-tdt-0.6b-v3"
 
+# Not a whisper language code: Hindi audio, Latin script. See translit.py.
+HINGLISH = "hinglish"
+
 # The 25 European languages parakeet-tdt-0.6b-v3 supports (ISO 639-1).
 PARAKEET_LANGS = {
     "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
     "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru",
     "uk",
 }
+
+def transcribe_language():
+    """The language forced for this job, or None to let the backend detect it."""
+    raw = (os.environ.get("TRANSCRIBE_LANGUAGE") or "").strip().lower()
+    return None if raw in ("", "auto") else raw
+
+
+def _asr_language(language):
+    """The code the ASR model gets — hinglish is transcribed as Hindi."""
+    return "hi" if language == HINGLISH else language
+
 
 # Serializes GPU transcription across concurrent jobs so N jobs can't stack
 # N model contexts / decode batches in VRAM. CPU whisper stays ungated
@@ -162,7 +183,11 @@ def run_whisper_transcription(media_path, **params):
 
 
 def _transcribe_with_whisper(media_path):
-    segments, info = run_whisper_transcription(media_path, **WHISPER_TRANSCRIBE_PARAMS)
+    language = transcribe_language()
+    params = dict(WHISPER_TRANSCRIBE_PARAMS)
+    if language:
+        params["language"] = _asr_language(language)
+    segments, info = run_whisper_transcription(media_path, **params)
 
     out_segments = []
     text_parts = []
@@ -179,11 +204,15 @@ def _transcribe_with_whisper(media_path):
         })
         text_parts.append(segment.text.strip())
 
-    return {
+    transcript = {
         "text": " ".join(part for part in text_parts if part),
         "language": info.language,
         "segments": out_segments,
     }
+    if language == HINGLISH:
+        import translit
+        transcript = translit.romanize_transcript(transcript)
+    return transcript
 
 
 # --- parakeet ---------------------------------------------------------------
@@ -369,6 +398,14 @@ def transcribe_media(media_path):
             "speech, so it needs a video with audio.")
 
     backend = os.environ.get("TRANSCRIBE_BACKEND", "whisper").strip().lower()
+
+    # Parakeet only speaks 25 European languages and reports none of them back
+    # for a forced choice, so a forced language outside that set goes straight
+    # to whisper instead of paying for a run we would reject anyway.
+    forced = transcribe_language()
+    if backend == "parakeet" and forced and _asr_language(forced) not in PARAKEET_LANGS:
+        print(f"🎙️ [ASR] language '{forced}' unsupported by parakeet — using whisper")
+        backend = "whisper"
 
     if backend == "parakeet":
         try:

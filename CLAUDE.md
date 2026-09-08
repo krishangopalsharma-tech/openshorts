@@ -57,6 +57,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT/ASS generation (legacy karaoke + `generate_ass_styled` for the ClipForge presets), FFmpeg subtitle burning, dubbed video transcription |
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
+| `translit.py` | Devanagari → Hinglish romanisation for captions (`TRANSCRIBE_LANGUAGE=hinglish`) |
 | `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
@@ -213,6 +214,48 @@ portrait clip cannot reproduce the shrink either.
   `emphasis_times` is a plain list of seconds so the transcript's hook words can
   replace it without touching the module.
 
+### Spoken language and Hinglish captions
+
+`POST /api/process` takes `language`: a whisper code (`hi`, `es`, …), `auto`
+(the default: whisper detects it) or `hinglish`. It rides down as the
+`TRANSCRIBE_LANGUAGE` env var that `transcribe_backends.transcribe_language()`
+reads; the dashboard exposes it in advanced options (`MediaInput.jsx`,
+remembered in `localStorage.os_language`).
+
+**Naming the language is not cosmetic on Hindi/Urdu.** Auto-detect there slides
+into English TRANSLATION partway through a file — the reported bug was a Hindi
+source whose clips came back with English captions, and forcing `hi` is what
+stops it.
+
+`hinglish` is not a whisper language: it transcribes as Hindi (Devanagari) and
+then romanises the transcript word by word (`translit.py`), which is what the
+audience actually types ("aap kaise hain") and what keeps the caption presets
+usable — all 19 are Latin display faces, so Devanagari drops out of the chosen
+style into whatever libass finds. The romanisation happens once, on the
+transcript, so clip titles and the Gemini prompts see the same text the
+captions do; `transcript["language"]` becomes `"hinglish"`.
+
+The transliteration is ported from ClipForge's `translit.py` but has no
+third-party dependency (the table is 60 lines; indic-transliteration's IAST
+round-tripping bought nothing) and adds the two rules that make it read like
+typed Hinglish rather than a dictionary: **schwa deletion** (final always —
+`ghara` → `ghar`; then the VC_CV rule — `ladaki` → `ladki`, `matalaba` →
+`matlab` — blocked by a closed syllable before it, so `zindagi` keeps its
+schwa) and **long `ā` doubles inside a word but not at the end** (`aap`,
+`pyaar`, but `kya`, `sharma`).
+
+A transcript that is REUSED rather than produced (the Thumbnail Studio
+handover, the checkpoint an interrupted run leaves) never passed through the
+backend's language choice, so `main.py` romanises it on the way in — only when
+it actually carries Devanagari, so an English transcript is not retagged.
+
+Every per-job env choice (this one, the layouts, the look, the generation
+controls) is also written to the resume manifest as `job_env`, an explicit
+ALLOWLIST (`app._RESUMABLE_ENV_KEYS`) — a resumed job rebuilds its env from
+`os.environ`, so without it a redeploy mid-job would silently finish with the
+deployment defaults. The allowlist, rather than an env diff, is what keeps
+`GEMINI_API_KEY` out of a file sitting next to the user's video.
+
 ### Format, look and captions are chosen AFTER generation
 
 The dashboard no longer asks for an output format, a cinematic look, captions
@@ -311,7 +354,7 @@ request degrades to "no effect", never to a broken filtergraph.
 ### API Endpoints
 | Method | Route | Purpose |
 |--------|-------|---------|
-| POST | `/api/process` | Submit video for processing |
+| POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |
 | POST | `/api/subtitle` | Burn captions on one clip: `preset` + `overrides` (caption_styles) or the legacy fields; auto-transcribes dubbed videos |

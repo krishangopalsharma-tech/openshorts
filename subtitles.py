@@ -343,7 +343,11 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     def seam_prefix(t):
         return "{\\an5}" if any(a <= t < b for a, b in seam_ranges) else ""
 
-    safe_font = _sanitize_font_name(font_name)
+    # Auto-captions run through here, so the same script rule as the styled
+    # path applies: Anton cannot draw Devanagari (caption_styles.font_for_text).
+    import caption_styles as _styles
+    safe_font = _sanitize_font_name(_styles.font_for_text(
+        "".join(w["word"] for block in blocks for w in block), font_name))
     base_opacity = _clamp_number(base_opacity, 0.05, 1.0, 1.0)
     # Dim inactive words via a fully-opaque scaled color (NOT alpha — see
     # _dim_hex_color); the active word overrides the color inline.
@@ -798,7 +802,11 @@ def generate_ass_styled(transcript, clip_start, clip_end, output_path, *,
     karaoke = bool(cfg.get("karaoke"))
     # libass fills \k syllables Secondary -> Primary, so the slots swap.
     style_primary, style_secondary = (highlight, primary) if karaoke else (primary, primary)
-    safe_font = _sanitize_font_name(cfg.get("font_family") or "Roboto")
+    # The preset's family unless the words are in a script it cannot draw
+    # (Devanagari, Arabic/Urdu) — see caption_styles.font_for_text.
+    safe_font = _sanitize_font_name(
+        _styles.font_for_text("".join(w["word"] for w in words),
+                              cfg.get("font_family")))
 
     header = (
         "[Script Info]\n"

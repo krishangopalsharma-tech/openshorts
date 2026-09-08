@@ -283,6 +283,37 @@ LANG_DEFAULT_FONT = {
     "ne": "Noto Sans Devanagari",
 }
 
+# Every preset above is a Latin display face, so a Devanagari or Arabic caption
+# would render as tofu in the style the user picked. Swapping the family is
+# decided from the TEXT, not the transcript's language tag: the tag is whisper's
+# guess (and is "hinglish" for romanised Hindi, which must keep its preset),
+# while the codepoints are the thing libass actually has to draw.
+# Urdu is probed before Arabic: it is written in the same block plus these
+# letters, and Nastaliq is the only shape Urdu readers accept.
+_SCRIPT_FONTS = (
+    (re.compile(r"[ऀ-ॿ]"), LANG_DEFAULT_FONT["hi"]),
+    (re.compile(r"[ٹڈڑںھہ-ۃے]"),
+     LANG_DEFAULT_FONT["ur"]),
+    (re.compile(r"[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]"),
+     LANG_DEFAULT_FONT["ar"]),
+)
+_SCRIPT_FONT_NAMES = frozenset(LANG_DEFAULT_FONT.values())
+
+
+def font_for_text(text, font_family):
+    """``font_family``, or the bundled font that can actually draw ``text``.
+
+    A font the user chose deliberately is only overridden when it cannot
+    render the script at all; a script font already in place is left alone.
+    """
+    family = font_family or "Roboto"
+    if not text or family in _SCRIPT_FONT_NAMES:
+        return family
+    for probe, font in _SCRIPT_FONTS:
+        if probe.search(text):
+            return font
+    return family
+
 _fonts_cache = {"stamp": None, "fonts": []}
 _fonts_lock = threading.Lock()
 

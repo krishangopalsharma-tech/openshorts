@@ -940,6 +940,9 @@ function App() {
         auto_hook: '0',
         // 'auto' is the server default, so only a deliberate choice travels.
         layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
+        // Same rule: 'auto' is the server default, so only a deliberate choice
+        // travels. 'hinglish' = Hindi transcribed, then romanised.
+        language: data.language && data.language !== 'auto' ? data.language : null,
       };
 
       if (data.type === 'url') {

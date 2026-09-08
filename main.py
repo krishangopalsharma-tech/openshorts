@@ -1867,6 +1867,15 @@ if __name__ == '__main__':
             if transcript is not None:
                 print(f"♻️ Reusing the transcript from the interrupted run "
                       f"({len(transcript['segments'])} segments) — skipping transcription.")
+        # A reused transcript never went through the backend's language choice
+        # (Studio handover, or a checkpoint written before it was set), so a
+        # Hinglish job would get its Devanagari back. Romanise it here; a
+        # transcript that is already Latin is left alone, tag included.
+        if transcript is not None:
+            from transcribe_backends import HINGLISH, transcribe_language
+            if transcribe_language() == HINGLISH:
+                import translit
+                transcript = translit.romanize_if_needed(transcript)
         if transcript is None:
             try:
                 transcript = transcribe_video(input_video)

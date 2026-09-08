@@ -152,3 +152,29 @@ class TestStyledAss:
         assert len(events) >= 3 and all("\\N" not in e for e in events)
         _, _, two = _ass(tmp_path, "bold_white", {"max_chars": 8, "max_lines": 2})
         assert any("\\N" in e for e in two)
+
+
+class TestScriptFonts:
+    """Every preset is a Latin display face; a Devanagari or Arabic caption has
+    to fall back to a font that can draw it (the bundled Notos)."""
+
+    def test_latin_text_keeps_the_preset_font(self):
+        assert cs.font_for_text("aap kaise hain", "Anton") == "Anton"
+
+    def test_devanagari_swaps_to_a_font_with_the_glyphs(self):
+        assert cs.font_for_text("आप कैसे हैं", "Anton") == "Noto Sans Devanagari"
+
+    def test_urdu_is_probed_before_generic_arabic(self):
+        # ے / ٹ / ہ mark Urdu inside the same Unicode block as Arabic.
+        assert cs.font_for_text("آپ کیسے ہیں", "Anton") == "Noto Nastaliq Urdu"
+        assert cs.font_for_text("كيف حالك", "Anton") == "Noto Naskh Arabic"
+
+    def test_a_script_font_already_chosen_is_left_alone(self):
+        assert cs.font_for_text("آپ کیسے ہیں", "Noto Naskh Arabic") == "Noto Naskh Arabic"
+
+    def test_missing_font_family_falls_back_to_the_default(self):
+        assert cs.font_for_text("hello", None) == "Roboto"
+
+    def test_every_script_font_is_actually_bundled(self):
+        families = {f["family"] for f in cs.list_fonts()}
+        assert set(cs.LANG_DEFAULT_FONT.values()) <= families

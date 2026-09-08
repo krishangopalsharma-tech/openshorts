@@ -125,6 +125,25 @@ class TestGenerateAss:
         assert content.count("{\\r}") == 3          # reset to dimmed base style
         assert "Style: Default,Verdana," in content
 
+    def test_devanagari_words_get_a_font_that_can_draw_them(self, tmp_path):
+        # Auto-captions run through generate_ass with Anton; Anton has no
+        # Devanagari, so the style line has to name a font that does.
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" आप", 0.0, 0.3), _w(" कैसे", 0.3, 0.6)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            font_name="Anton") is True
+        content = out.read_text(encoding="utf-8-sig")
+        assert "Style: Default,Noto Sans Devanagari," in content
+
+    def test_romanised_words_keep_the_chosen_font(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" aap", 0.0, 0.3), _w(" kaise", 0.3, 0.6)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            font_name="Anton") is True
+        assert "Style: Default,Anton," in out.read_text(encoding="utf-8-sig")
+
     def test_karaoke_merges_fragments_too(self, tmp_path):
         from subtitles import generate_ass
         out = tmp_path / "subs.ass"

@@ -1055,8 +1055,25 @@ def _install_drain_signal_handler():
         print(f"⚠️ Drain-on-SIGTERM unavailable ({e}); jobs will resume on restart instead.")
 
 
+# The per-job env the REQUEST chose (layouts, look, caption/hook switches,
+# generation controls, spoken language). None of it is rebuildable from
+# os.environ, so a job resumed after a redeploy would quietly render with the
+# deployment defaults instead of what the user asked for — a Hinglish job would
+# come back in Devanagari, a "no layouts" job stacked. Persisted as a fixed
+# ALLOWLIST, never as an env diff: that is what keeps GEMINI_API_KEY and every
+# other server credential out of a file sitting next to the user's video.
+_RESUMABLE_ENV_KEYS = (
+    "TRANSCRIBE_LANGUAGE",
+    "AUTO_CAPTIONS", "AUTO_HOOK", "AUTO_HOOK_STYLE", "CINEMATIC_EFFECTS",
+    "CLIP_TARGET_MIN", "CLIP_TARGET_MAX", "CLIP_MIN_SECONDS", "CLIP_MAX_SECONDS",
+    "AUTO_LAYOUT", "SPLIT_LAYOUT", "SCREENCAST_LAYOUT", "SPEAKER_CUT",
+    "PUNCH_IN", "SPEAKER_SIGNAL",
+)
+
+
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
-                           webhook_url=None, webhook_secret=None, base_url=None):
+                           webhook_url=None, webhook_secret=None, base_url=None,
+                           job_env=None):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
@@ -1073,6 +1090,7 @@ def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, water
                 "webhook_url": webhook_url,
                 "webhook_secret": webhook_secret,
                 "base_url": base_url,
+                "job_env": job_env or {},
             }, f)
     except Exception as e:
         print(f"⚠️ Could not write resume manifest for {job_id}: {e}")
@@ -1158,6 +1176,10 @@ def _resume_interrupted_jobs() -> set:
             env["WATERMARK"] = "1"
         else:
             env.pop("WATERMARK", None)
+        # What the user asked for, back on top of the deployment defaults.
+        for k, v in (m.get("job_env") or {}).items():
+            if k in _RESUMABLE_ENV_KEYS:
+                env[k] = str(v)
 
         m["attempts"] = attempts
         try:
@@ -2356,6 +2378,7 @@ async def process_endpoint(
     auto_hook_style: Optional[str] = Form(None),
     thumbnail_session_id: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
     cinematic_effects: Optional[str] = Form(None),
 ):
@@ -2384,6 +2407,7 @@ async def process_endpoint(
         auto_hook_style = body.get("auto_hook_style")
         thumbnail_session_id = body.get("thumbnail_session_id")
         captions = body.get("captions")
+        language = body.get("language")
         upload_id = body.get("upload_id")
         cinematic_effects = body.get("cinematic_effects")
 
@@ -2569,6 +2593,22 @@ async def process_endpoint(
         env["AUTO_CAPTIONS"] = "0"
         print(f"[captions] job={job_id} auto-captions off")
 
+    # Spoken language. Absent/auto = whisper detects it, which is right almost
+    # everywhere and wrong on Hindustani: auto-detect there slides into English
+    # TRANSLATION mid-file, so a Hindi upload comes back with English captions.
+    # "hinglish" transcribes as Hindi and romanises it (translit.py): every
+    # caption preset is a Latin display face, so Devanagari would drop out of
+    # the chosen style into a fallback font.
+    if language:
+        lang = str(language).strip().lower()
+        if lang not in ("", "auto"):
+            if not re.fullmatch(r"[a-z]{2,3}(-[a-z]{2,4})?|hinglish", lang):
+                raise HTTPException(status_code=400,
+                                    detail="language must be a short language code "
+                                           "(e.g. 'hi', 'es'), 'hinglish' or 'auto'")
+            env["TRANSCRIBE_LANGUAGE"] = lang
+            print(f"[language] job={job_id} forced={lang}")
+
     input_path = None
     if url:
         # Keep the downloaded source inside the job dir: the clip editor's
@@ -2686,7 +2726,9 @@ async def process_endpoint(
     _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id,
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
-                           base_url=api_base)
+                           base_url=api_base,
+                           job_env={k: env[k] for k in _RESUMABLE_ENV_KEYS
+                                    if k in env and os.environ.get(k) != env[k]})
 
     _enqueue_job(job_id, priority)
 

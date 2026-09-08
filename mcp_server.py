@@ -147,6 +147,14 @@ TOOLS = [
                     "type": "number", "minimum": 10, "maximum": 180,
                     "description": "Maximum clip length in seconds (default 60). Must be ≥ 5s above the minimum.",
                 },
+                "language": {
+                    "type": "string",
+                    "description": "Spoken language of the source, e.g. 'hi', 'es'. "
+                                   "Default: auto-detected. Use 'hinglish' for Hindi/Urdu "
+                                   "speech written in Latin letters (aap kaise hain), which "
+                                   "keeps the Latin caption presets; auto-detect on Hindi also "
+                                   "tends to translate the transcript to English.",
+                },
             },
             "required": ["confirm_rights"],
         },
@@ -356,7 +364,8 @@ async def _tool_process_video(client, args):
         "webhook_url": args.get("webhook_url"),
         "webhook_secret": args.get("webhook_secret"),
     }
-    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions"):
+    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions",
+              "language"):
         if args.get(k) is not None:
             body[k] = args[k]
     # Same default as the dashboard: hook on unless the caller opts out. The
