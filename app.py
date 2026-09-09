@@ -36,6 +36,7 @@ import recut
 import layout_ranges
 import caption_styles
 import cinematic
+import source_history
 import music
 import overlays
 
@@ -43,6 +44,9 @@ load_dotenv()
 
 # Constants
 UPLOAD_DIR = "uploads"
+# Sources clips have already been generated from (source_history), so an
+# accidental re-upload is caught before it costs another hour of GPU.
+SOURCE_HISTORY_FILE = ".sources.json"
 OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -893,6 +897,10 @@ def _recover_jobs_from_disk():
     for each job directory that has a metadata JSON.
     """
     recovered = 0
+    # Seed the duplicate-submit history from what is already here. Without
+    # this the index starts empty, so the first video it fails to warn about
+    # is the one cut yesterday — the exact case the warning is for.
+    backfill = []
     try:
         entries = os.listdir(OUTPUT_DIR)
     except FileNotFoundError:
@@ -928,10 +936,29 @@ def _recover_jobs_from_disk():
                 'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
             }
             recovered += 1
+            if clips:
+                # metadata's source_video is "<job_id>_<title>.<ext>"; the file
+                # itself may be gone (retention), so fall back to that name.
+                src_name = os.path.basename(data.get('source_video') or '')
+                title, size, duration = _resolved_source(job_id)
+                if not title and src_name.startswith(f"{job_id}_"):
+                    title = src_name[len(job_id) + 1:]
+                backfill.append((
+                    source_history.fingerprint(title=title or src_name or None,
+                                               size_bytes=size,
+                                               duration_seconds=duration),
+                    job_id, len(clips), os.path.getmtime(json_files[0])))
         except Exception as e:
             print(f"⚠️ Could not recover job {job_id}: {e}")
     if recovered:
         print(f"♻️  Recovered {recovered} completed job(s) from disk.")
+    if backfill:
+        try:
+            added = source_history.record_many(_source_history_path(), backfill)
+            if added:
+                print(f"🗂️  Source history seeded with {added} past video(s).")
+        except Exception as e:
+            print(f"⚠️ Could not seed the source history: {e}")
 
 
 # --- Mid-flight job resume (survive a redeploy without losing work) ----------
@@ -1567,11 +1594,63 @@ async def run_job_wrapper(job_id):
         await _notify_clips_ready(job_id)
         # Telegram pulse for high-signal activity (first clip / paid user).
         await _notify_clip_activity(job_id)
+        # Remember the source, so re-submitting it warns instead of silently
+        # spending another transcription plus a render per clip.
+        _record_source_history(job_id)
         # Always release semaphore and mark queue task done
         _running_jobs.discard(job_id)
         concurrency_semaphore.release()
         job_queue.task_done()
         print(f"✅ Released slot for job: {job_id}")
+
+
+def _source_history_path():
+    return os.path.join(OUTPUT_DIR, SOURCE_HISTORY_FILE)
+
+
+def _resolved_source(job_id):
+    """The job's source file on disk, as (title, size, duration).
+
+    A URL job knows none of this at submit time — the title only exists once
+    yt-dlp has named the download — and the downloaded file is what makes the
+    warning readable ("clips already generated from <the show>" rather than
+    from a watch?v= link). Uploads are named the same way, so one lookup
+    covers both.
+    """
+    matches = glob.glob(os.path.join(UPLOAD_DIR, f"{glob.escape(job_id)}_*"))
+    if not matches:
+        return None, None, None
+    path = max(matches, key=os.path.getsize)
+    title = os.path.basename(path)[len(job_id) + 1:] or None
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = None
+    return title, size, _media_duration_seconds(path)
+
+
+def _record_source_history(job_id):
+    """Remember a finished job's source. Never raises: a bookkeeping failure
+    must not turn a completed job into a failed one."""
+    try:
+        job = jobs.get(job_id) or {}
+        fp = dict(job.get("source_fp") or {})
+        clips = (job.get("result") or {}).get("clips") or []
+        if job.get("status") != "completed" or not clips:
+            return
+        title, size, duration = _resolved_source(job_id)
+        # Prefer what is on disk: a URL job's fingerprint holds the link, and
+        # the retention sweep may already have taken an upload, in which case
+        # the submit-time fingerprint is all there is.
+        merged = source_history.fingerprint(
+            title=title or fp.get("title") or None,
+            url=fp.get("url") or None,
+            size_bytes=size or fp.get("size_bytes"),
+            duration_seconds=duration or fp.get("duration_seconds"),
+        )
+        source_history.record(_source_history_path(), merged, job_id, len(clips))
+    except Exception as e:
+        print(f"⚠️ Could not record the source history for {job_id}: {e}")
 
 
 async def _archive_managed_job(job_id):
@@ -2400,6 +2479,35 @@ def _upload_url_base(request):
     return os.environ.get("PUBLIC_API_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
 
 
+@app.post("/api/source/check")
+async def source_check(request: Request):
+    """Has this video been through the pipeline already?
+
+    The dashboard calls this with the title and byte size of the file the user
+    just picked (or the URL they pasted) — never the file itself, so the check
+    costs nothing on a 600 MB upload. Advisory only: /api/process still accepts
+    the job, because the user is allowed to mean it.
+    """
+    body = await request.json() if await request.body() else {}
+    fp = source_history.fingerprint(
+        title=body.get("title"),
+        url=body.get("url"),
+        size_bytes=body.get("size_bytes"),
+        duration_seconds=body.get("duration_seconds"),
+    )
+    matches = source_history.find(_source_history_path(), fp)
+    return {
+        "duplicate": bool(matches),
+        "matches": [{
+            "job_id": m.get("job_id"),
+            "title": m.get("title"),
+            "clip_count": m.get("clip_count"),
+            "created_at": m.get("created_at"),
+            "match_reason": m.get("match_reason"),
+        } for m in matches[:5]],
+    }
+
+
 @app.post("/api/uploads")
 async def create_upload(request: Request):
     """Reserve an upload slot. Body (JSON, optional): {"filename": "..."}."""
@@ -2907,6 +3015,16 @@ async def process_endpoint(
         'webhook_url': webhook_url,
         'webhook_secret': webhook_secret,
         'base_url': api_base,
+        # What this job was made from, for the duplicate-submit warning
+        # (source_history). Recorded only once the job actually produces clips.
+        'source_fp': source_history.fingerprint(
+            title=(os.path.basename(input_path) if input_path else None) or url,
+            url=url,
+            size_bytes=(os.path.getsize(input_path)
+                        if input_path and os.path.exists(input_path) else None),
+            duration_seconds=(_media_duration_seconds(input_path)
+                              if input_path and os.path.exists(input_path) else None),
+        ),
     }
 
     # Persist the owner so recovered jobs keep their multi-tenant guard after a

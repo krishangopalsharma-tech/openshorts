@@ -392,6 +392,39 @@ ALLOWLIST (`app._RESUMABLE_ENV_KEYS`) — a resumed job rebuilds its env from
 deployment defaults. The allowlist, rather than an env diff, is what keeps
 `GEMINI_API_KEY` out of a file sitting next to the user's video.
 
+### The same video twice (`source_history.py`, `/api/source/check`)
+
+Re-submitting a video by accident is the most expensive mistake the UI allows:
+a 72-minute source is ~25 min of transcription plus a render per clip, and
+nothing later in the flow would catch it. `output/.sources.json` records what
+each finished job was cut from, and the dashboard asks `/api/source/check`
+before submitting — with the file's NAME and BYTE SIZE only, never the file,
+or checking a 600 MB upload would cost as much as running it.
+
+Three independent signals, and the warning says which one fired: a YouTube id
+(exact), the normalized title (what the user recognises), and size+duration
+(the same file renamed, which a title cannot catch). Title normalization is
+case/punctuation/spacing only — it deliberately does NOT strip `(HD)`,
+`1080p` or `full episode`, because those are often the only difference
+between two real uploads, and a false "you already did this" is worse than a
+missed one: it teaches the user to click through the warning.
+
+It is a JSON file rather than a table because the cloud build's `UserVideo`
+is per signed-in user, holds finished CLIPS rather than sources, and does not
+exist in a self-host install — which is exactly where one person runs the
+whole pipeline and makes this mistake.
+
+**Advisory, never a block.** `/api/process` is unchanged, so agents and MCP
+callers are unaffected; the dashboard gates its own submit button behind a
+"generate again anyway" tick. A missing or corrupt index reads as empty, and
+the recorder swallows its own errors — this feature must never be the reason
+a job fails or a submit is refused.
+
+`_recover_jobs_from_disk` seeds the index from job dirs already on disk (one
+write, idempotent, and it never overwrites a real run with an older backfilled
+one). Without that the index starts empty and the first thing it fails to warn
+about is the video cut yesterday, which is the whole case it exists for.
+
 ### Format, look and captions are chosen AFTER generation
 
 The dashboard no longer asks for an output format, a cinematic look, captions
@@ -504,6 +537,7 @@ request degrades to "no effect", never to a broken filtergraph.
 ### API Endpoints
 | Method | Route | Purpose |
 |--------|-------|---------|
+| POST | `/api/source/check` | Has this source been cut before? (title/size/URL, no file) |
 | POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`; `transcribe_prompt`: names/terms for the decode) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |

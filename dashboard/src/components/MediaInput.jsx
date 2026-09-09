@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown } from 'lucide-react';
+import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, AlertTriangle } from 'lucide-react';
 import { getApiUrl } from '../config';
 
 const SUPPORTED_PLATFORMS = [
@@ -14,6 +14,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [acknowledged, setAcknowledged] = useState(false);
+    // A source this pipeline has already cut. Asked before submitting, because
+    // an accidental re-upload costs a full transcription plus a render per clip
+    // and there is nothing later in the flow that would catch it.
+    const [duplicate, setDuplicate] = useState(null);
+    const [duplicateAcked, setDuplicateAcked] = useState(false);
     const [showInfo, setShowInfo] = useState(false);
     // Advanced generation controls — empty string means "let the AI decide",
     // which keeps the default pipeline behavior untouched.
@@ -81,9 +86,40 @@ export default function MediaInput({ onProcess, isProcessing }) {
         }
     }, []);
 
+    // Ask about the current source. Only the name, size and URL go over the
+    // wire — never the file, or checking a 600 MB upload would cost as much as
+    // submitting it. Debounced because the URL box fires this per keystroke.
+    useEffect(() => {
+        const body = mode === 'url'
+            ? (url.trim() ? { url: url.trim() } : null)
+            : (file ? { title: file.name, size_bytes: file.size } : null);
+        setDuplicate(null);
+        setDuplicateAcked(false);
+        if (!body) return;
+
+        let live = true;
+        const timer = setTimeout(async () => {
+            try {
+                const r = await fetch(`${getApiUrl()}/api/source/check`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (!r.ok) return;
+                const d = await r.json();
+                // The check is advisory: a failure here must never stop a submit.
+                if (live && d.duplicate) setDuplicate(d);
+            } catch { /* offline or old server: no warning, submit still works */ }
+        }, mode === 'url' ? 600 : 0);
+
+        return () => { live = false; clearTimeout(timer); };
+    }, [mode, url, file]);
+
+    const blockedByDuplicate = !!duplicate && !duplicateAcked;
+
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!acknowledged) return;
+        if (!acknowledged || blockedByDuplicate) return;
         const advanced = {
             targetClips: targetClips || null,
             clipMinSeconds: clipMinSeconds || null,
@@ -336,6 +372,39 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </p>
                 </div>
 
+                {duplicate && (
+                    <div className="mt-5 p-3 rounded-input border border-[color:var(--color-accent)] bg-paper3 text-left">
+                        <p className="flex items-center gap-2 text-[13px] sm:text-xs font-medium text-ink">
+                            <AlertTriangle size={15} className="shrink-0 text-[color:var(--color-accent)]" />
+                            Clips were already generated from this video
+                        </p>
+                        <ul className="mt-1.5 space-y-0.5 text-[11px] leading-relaxed text-muted">
+                            {duplicate.matches.map((m) => (
+                                <li key={m.job_id}>
+                                    {m.clip_count} clip{m.clip_count === 1 ? '' : 's'}
+                                    {m.created_at ? ` on ${new Date(m.created_at * 1000).toLocaleString()}` : ''}
+                                    {m.match_reason === 'title' ? ' — same title' : ''}
+                                    {m.match_reason === 'youtube_id' ? ' — same YouTube video' : ''}
+                                    {m.match_reason && m.match_reason.startsWith('size') ? ' — same file' : ''}
+                                </li>
+                            ))}
+                        </ul>
+                        <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
+                            Look for them in your clips before spending another run: this
+                            one costs a full transcription plus a render per clip.
+                        </p>
+                        <label className="flex items-start gap-2.5 mt-2.5 text-[12px] sm:text-[11px] leading-relaxed text-ink2 cursor-pointer select-none">
+                            <input
+                                type="checkbox"
+                                checked={duplicateAcked}
+                                onChange={(e) => setDuplicateAcked(e.target.checked)}
+                                className="mt-0.5 w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
+                            />
+                            <span>Generate clips from it again anyway</span>
+                        </label>
+                    </div>
+                )}
+
                 <label className="flex items-start gap-2.5 mt-5 text-left text-[13px] sm:text-xs leading-relaxed text-muted cursor-pointer select-none">
                     <input
                         type="checkbox"
@@ -351,7 +420,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 <button
                     type="submit"
                     data-tutorial="generate"
-                    disabled={isProcessing || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && !file)}
+                    disabled={isProcessing || !acknowledged || blockedByDuplicate || (mode === 'url' && !url) || (mode === 'file' && !file)}
                     className="w-full btn-primary mt-4"
                 >
                     {isProcessing ? (
