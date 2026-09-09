@@ -35,6 +35,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [language, setLanguage] = useState(() => {
         try { return localStorage.getItem('os_language') || 'auto'; } catch { return 'auto'; }
     });
+    // Names and domain words for the decode. Whisper writes a name it has
+    // never heard the way it sounded ("अजीए" for अजय); listing it fixes that
+    // word. Not remembered across sessions — it belongs to one video.
+    const [transcribePrompt, setTranscribePrompt] = useState('');
     // Output format, cinematic look, captions and hook titles are no longer
     // chosen here: every clip renders plain 9:16 and the user picks those per
     // clip (or for all clips) from the result card afterwards.
@@ -86,6 +90,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             clipMaxSeconds: clipMaxSeconds || null,
             layout,
             language,
+            transcribePrompt: transcribePrompt.trim() || null,
         };
         try {
             localStorage.setItem('os_layout', layout);
@@ -216,7 +221,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     >
                         <ChevronDown size={14} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                         advanced options
-                        {(targetClips || clipMinSeconds || clipMaxSeconds || layout !== 'auto' || language !== 'auto') && (
+                        {(targetClips || clipMinSeconds || clipMaxSeconds || layout !== 'auto'
+                            || language !== 'auto' || transcribePrompt.trim()) && (
                             <span className="text-brass">·</span>
                         )}
                     </button>
@@ -303,6 +309,24 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 them in Latin letters ("aap kaise hain"), so the caption styles
                                 still work.
                             </p>
+                            <div className="col-span-1 sm:col-span-3 pt-3 sm:pt-1 border-t border-rule">
+                                <p className="eyebrow mb-1.5">names &amp; terms in this video</p>
+                                <input
+                                    type="text"
+                                    value={transcribePrompt}
+                                    onChange={(e) => setTranscribePrompt(e.target.value)}
+                                    placeholder="Kapil Sharma, Ajay Devgn, Singham Returns"
+                                    className="input-field"
+                                    aria-label="names and terms in this video"
+                                />
+                                <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
+                                    Optional. A name the model has never heard comes out spelled
+                                    how it sounded; listing it here fixes that word. Keep it to a
+                                    few proper nouns in Latin letters &mdash; a long list, or one
+                                    written in the video's own script, gets repeated back as the
+                                    transcript.
+                                </p>
+                            </div>
                         </div>
                     )}
                     <p className="mt-3 text-[11px] leading-relaxed text-muted">

@@ -113,3 +113,44 @@ def test_resume_ignores_env_keys_outside_the_allowlist(dirs, monkeypatch):
     app_module.jobs.pop(job_id)
     app_module._resume_interrupted_jobs()
     assert app_module.jobs[job_id]["env"].get("GEMINI_API_KEY") != "stolen"
+
+
+def test_transcribe_prompt_reaches_the_subprocess(dirs):
+    resp = _post_process({"url": "https://www.youtube.com/watch?v=ok",
+                          "acknowledged": True, "language": "hinglish",
+                          "transcribe_prompt": "कपिल शर्मा, अजय देवगन"})
+    assert resp.status_code == 200, resp.text
+    job = app_module.jobs[resp.json()["job_id"]]
+    assert job["env"]["TRANSCRIBE_PROMPT"] == "कपिल शर्मा, अजय देवगन"
+
+
+def test_no_prompt_leaves_the_env_alone(dirs, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_PROMPT", raising=False)
+    _, job = _submit("hinglish")
+    assert "TRANSCRIBE_PROMPT" not in job["env"]
+
+
+def test_prompt_whitespace_is_collapsed_and_capped(dirs):
+    resp = _post_process({"url": "https://www.youtube.com/watch?v=ok",
+                          "acknowledged": True,
+                          "transcribe_prompt": "  a\n\n b " + "x" * 500})
+    assert resp.status_code == 200, resp.text
+    prompt = app_module.jobs[resp.json()["job_id"]]["env"]["TRANSCRIBE_PROMPT"]
+    assert prompt.startswith("a b x")
+    assert len(prompt) == 400
+
+
+def test_prompt_survives_a_redeploy(dirs, monkeypatch):
+    out_root, _ = dirs
+    monkeypatch.delenv("TRANSCRIBE_PROMPT", raising=False)
+    resp = _post_process({"url": "https://www.youtube.com/watch?v=ok",
+                          "acknowledged": True, "language": "hinglish",
+                          "transcribe_prompt": "कपिल शर्मा"})
+    job_id = resp.json()["job_id"]
+    manifest = json.load(open(os.path.join(out_root, job_id, ".resume.json"),
+                              encoding="utf-8"))
+    assert manifest["job_env"]["TRANSCRIBE_PROMPT"] == "कपिल शर्मा"
+
+    app_module.jobs.pop(job_id)
+    app_module._resume_interrupted_jobs()
+    assert app_module.jobs[job_id]["env"]["TRANSCRIBE_PROMPT"] == "कपिल शर्मा"

@@ -943,6 +943,7 @@ function App() {
         // Same rule: 'auto' is the server default, so only a deliberate choice
         // travels. 'hinglish' = Hindi transcribed, then romanised.
         language: data.language && data.language !== 'auto' ? data.language : null,
+        transcribe_prompt: data.transcribePrompt || null,
       };
 
       if (data.type === 'url') {

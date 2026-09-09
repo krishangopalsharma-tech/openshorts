@@ -15,13 +15,67 @@ _STDIO_CONFIGURED = False
 DEFAULT_WHISPER_MODEL = "small"
 
 
-def get_whisper_config():
-    """Return the faster-whisper model config, overridable via env vars."""
+# Languages a turbo model must not be used on, and what to use instead.
+#
+# large-v3-turbo is a 4-decoder-layer distillation of large-v3, and it mishears
+# Hindustani badly. Measured on real Hindi audio (a Comedy Nights episode,
+# 24-36s), turbo against full large-v3:
+#
+#   कापिल  / कपिल        (Kapil)          सार      / सर          (sir)
+#   अंगुथे पर / अंगुठे पे   (on the thumb)   नेलपेंट लगाय / नेल पेंट लगा  (nail paint on)
+#
+# and with an initial_prompt turbo abandons Hindi outright ("Hello Ajay sir.")
+# and then returns nonsense, which is the English-translation drift the module
+# docstring in transcribe_backends warns about. Once cached, large-v3 was not
+# slower than turbo here (2.7s vs 4.3s on a 12s slice, float16 on an RTX 2070
+# SUPER), so this is close to free. English is unaffected and turbo is quicker
+# there, hence a per-language override rather than a new global default.
+TURBO_UNSAFE_LANGUAGES = {"hi", "ur", "hinglish"}
+DEFAULT_HINDUSTANI_MODEL = "large-v3"
+
+# Shared faster-whisper config so both transcription paths (this module and
+# main.transcribe_video) behave identically. "small" is meaningfully better at
+# German than "base" without being much slower on CPU.
+DEFAULT_WHISPER_MODEL = "small"
+
+
+def whisper_supports_prompt(model_size):
+    """True when initial_prompt is safe on this model.
+
+    On turbo it is not: prompting it pushes Hindi audio into English
+    translation and then into nonsense (see TURBO_UNSAFE_LANGUAGES).
+    """
+    return "turbo" not in (model_size or "").lower()
+
+
+def get_whisper_config(language=None):
+    """Return the faster-whisper model config, overridable via env vars.
+
+    ``language`` is the code the ASR model will be given, and only decides
+    whether the configured model is fit for it (see TURBO_UNSAFE_LANGUAGES);
+    WHISPER_MODEL_HINDUSTANI overrides the replacement.
+    """
+    model_size = os.environ.get("WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
+    if language in TURBO_UNSAFE_LANGUAGES and not whisper_supports_prompt(model_size):
+        model_size = os.environ.get("WHISPER_MODEL_HINDUSTANI",
+                                    DEFAULT_HINDUSTANI_MODEL)
     return {
-        "model_size": os.environ.get("WHISPER_MODEL", DEFAULT_WHISPER_MODEL),
+        "model_size": model_size,
         "device": os.environ.get("WHISPER_DEVICE", "cpu"),
         "compute_type": os.environ.get("WHISPER_COMPUTE", "int8"),
     }
+
+
+def transcribe_prompt():
+    """Names and domain words to condition the decode on, or None.
+
+    Whisper spells proper nouns it has never seen phonetically ("अजीए" for
+    अजय); listing them in initial_prompt fixes exactly that, measured on the
+    same audio as TURBO_UNSAFE_LANGUAGES. Only applied on a model where
+    prompting is safe.
+    """
+    prompt = (os.environ.get("TRANSCRIBE_PROMPT") or "").strip()
+    return prompt or None
 
 
 # Decode params shared by both transcription paths. condition_on_previous_text

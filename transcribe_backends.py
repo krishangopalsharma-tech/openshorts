@@ -42,6 +42,8 @@ from subtitles import (
     get_whisper_config,
     WHISPER_TRANSCRIBE_PARAMS,
     merge_continuation_words,
+    transcribe_prompt,
+    whisper_supports_prompt,
 )
 
 PARAKEET_MODEL_ID = "nemo-parakeet-tdt-0.6b-v3"
@@ -115,20 +117,35 @@ _whisper_lock = threading.Lock()
 _whisper_force_cpu = False
 
 
-def _get_whisper_model():
+def _get_whisper_model(language=None):
     """Process-wide WhisperModel singleton, rebuilt if the env config changes.
 
     Keeping the model resident avoids a full reload per transcription (which
     on GPU would also mean re-allocating a couple of GB of VRAM per job).
+    ``language`` can change which model that is (a turbo build is not usable
+    on Hindustani — see subtitles.TURBO_UNSAFE_LANGUAGES), and it is part of
+    the cache key through the resolved model size.
     """
     global _whisper_model, _whisper_key
-    cfg = get_whisper_config()
+    cfg = get_whisper_config(language)
     if _whisper_force_cpu:
         cfg["device"] = "cpu"
         cfg["compute_type"] = "int8"
     key = (cfg["model_size"], cfg["device"], cfg["compute_type"])
     with _whisper_lock:
         if _whisper_model is None or _whisper_key != key:
+            # torch FIRST, and not because this module uses it: the CUDA
+            # userspace libs CTranslate2 needs ship inside torch's own package
+            # (torch/lib/cublas64_12.dll), and it is torch's import that adds
+            # that directory to the DLL search path. Import faster_whisper
+            # first and the GPU load dies with "Library cublas64_12.dll is not
+            # found or cannot be loaded", which trips _whisper_force_cpu for
+            # the whole process. main.py only got away with it because
+            # ultralytics happens to import torch before transcription starts.
+            try:
+                import torch  # noqa: F401
+            except ImportError:
+                pass
             from faster_whisper import WhisperModel
             _whisper_model = WhisperModel(key[0], device=key[1], compute_type=key[2])
             _whisper_key = key
@@ -136,7 +153,7 @@ def _get_whisper_model():
 
 
 def _run_whisper_once(media_path, **params):
-    model, device = _get_whisper_model()
+    model, device = _get_whisper_model(params.get("language"))
     gate = _ASR_GATE if device != "cpu" else _NULL_GATE
     with gate:
         segments, info = model.transcribe(media_path, **params)
@@ -169,7 +186,8 @@ def run_whisper_transcription(media_path, **params):
     message-sniffing missed exactly the failure this fallback exists for.
     """
     global _whisper_model, _whisper_force_cpu
-    intended_device = "cpu" if _whisper_force_cpu else get_whisper_config()["device"]
+    intended_device = ("cpu" if _whisper_force_cpu
+                       else get_whisper_config(params.get("language"))["device"])
     try:
         return _run_whisper_once(media_path, **params)
     except RuntimeError as e:
@@ -187,6 +205,18 @@ def _transcribe_with_whisper(media_path):
     params = dict(WHISPER_TRANSCRIBE_PARAMS)
     if language:
         params["language"] = _asr_language(language)
+
+    # Names and domain words, when the job supplied them. Dropped rather than
+    # sent to a turbo model, which answers a prompt by translating to English.
+    prompt = transcribe_prompt()
+    if prompt:
+        model_size = get_whisper_config(params.get("language"))["model_size"]
+        if whisper_supports_prompt(model_size):
+            params["initial_prompt"] = prompt
+        else:
+            print(f"🎙️ [ASR] initial_prompt skipped — '{model_size}' "
+                  f"translates instead of transcribing when prompted")
+
     segments, info = run_whisper_transcription(media_path, **params)
 
     out_segments = []

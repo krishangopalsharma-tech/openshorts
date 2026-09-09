@@ -1063,7 +1063,7 @@ def _install_drain_signal_handler():
 # ALLOWLIST, never as an env diff: that is what keeps GEMINI_API_KEY and every
 # other server credential out of a file sitting next to the user's video.
 _RESUMABLE_ENV_KEYS = (
-    "TRANSCRIBE_LANGUAGE",
+    "TRANSCRIBE_LANGUAGE", "TRANSCRIBE_PROMPT",
     "AUTO_CAPTIONS", "AUTO_HOOK", "AUTO_HOOK_STYLE", "CINEMATIC_EFFECTS",
     "CLIP_TARGET_MIN", "CLIP_TARGET_MAX", "CLIP_MIN_SECONDS", "CLIP_MAX_SECONDS",
     "AUTO_LAYOUT", "SPLIT_LAYOUT", "SCREENCAST_LAYOUT", "SPEAKER_CUT",
@@ -2379,6 +2379,7 @@ async def process_endpoint(
     thumbnail_session_id: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
+    transcribe_prompt: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
     cinematic_effects: Optional[str] = Form(None),
 ):
@@ -2408,6 +2409,7 @@ async def process_endpoint(
         thumbnail_session_id = body.get("thumbnail_session_id")
         captions = body.get("captions")
         language = body.get("language")
+        transcribe_prompt = body.get("transcribe_prompt")
         upload_id = body.get("upload_id")
         cinematic_effects = body.get("cinematic_effects")
 
@@ -2608,6 +2610,16 @@ async def process_endpoint(
                                            "(e.g. 'hi', 'es'), 'hinglish' or 'auto'")
             env["TRANSCRIBE_LANGUAGE"] = lang
             print(f"[language] job={job_id} forced={lang}")
+
+    # Names and domain words for the decode. Whisper spells a name it has never
+    # heard phonetically — "अजीए" for अजय — and listing it here fixes that word
+    # and nothing else. Ignored on a turbo model, which answers a prompt by
+    # translating to English (subtitles.whisper_supports_prompt).
+    if transcribe_prompt:
+        prompt = " ".join(str(transcribe_prompt).split())[:400]
+        if prompt:
+            env["TRANSCRIBE_PROMPT"] = prompt
+            print(f"[prompt] job={job_id} terms={prompt[:80]!r}")
 
     input_path = None
     if url:
