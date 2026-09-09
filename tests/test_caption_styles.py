@@ -1,6 +1,7 @@
 """The ClipForge caption port: preset/override merging in caption_styles and
 the ASS the styled generator writes (subtitles.generate_ass_styled)."""
 import os
+import re
 
 import caption_styles as cs
 import subtitles
@@ -18,6 +19,16 @@ TRANSCRIPT = {
                   _w(" this", 11.1, 11.3), _w(" is", 11.3, 11.5), _w(" it", 11.6, 12.2)],
     }],
 }
+
+
+def _spoken(events):
+    """The words an ASS event list actually shows, override blocks removed."""
+    words = []
+    for line in events:
+        text = line.split(",", 9)[9]
+        text = re.sub(r"\{[^}]*\}", "", text).replace(chr(92) + "N", " ")
+        words += [w for w in text.split() if w.isalpha()]
+    return sorted(set(words))
 
 
 def _ass(tmp_path, preset, overrides=None, **kw):
@@ -102,6 +113,24 @@ class TestStyledAss:
         _, _, events = _ass(tmp_path, "one_word_punch")
         assert len(events) == 5
         assert all("\\fad(60,0)" in e for e in events)
+
+    def test_one_line_captions_split_into_more_events_instead_of_dropping_words(self, tmp_path):
+        """max_lines=1 is the "one line" option in the caption layout control.
+        The risk it has to not have: a line that cannot fit quietly losing the
+        rest of the speech. Every word still reaches the file, in more events."""
+        _, _, two = _ass(tmp_path, "bold_white", {"max_lines": 2, "max_chars": 12})
+        _, _, one = _ass(tmp_path, "bold_white", {"max_lines": 1, "max_chars": 12})
+
+        assert len(one) > len(two)                      # same words, more events
+        assert not any("\\N" in e for e in one)          # and never a second line
+        assert any("\\N" in e for e in two)
+        assert _spoken(one) == _spoken(two) == ["HELLO", "IS", "IT", "THIS", "WORLD"]
+
+    def test_a_word_longer_than_the_line_is_kept_not_dropped(self, tmp_path):
+        """An empty line accepts the word whatever its length. Without that a
+        word wider than max_chars could never be placed and would vanish."""
+        _, _, events = _ass(tmp_path, "bold_white", {"max_lines": 1, "max_chars": 3})
+        assert _spoken(events) == ["HELLO", "IS", "IT", "THIS", "WORLD"]
 
     def test_word_reveal_and_glow_layer(self, tmp_path):
         _, _, events = _ass(tmp_path, "word_reveal", {"glow_enabled": True, "glow_color": "#22D3EE"})

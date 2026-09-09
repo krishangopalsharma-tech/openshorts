@@ -48,6 +48,18 @@ const LINES_OPTIONS = [
     { value: 2, label: '2 lines' },
 ];
 
+// The three shapes a caption can take, as one choice. They were already
+// reachable — max_lines under "position", one_word among the animations — but
+// split across two tabs and named after the mechanism rather than the result,
+// so "I keep getting two lines" was a fair complaint about a setting that
+// existed. This is the front door; both original controls still work and stay
+// in sync, since all three read the same merged config.
+const LAYOUT_OPTIONS = [
+    { value: 'two', label: '2 lines' },
+    { value: 'one', label: '1 line' },
+    { value: 'word', label: '1 word' },
+];
+
 // What the modal falls back to when /api/caption-styles is unreachable: the
 // server's default preset, so a user can still apply captions offline-ish.
 const FALLBACK_STYLES = {
@@ -287,6 +299,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     // a drag is in flight; committed as a pin on pointerup, never before.
     const [drag, setDrag] = useState(null);
     const dragRef = useRef(null);
+    // The animation "1 word" replaced, so it can be restored on the way out.
+    const displacedAnim = useRef('none');
 
     // Style library: fetched once per page, then served from the module cache.
     useEffect(() => {
@@ -397,6 +411,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const effectiveAnimation = cfg.animation && cfg.animation !== 'none'
         ? cfg.animation
         : (cfg.karaoke ? 'karaoke' : 'none');
+    const layoutMode = effectiveAnimation === 'one_word'
+        ? 'word'
+        : ((cfg.max_lines ?? 2) === 1 ? 'one' : 'two');
     const pinned = cfg.pos_x !== undefined && cfg.pos_x !== null && cfg.pos_y !== undefined && cfg.pos_y !== null;
     const offX = offsetOf(cfg.offset_x);
     const offY = offsetOf(cfg.offset_y);
@@ -424,7 +441,16 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     // the previous one; otherwise a font override would mask every chip.
     const choosePreset = (id) => {
         setPresetId(id);
-        setOverrides({});
+        // The look's own tweaks go, but the caption's shape stays: every
+        // preset inherits max_lines 2 from the server's BASE, so clearing it
+        // here made "1 line" quietly revert the moment the user tried another
+        // look — which reads as the setting not working.
+        setOverrides((o) => {
+            const kept = {};
+            if (o.max_lines !== undefined) kept.max_lines = o.max_lines;
+            if (o.animation === 'one_word') { kept.animation = 'one_word'; kept.karaoke = false; }
+            return kept;
+        });
         setActiveTheme(null);
     };
     const applyTheme = (t) => {
@@ -436,6 +462,23 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         setActiveTheme(null);
     };
     const setAnimation = (v) => setOv({ animation: v, karaoke: v === 'karaoke' });
+    // "1 word" is an animation while the other two are a line count, so
+    // switching away from it has to put back the animation it displaced
+    // rather than leaving the caption on 'none'.
+    const setLayout = (mode) => {
+        if (mode === 'word') {
+            if (effectiveAnimation !== 'one_word') displacedAnim.current = effectiveAnimation;
+            setOv({ animation: 'one_word', karaoke: false });
+            return;
+        }
+        const patch = { max_lines: mode === 'one' ? 1 : 2 };
+        if (effectiveAnimation === 'one_word') {
+            const back = displacedAnim.current === 'one_word' ? 'none' : displacedAnim.current;
+            patch.animation = back;
+            patch.karaoke = back === 'karaoke';
+        }
+        setOv(patch);
+    };
     // Zero is the default, so it is dropped rather than stored: a preset that
     // was only nudged back to centre stays "untouched".
     const setOffset = (key, v) => {
@@ -701,6 +744,20 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 {/* -------- PRESETS -------- */}
                                 {tab === 'presets' && (
                                     <>
+                                        <div>
+                                            <p className="eyebrow mb-2">Caption layout</p>
+                                            <SegmentedControl
+                                                options={LAYOUT_OPTIONS}
+                                                value={layoutMode}
+                                                onChange={setLayout}
+                                                size="sm"
+                                            />
+                                            <p className="text-[11px] text-muted mt-1.5 leading-relaxed">
+                                                How much text is on screen at once. One word at a time is
+                                                the punchiest and needs no reading; two lines fits the most
+                                                speech. This survives changing the look below.
+                                            </p>
+                                        </div>
                                         <div>
                                             <p className="eyebrow mb-2">Look</p>
                                             <div className="grid grid-cols-2 gap-1.5">

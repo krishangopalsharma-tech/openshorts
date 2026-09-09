@@ -470,7 +470,21 @@ a restart, the R2 archive and the ZIP export resolve the newest derivative.
   persisted on the clip as `caption_style`, and
   `_reapply_captions` / `_clip_layer_hooks` use it, so a later format change
   or trim brings back the user's captions, not `AUTO_CAPTION_STYLE`. A
-  legacy-field request clears it. Fonts: the 30 TTFs under `fonts/` are the
+  legacy-field request clears it.
+
+  **Caption layout** (`max_lines` 1-2, `max_chars` 8-48, or the `one_word`
+  animation) is the shape of the caption rather than its style, and the modal
+  offers the three states as one choice at the top of the presets tab: 2
+  lines / 1 line / 1 word. They were always reachable — `max_lines` sat at the
+  bottom of the position tab and `one_word` among the colour tab's animations
+  — which is why "I only get two lines" was a fair report about a setting that
+  existed. Two things make it hold: every preset inherits `max_lines: 2` from
+  `caption_styles.BASE`, and `choosePreset` used to clear all overrides, so a
+  one-line choice reverted the moment the user tried another look; the shape
+  keys now survive a preset change. And leaving "1 word" restores the
+  animation it displaced instead of dropping to `none`. `max_lines: 1` never
+  loses speech — `_styled_group_events` flushes a full line into a NEW event,
+  and an empty line accepts a word however long it is. Fonts: the 30 TTFs under `fonts/` are the
   ClipForge set (Google Fonts, OFL); libass finds them through `fontsdir`,
   the dashboard `@font-face`s them from `/fonts/<file>` for the live preview.
   `GET /api/caption-styles` is the single source the modal renders from.
