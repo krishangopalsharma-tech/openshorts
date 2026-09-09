@@ -12,6 +12,7 @@ audio codecs, filters) stay at each call site.
 import os
 import subprocess
 import threading
+import time
 
 # Quality tiers pinning the historical libx264 settings.
 QUALITY = "quality"            # was: -preset medium -crf 18
@@ -244,3 +245,74 @@ def probe_dimensions(video_path, timeout=60):
     except Exception:
         pass
     return None
+
+# An mp4 that ffmpeg abandoned before writing the moov atom is a few dozen
+# bytes of ftyp, or nothing at all. Anything a real cut produces is orders of
+# magnitude larger, so this only ever catches a failed encode.
+MIN_CUT_BYTES = 1024
+
+# Retries of a failed cut, on the SAME encoder, and how long to wait before
+# each one. Deliberately not a fallback to libx264: the clip has to come out
+# of the GPU like every other one, and a CPU re-encode of a 1080p cut on a box
+# that is already busy enough to have failed the first attempt is the wrong
+# trade. Waiting is the whole mechanism — whatever the GPU could not give this
+# encode, another job finishes and gives back.
+CUT_RETRY_WAITS = (3, 9)
+
+
+def cut_clip(input_video, clip_temp_path, start, end, clip_number):
+    """Cut [start, end] out of the source into ``clip_temp_path``.
+
+    Raises RuntimeError with ffmpeg's own stderr when the cut does not produce
+    a playable file. That report is the point: since dec-2025 the cut ran with
+    its return code ignored and stderr captured into a pipe nobody read, so a
+    failed cut handed an empty file to the reframer and the job's only visible
+    error was "moov atom not found" three layers downstream — from ffmpeg,
+    TransNetV2 and PySceneDetect in turn, each naming the temp file rather
+    than the encode that never wrote it (prod, 9-sep-2026: three clips of one
+    job lost, cause unrecoverable because the stderr had been discarded).
+
+    A failed cut is retried on the same encoder after a wait. The failure this
+    exists for is transient: the same command, on the same source file, cut
+    fine by hand minutes later, and the nvenc probe is a 256x256 lavfi frame
+    cached for the life of the process, so it stays true while a real 1080p
+    session cannot allocate on a GPU that other jobs are filling.
+    """
+    encode_args = video_encode_args(QUALITY_FAST)
+    command = [
+        'ffmpeg', '-y',
+        '-ss', str(start),
+        '-to', str(end),
+        '-i', input_video,
+        *encode_args,
+        *audio_encode_args(),
+        clip_temp_path
+    ]
+
+    def _run():
+        result = subprocess.run(command, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True, errors="replace")
+        # ffmpeg has been seen exiting 0 having written nothing, so the file
+        # itself is the verdict, not just the return code.
+        size = os.path.getsize(clip_temp_path) if os.path.exists(clip_temp_path) else 0
+        ok = result.returncode == 0 and size >= MIN_CUT_BYTES
+        return ok, f"exit {result.returncode}, {size} bytes\n{(result.stderr or '').strip()[-800:]}"
+
+    for attempt, wait in enumerate(CUT_RETRY_WAITS + (None,), start=1):
+        ok, report = _run()
+        if ok:
+            if attempt > 1:
+                print(f"   ✅ Clip {clip_number} cut on attempt {attempt}.")
+            return
+        if wait is None:
+            break
+        print(f"   ⚠️ Cut of clip {clip_number} failed ({report}) — "
+              f"retrying in {wait}s.")
+        time.sleep(wait)
+
+    raise RuntimeError(
+        f"ffmpeg could not cut clip {clip_number} ({start}s-{end}s) from "
+        f"{os.path.basename(input_video)} in {len(CUT_RETRY_WAITS) + 1} "
+        f"attempts: {report}")
+
+

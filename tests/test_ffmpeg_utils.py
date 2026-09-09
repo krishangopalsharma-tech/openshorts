@@ -143,3 +143,68 @@ def test_ai_disclosure_never_destroys_the_file_it_cannot_tag():
         assert mark_ai_generated(p) is False
         assert open(p, "rb").read() == b"not a video"
         assert not os.path.exists(p + ".aitag.mp4")
+
+
+# --- cut_clip: a failed cut must say why, not hand an empty file downstream ---
+
+class _FakeRun:
+    """Stand-in for subprocess.run that writes what a real ffmpeg would."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)   # (returncode, bytes_written, stderr)
+        self.commands = []
+
+    def __call__(self, command, **kwargs):
+        self.commands.append(command)
+        returncode, size, stderr = self.outcomes.pop(0)
+        with open(command[-1], "wb") as fh:
+            fh.write(b"\0" * size)
+        return subprocess.CompletedProcess(command, returncode, None, stderr)
+
+
+@pytest.fixture
+def _cut(tmp_path, monkeypatch):
+    """Run cut_clip against a scripted ffmpeg, on the GPU encoder, no waiting."""
+    monkeypatch.setenv("FFMPEG_ENCODER", "auto")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: True)
+    slept = []
+    monkeypatch.setattr(ffmpeg_utils.time, "sleep", slept.append)
+
+    def run(outcomes):
+        fake = _FakeRun(outcomes)
+        monkeypatch.setattr(ffmpeg_utils.subprocess, "run", fake)
+        ffmpeg_utils.cut_clip("source.mp4", str(tmp_path / "temp_clip.mp4"), 1.5, 12.0, 4)
+        return fake
+
+    run.slept = slept
+    return run
+
+
+def test_successful_cut_runs_once(_cut):
+    fake = _cut([(0, 5_000_000, "")])
+    assert len(fake.commands) == 1
+    assert "h264_nvenc" in fake.commands[0]
+
+
+def test_retry_stays_on_the_gpu_after_a_wait(_cut):
+    """No libx264 fallback: the GPU failure is transient, so wait and ask again."""
+    fake = _cut([(1, 0, "OpenEncodeSessionEx failed: out of memory"),
+                 (0, 5_000_000, "")])
+    assert len(fake.commands) == 2
+    assert all("h264_nvenc" in cmd for cmd in fake.commands)
+    assert "libx264" not in fake.commands[1]
+    assert _cut.slept == [ffmpeg_utils.CUT_RETRY_WAITS[0]]
+
+
+def test_exit_zero_with_an_empty_file_is_still_a_failure(_cut):
+    """The prod symptom: ffmpeg wrote nothing, so the reframer met a file with
+    no moov atom and blamed the temp clip instead of the encode."""
+    fake = _cut([(0, 0, ""), (0, 5_000_000, "")])
+    assert len(fake.commands) == 2
+
+
+def test_every_attempt_failing_raises_with_ffmpeg_stderr(_cut):
+    attempts = len(ffmpeg_utils.CUT_RETRY_WAITS) + 1
+    with pytest.raises(RuntimeError, match="Invalid data found"):
+        _cut([(1, 0, "Invalid data found when processing input")] * attempts)
+    assert _cut.slept == list(ffmpeg_utils.CUT_RETRY_WAITS)
