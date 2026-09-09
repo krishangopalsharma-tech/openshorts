@@ -22,10 +22,16 @@ def _clip_title(clip) -> str:
     return clip.get("title") or clip.get("video_title_for_youtube_short") or "Short"
 
 
-async def archive_job(user_id, job_id, clips, output_dir):
+async def archive_job(user_id, job_id, clips, output_dir, attestation=None):
     """Upload a completed managed job's clips + metadata JSON to R2 and record
     them for history. The metadata (transcript included) plus the Project row
-    make the whole job re-openable and editable later, not just viewable."""
+    make the whole job re-openable and editable later, not just viewable.
+
+    ``attestation`` is the "I hold the rights to this video" declaration the
+    submitter ticked (truncated IP, user agent, timestamp, which input path).
+    The privacy policy promises to keep it; the Project row is where it lives,
+    so it is deleted with the account like everything else that names a user.
+    """
     if not settings.r2_configured or not clips:
         return
     metadata_r2_key = None
@@ -116,6 +122,20 @@ async def archive_job(user_id, job_id, clips, output_dir):
                      "active_layers": None}
                     for i, filename, _key, _title, _size in uploaded
                 ]}
+                if attestation:
+                    state["rights_attestation"] = {
+                        "acknowledged": bool(attestation.get("acknowledged")),
+                        # Already truncated to a /24 (or /48) by app.py.
+                        "ip_network": attestation.get("ip"),
+                        "user_agent": (attestation.get("user_agent") or "")[:300],
+                        "timestamp": attestation.get("timestamp"),
+                        "source": attestation.get("source"),
+                    }
+                elif proj is not None and isinstance(proj.state, dict):
+                    # Re-archiving must not erase the original declaration.
+                    prior = proj.state.get("rights_attestation")
+                    if prior:
+                        state["rights_attestation"] = prior
                 total = sum(u[4] for u in uploaded)
                 if proj is None:
                     s.add(Project(user_id=user_id, job_id=job_id, title=uploaded[0][3],

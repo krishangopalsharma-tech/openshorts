@@ -1,4 +1,5 @@
 import os
+import llm_backend
 import re
 import sys
 import unicodedata
@@ -8,6 +9,8 @@ import threading
 import json
 import shutil
 import glob
+import hashlib
+import hmac
 import time
 import zipfile
 import csv
@@ -103,6 +106,17 @@ BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true",
 # the tight default because clips are archived to R2 as soon as a job finishes.
 JOB_RETENTION_SECONDS = int(
     os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
+)
+# The retained download of a URL job (--keep-original) is the one artifact that
+# is a full copy of someone else's video rather than something we made, so it
+# can be aged out ahead of the clips it produced. Defaults to the job clock,
+# i.e. no change: dropping it earlier costs the clip editor, whose rerender,
+# reframe, scenes and EDL endpoints all read that file and answer 409 once it
+# is gone. Lower it only if you would rather lose in-session re-edits than
+# keep the original around. Uploads are deliberately untouched: that file is
+# the user's own content, which they attested to owning.
+SOURCE_RETENTION_SECONDS = int(
+    os.environ.get("SOURCE_RETENTION_SECONDS", str(JOB_RETENTION_SECONDS))
 )
 # Force full pipeline logs to the client even under billing (local debugging).
 DEBUG_LOGS = os.environ.get("DEBUG_LOGS", "").lower() in ("1", "true", "yes")
@@ -290,16 +304,33 @@ async def reserve_process_minutes(request, url, input_path, job_id):
     # job cap.
     _check_probe_rate(user.id)
 
-    # Probe input duration (blocking → run in a thread).
+    # Probe input duration (blocking → run in a thread). When today's paid
+    # traffic is over budget, the probe (and below, the job itself) runs
+    # without the per-GB proxy: statics or nothing.
+    try:
+        from cloud import proxy_ledger as _pl
+        paid_allowed = not await _pl.budget_exceeded()
+    except Exception:
+        pass
     loop = asyncio.get_event_loop()
     try:
         if url:
-            minutes = await loop.run_in_executor(None, _metering.probe_url_minutes, url)
+            minutes = await loop.run_in_executor(
+                None, functools.partial(_metering.probe_url_minutes, url,
+                                        allow_paid=paid_allowed))
         else:
             minutes = await loop.run_in_executor(None, _metering.probe_file_minutes, input_path)
     except Exception:
         raise HTTPException(status_code=400,
                             detail="Could not determine the video duration. Try a different source.")
+    finally:
+        # A probe that had to reach the paid proxy leaves an event behind;
+        # record it (DB row + Telegram) whether or not the probe succeeded.
+        try:
+            from cloud import proxy_ledger as _pl
+            await _pl.drain_probe_events()
+        except Exception:
+            pass
     minutes = max(1, math.ceil(minutes))
 
     try:
@@ -497,6 +528,50 @@ def _canonical_clip_file(output_dir, base_name, index):
         return clean
     # Highest timestamp wins — that's the most recent styling.
     return os.path.basename(max(derived, key=os.path.getmtime))
+
+
+def _clips_actually_rendered(job_id, output_dir, base_name, clips):
+    """Keep only the clips whose file is really on disk. Returns (kept, missing).
+
+    The metadata JSON is written BEFORE any clip renders, and main.py's worker
+    pool swallows a per-clip exception (it only prints "❌ Clip N failed") and
+    still exits 0. So ``shorts`` is what Gemini promised, not what ffmpeg
+    produced, and ``_canonical_clip_file`` happily returns the name of a file
+    that was never written.
+
+    Handing those back as delivered clips is what let a job that rendered
+    NOTHING be marked completed: the minutes were committed, ClipsDelivered
+    fired, ``archive_job`` skipped every missing file and uploaded the metadata
+    alone — which, because it returns before writing the Project row, left the
+    job unrestorable and invisible in history — and the dashboard offered clips
+    whose only existence was a title, so "download all" answered 404 "No clip
+    files found for this job" (ticket #4711, job 89d76bbc, 6-sep-2026).
+    Measured over the R2 archive on 7-sep-2026: 195 of 1687 archived jobs held
+    a metadata file and not one clip, across 184 users.
+
+    Trust the disk, not the promise.
+    """
+    # main.py announces the file it actually finished for each clip
+    # (CLIP_READY, printed after the whole reframe/watermark/hook/caption
+    # chain). Prefer it over rebuilding the name: the marker is what the file
+    # IS, _canonical_clip_file is a guess from the naming convention.
+    ready_files = (jobs.get(job_id) or {}).get('ready_files') or {}
+    kept = []
+    for i, clip in enumerate(clips):
+        clip_filename = (ready_files.get(i)
+                         or _canonical_clip_file(output_dir, base_name, i))
+        clip_path = os.path.join(output_dir, clip_filename)
+        try:
+            present = os.path.getsize(clip_path) > 0
+        except OSError:
+            present = False
+        if not present:
+            print(f"⚠️  Clip {i + 1} of {job_id} never rendered "
+                  f"({clip_filename}) — dropping it from the result.")
+            continue
+        clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+        kept.append(clip)
+    return kept, len(clips) - len(kept)
 
 
 def _strip_burned_captions(output_dir, filename):
@@ -1167,6 +1242,12 @@ def _resume_interrupted_jobs() -> set:
         # Rebuild env from scratch — the manifest holds no secrets. Managed
         # (cloud) jobs get the server key; self-host falls back to its env key.
         env = os.environ.copy()
+        try:
+            from cloud import proxy_ledger as _pl
+            if BILLING_ENABLED and _pl.budget_exceeded_sync():
+                env.pop("PROXY_URL", None)  # daily paid-proxy budget hit
+        except Exception:
+            pass
         if BILLING_ENABLED and user_id is not None:
             try:
                 env["GEMINI_API_KEY"] = managed_keys.gemini_key()
@@ -1283,6 +1364,36 @@ def _enforce_output_size_cap():
         print(f"🧹 Size cap: purged {job_id} ({size / 1024**2:.0f} MB)")
 
 
+def _sweep_retained_sources(now=None):
+    """Delete retained downloads older than SOURCE_RETENTION_SECONDS.
+
+    Only the ``source_video`` a URL job kept in its own directory: an upload is
+    the user's own file and ages out with the job like everything else. Yields
+    the job ids it emptied. A no-op unless the knob is set below the job clock.
+    """
+    if SOURCE_RETENTION_SECONDS >= JOB_RETENTION_SECONDS:
+        return
+    now = time.time() if now is None else now
+    for job_id in os.listdir(OUTPUT_DIR):
+        if job_id == os.path.basename(THUMBNAILS_DIR):
+            continue
+        try:
+            metas = glob.glob(os.path.join(OUTPUT_DIR, job_id, "*_metadata.json"))
+            if not metas:
+                continue
+            with open(metas[0]) as f:
+                name = json.load(f).get('source_video')
+            if not name:
+                continue
+            src = os.path.join(OUTPUT_DIR, job_id, os.path.basename(name))
+            if (os.path.exists(src)
+                    and now - os.path.getmtime(src) > SOURCE_RETENTION_SECONDS):
+                os.remove(src)
+                yield job_id
+        except Exception:
+            continue
+
+
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
     import time
@@ -1306,6 +1417,9 @@ async def cleanup_jobs():
                         shutil.rmtree(job_path, ignore_errors=True)
                         if job_id in jobs:
                             del jobs[job_id]
+
+            for job_id in _sweep_retained_sources(now):
+                print(f"🧹 Dropped retained source for job {job_id}")
 
             # Hard disk cap. The time-based sweep above bounds the *age* of what
             # we keep, not its size: a burst of long videos can fill the volume
@@ -1383,8 +1497,29 @@ _proxy_month = {"month": None, "bytes": 0, "alerted": False}
 PROXY_ALERT_GB = 100
 
 
+def _job_source_url(job) -> Optional[str]:
+    """The ``-u`` argument of the job's main.py command, if it was a URL job."""
+    cmd = list((job or {}).get('cmd') or [])
+    # The command is ``python -u main.py -u <url>``: skip past the script
+    # name first or the interpreter's own ``-u`` flag is what gets matched.
+    start = next((i + 1 for i, a in enumerate(cmd) if str(a).endswith('main.py')), 0)
+    for i in range(start, len(cmd) - 1):
+        if cmd[i] in ('-u', '--url'):
+            return cmd[i + 1]
+    return None
+
+
 async def _track_proxy_usage(job_id):
-    nbytes = (jobs.get(job_id) or {}).get('proxy_bytes') or 0
+    job = jobs.get(job_id) or {}
+    # Durable trail + Telegram page whenever the per-GB proxy carried bytes
+    # (cloud mode only: self-host has no DB and pays nobody per GB).
+    if BILLING_ENABLED and job.get('proxy_route'):
+        try:
+            from cloud import proxy_ledger as _pl
+            await _pl.record_download(job_id, job.get('proxy_route'), _job_source_url(job))
+        except Exception as e:
+            print(f"⚠️ proxy ledger failed for {job_id}: {e}")
+    nbytes = job.get('proxy_bytes') or 0
     if not nbytes:
         return
     month = datetime.now(timezone.utc).strftime("%Y-%m")
@@ -1543,7 +1678,15 @@ async def _notify_clip_activity(job_id):
 # alerts with a bare "Traceback ... exit code 1" and no cause (prod 20-ago).
 _ERROR_MARKERS = ("❌", "ERROR:", "Error:", "Traceback", "FATAL", "Exception",
                   "Process failed with exit code", "No metadata file generated",
-                  "Execution error:")
+                  "Execution error:",
+                  # A clip render dies in two steps: reframe_v2 raises (it has
+                  # no False return, only `return True`), main.py prints this
+                  # and falls back to the v1 loop, and only if v1 ALSO fails
+                  # does "❌ Clip N failed" appear. The ❌ line then carries
+                  # v1's exception, not the one that started it, so without
+                  # this marker the alert names the fallback and hides the
+                  # cause. Both lines are wanted.
+                  "Reframe v2 failed")
 
 
 def _job_error_text(logs) -> str:
@@ -1883,8 +2026,16 @@ app.add_middleware(
     expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
 )
 
-# Mount static files for serving videos
-app.mount("/videos", StaticFiles(directory=OUTPUT_DIR), name="videos")
+# Mount static files for serving videos. A miss under /videos/<job_id>/ first
+# tries to bring the job back from R2 (see restoring_static.py): the players
+# of a reopened project used to 404 while the transcript requests were still
+# restoring it. Late-bound lambda: the restorer is defined further down.
+from restoring_static import RestoringStaticFiles
+import media_auth
+app.mount("/videos", RestoringStaticFiles(
+    directory=OUTPUT_DIR,
+    guard=media_auth.is_servable,
+    restorer=lambda job_id: _restore_for_public_path(job_id)), name="videos")
 
 # Mount static files for serving thumbnails
 THUMBNAILS_DIR = os.path.join(OUTPUT_DIR, "thumbnails")
@@ -1987,6 +2138,17 @@ def enqueue_output(out, job_id):
                         if job_id in jobs:
                             jobs[job_id]['proxy_bytes'] = int(decoded_line.split("=", 1)[1])
                     except ValueError:
+                        pass
+                    continue
+                if decoded_line.startswith("PROXY_ROUTE="):
+                    # Which download attempt won and why the free ones failed;
+                    # persisted at job end (cloud/proxy_ledger). Not shown to clients.
+                    try:
+                        from cloud import proxy_ledger as _pl
+                        route = _pl.parse_route_line(decoded_line)
+                        if route is not None and job_id in jobs:
+                            jobs[job_id]['proxy_route'] = route
+                    except Exception:
                         pass
                     continue
                 print(f"📝 [Job Output] {decoded_line}")
@@ -2100,11 +2262,19 @@ async def run_job(job_id, job_data):
                 clips = data.get('shorts', [])
                 cost_analysis = data.get('cost_analysis')
 
-                for i, clip in enumerate(clips):
-                     clip_filename = _canonical_clip_file(output_dir, base_name, i)
-                     clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                
-                jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+                rendered, missing = _clips_actually_rendered(
+                    job_id, output_dir, base_name, clips)
+                if not rendered:
+                    # Nothing to hand over: fail the job so _settle_reservation
+                    # releases the minutes instead of committing them.
+                    jobs[job_id]['status'] = 'failed'
+                    jobs[job_id]['logs'].append(
+                        "No clips could be rendered from this video.")
+                else:
+                    if missing:
+                        jobs[job_id]['logs'].append(
+                            f"⚠️ {missing} of {len(clips)} clips failed to render.")
+                    jobs[job_id]['result'] = {'clips': rendered, 'cost_analysis': cost_analysis}
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
@@ -2144,6 +2314,9 @@ async def get_config():
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        # Self-host only: tells the dashboard the Gemini key is optional
+        # because the moment picker runs on an OpenAI-compatible server.
+        "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
     }
 
 async def _probe_youtube_quality(url: str) -> dict:
@@ -2384,10 +2557,17 @@ async def process_endpoint(
     cinematic_effects: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
-    if not api_key:
+    if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
+        # Self-host with an OpenAI-compatible server configured needs no
+        # Google key for the core pipeline: the moment picker runs there and
+        # the frame-based stages degrade on their own (layout_picker returns
+        # "none", silent videos fail with a message that says why).
         raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
+    # May be lowered by the paid-proxy budget check in the metering block
+    # below; self-host never runs that block, so it must default here.
+    paid_allowed = True
     force_low = str(force_low_quality).lower() in ("1", "true", "yes")
 
     # Handle JSON body manually for URL payload
@@ -2511,7 +2691,13 @@ async def process_endpoint(
     # probe above already gets this right.
     cmd = [sys.executable, "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    if not paid_allowed:
+        # Daily paid-proxy budget hit: this job runs on the free routes only.
+        env.pop("PROXY_URL", None)
+    if api_key:
+        env["GEMINI_API_KEY"] = api_key # Override with key from request
+    else:
+        env.pop("GEMINI_API_KEY", None)  # local-LLM job: main.py must not find a stale key
     # The stdio fix above only covers this process. main.py prints an emoji on
     # its first line and configures nothing, so on a cp1252 console the child
     # still dies before it renders anything -- the server starts and every job
@@ -2826,15 +3012,90 @@ def _locate_source(job_id: str):
     return None
 
 
+# How long a signed source URL stays valid. Long enough to survive an editing
+# session and a page reload, short enough that a link leaked through a log, a
+# referer or a shared screenshot is dead by the time anyone tries it.
+SOURCE_URL_TTL_SECONDS = int(os.environ.get("SOURCE_URL_TTL_SECONDS", "21600"))
+
+
+def _source_signature(job_id: str, exp: int) -> str:
+    """HMAC tying a job id to an expiry, keyed on the app's JWT secret."""
+    secret = (_cloud_config.settings.jwt_secret if BILLING_ENABLED else "") or ""
+    msg = f"{job_id}:{exp}".encode()
+    return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()[:32]
+
+
+def _job_record(job_id: str):
+    """The in-memory job record, or what the shared disk says about it."""
+    return jobs.get(job_id) or _job_view_from_disk(job_id)
+
+
+def _signed_source_url(job_id: str) -> str:
+    """The URL to hand a `<video>` tag for this job's source.
+
+    Every place that returns a source URL to the browser must go through here:
+    a caller that builds the bare path instead ships a player that cannot
+    authenticate, and the clip editor's source monitor 404s in cloud while
+    working perfectly in self-host and in every test.
+    """
+    if not BILLING_ENABLED:
+        return f"/api/source/{job_id}"
+    exp = int(time.time()) + SOURCE_URL_TTL_SECONDS
+    return f"/api/source/{job_id}?exp={exp}&sig={_source_signature(job_id, exp)}"
+
+
+@app.get("/api/source-url/{job_id}")
+async def get_source_url(job_id: str, request: Request):
+    """Mint a short-lived signed URL for this job's source video.
+
+    A `<video src>` cannot carry an Authorization header, which is why
+    /api/source was left open in the first place. So the owner asks for a
+    capability URL here, with the bearer token, and hands the player that.
+    """
+    record = _job_record(job_id)
+    if record is None:
+        # No record means no owner to check, and minting anyway would hand out
+        # a working key to whoever asked: the one door in this design that
+        # gives a capability without asking who you are. A real job resolves
+        # here (metadata recovers it, an in-flight one has a manifest naming
+        # its owner), so the only callers this turns away are asking about a
+        # job that does not exist. Off billing there is nothing to protect and
+        # the self-host preview must keep working.
+        if BILLING_ENABLED:
+            raise HTTPException(status_code=404, detail="Source not found")
+    else:
+        await _assert_job_owner(request, record)
+    return {"url": _signed_source_url(job_id)}
+
+
 @app.get("/api/source/{job_id}")
-async def get_source_video(job_id: str):
+async def get_source_video(job_id: str, request: Request,
+                           exp: int = 0, sig: str = ""):
     """Stream a job's original source video for the live-analysis preview and
     the clip editor's source monitor.
 
     Uploaded sources are blob URLs in the browser and don't survive a reload,
-    so the recovered session points the preview here instead. Unauthenticated
-    like the /videos mount — the UUID job_id is the capability.
+    so the recovered session points the preview here instead.
+
+    This one endpoint serves the untouched original, which for a URL job is the
+    file we downloaded. Left open it is a public downloader wearing a UUID, so
+    a cloud job with an owner needs either a signed URL from /api/source-url or
+    a bearer token on the request. Self-host and ownerless BYOK jobs are
+    unchanged: there is no owner to check and no secret to sign with.
     """
+    signed = (
+        BILLING_ENABLED and sig
+        and exp > time.time()
+        and hmac.compare_digest(sig, _source_signature(job_id, exp))
+    )
+    # Gated on BILLING_ENABLED, not just on `signed`: _job_record falls through
+    # to _job_view_from_disk, which rescans the whole output directory. Off
+    # billing there is no owner to find, so that scan would run on every single
+    # preview load and buy nothing.
+    if not signed and BILLING_ENABLED:
+        record = _job_record(job_id)
+        if record is not None:
+            await _assert_job_owner(request, record)
     source_path = _locate_source(job_id)
     if not source_path:
         raise HTTPException(status_code=404, detail="Source not found")
@@ -2944,6 +3205,9 @@ async def download_all_clips(job_id: str, request: Request):
 # edit endpoint works on it again. Restored files land with a fresh mtime, so
 # the retention clock restarts; re-restoring after a purge is cheap.
 _restore_locks: Dict[str, asyncio.Lock] = {}
+# Job ids are uuid4 strings; anything else under /videos is not a job dir
+# (thumbnails, stray probes) and must not reach the database.
+_JOB_ID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 
 @app.post("/api/projects/{job_id}/restore")
@@ -2963,6 +3227,27 @@ async def restore_project(job_id: str, request: Request):
     if proj is None or str(proj.user_id) != str(user.id):
         raise HTTPException(status_code=404, detail="Project not found")
 
+    await _restore_job_files(job_id, proj, str(user.id))
+    return {
+        "job_id": job_id,
+        "status": "completed",
+        "result": jobs[job_id]['result'],
+        "project_state": proj.state,
+        "title": proj.title,
+    }
+
+
+async def _restore_job_files(job_id: str, proj, user_id: str) -> bool:
+    """Bring a project's working files back from R2 and register the job.
+
+    The ownership check is the caller's job: ``restore_project`` (the
+    endpoint) verifies the session, ``_restore_for_public_path`` serves files
+    that are public by job id anyway. Returns True when files were actually
+    pulled, False on the idempotent fast path (everything already on disk).
+    """
+    from cloud import storage as cloud_storage
+
+    pulled = False
     # Per-job lock: a double click must not download the project twice.
     lock = _restore_locks.setdefault(job_id, asyncio.Lock())
     async with lock:
@@ -2979,7 +3264,7 @@ async def restore_project(job_id: str, request: Request):
         ):
             os.utime(job_dir, None)  # restart the retention clock
         else:
-            prefix = cloud_storage.job_key(user.id, job_id, "")
+            prefix = cloud_storage.job_key(user_id, job_id, "")
             keys = await asyncio.to_thread(cloud_storage.list_keys, prefix)
             if not keys:
                 raise HTTPException(status_code=502,
@@ -3006,7 +3291,8 @@ async def restore_project(job_id: str, request: Request):
                 raise HTTPException(status_code=502, detail=f"Restore download failed: {e}")
             # Owner sidecar keeps the multi-tenant guard after a server restart.
             with open(os.path.join(tmp_dir, ".owner"), "w") as f:
-                f.write(str(user.id))
+                f.write(user_id)
+            pulled = True
             if os.path.isdir(job_dir):
                 for fname in os.listdir(tmp_dir):
                     shutil.move(os.path.join(tmp_dir, fname), os.path.join(job_dir, fname))
@@ -3033,17 +3319,41 @@ async def restore_project(job_id: str, request: Request):
             'status': 'completed',
             'logs': ["♻️ Project restored from your library."],
             'output_dir': job_dir,
-            'user_id': str(user.id),
+            'user_id': user_id,
             'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
         }
+    if pulled:
+        print(f"♻️  Restored {job_id} from the library (working files were gone).")
+    return pulled
 
-    return {
-        "job_id": job_id,
-        "status": "completed",
-        "result": jobs[job_id]['result'],
-        "project_state": proj.state,
-        "title": proj.title,
-    }
+
+async def _restore_for_public_path(job_id: str) -> bool:
+    """Restorer for the /videos mount: a miss under /videos/<job_id>/ pulls
+    the project back from R2 for its owner, without a session. Those files
+    are public by job id already (the mount has no auth), so this grants
+    nothing new; it only stops a reopened project's players from 404ing
+    while the API side is still restoring it. True means "look again".
+    """
+    if not BILLING_ENABLED or not _JOB_ID_RE.match(job_id or ""):
+        return False
+    from sqlalchemy import select
+    from cloud.models import Project
+    from cloud import database as cloud_db
+    async with cloud_db.session() as s:
+        proj = (await s.execute(
+            select(Project).where(Project.job_id == job_id)
+        )).scalar_one_or_none()
+    if proj is None:
+        return False
+    try:
+        await _restore_job_files(job_id, proj, str(proj.user_id))
+    except HTTPException as e:
+        print(f"⚠️  /videos restore of {job_id} failed: {e.detail}")
+        return False
+    except Exception as e:
+        print(f"⚠️  /videos restore of {job_id} failed: {e}")
+        return False
+    return True
 
 
 async def _ensure_job_files(job_id: str, request: Request) -> bool:
@@ -3064,7 +3374,6 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
         return False
     try:
         await restore_project(job_id, request)
-        print(f"♻️  Auto-restored {job_id} from the library (working files were gone).")
         return True
     except HTTPException:
         return False
@@ -3449,7 +3758,7 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
         "words": words_out,
         "source": {
             "available": bool(source_path),
-            "url": f"/api/source/{job_id}" if source_path else None,
+            "url": _signed_source_url(job_id) if source_path else None,
             "duration": source_duration,
             "duration_estimated": duration_estimated,
         },
@@ -5126,6 +5435,13 @@ async def translate_clip(
     except Exception as e:
         print(f"❌ Translation Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+    # AI Act art. 50(2): the voice in this file was synthesised, so the file
+    # says so in a way a machine can read. Best-effort by design — see
+    # ffmpeg_utils.mark_ai_generated.
+    from ffmpeg_utils import mark_ai_generated
+    await loop.run_in_executor(
+        None, lambda: mark_ai_generated(output_path, "AI voice dubbing"))
 
     # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):

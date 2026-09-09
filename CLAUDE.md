@@ -123,6 +123,36 @@ Gemini era de las medidas continuas, no del modelo.
 `layout_picker.apply()` sólo **añade**: una elección explícita del usuario nunca
 se desactiva porque el modelo diga `none`.
 
+### Hook grounding for on-screen clips (`hook_grounding.py`)
+
+The hook and title come from the detail pass, which only reads the
+transcript, so on a clip whose meaning is on the screen (a settings dialog,
+a spreadsheet) they summarise the video's topic instead of naming what is
+shown. After the render, if the `<clip>.layout.json` sidecar says at least
+25% of the clip is `screencast` / `wide` / `inset` (plus `general` when the
+layout picker called the video a screencast: a face-less scene there is a
+slide or a dialog, not a group shot), three frames from those
+stretches at 1024px plus the clip's own words go to Gemini
+(`GroundedHook`) and `viral_hook_text` / `video_title_for_youtube_short`
+are rewritten in place before `auto_hook_clip` burns them; the originals
+stay under `hook_grounding.before`. Gemini-only (frames): with just a local
+LLM it logs one line and keeps the transcript hook. `HOOK_GROUNDING=0`
+disables it. The detail prompt itself now carries the rule "about this
+moment, not the video", which is the cheap half of the same fix.
+
+### Local LLM for the moment picker (`llm_backend.py`)
+
+`LLM_BASE_URL` (+ `LLM_MODEL`, `LLM_API_KEY`) routes the two transcript
+passes of `get_viral_clips` to any OpenAI-compatible `/chat/completions`
+instead of Gemini; the response is validated with the same pydantic schemas
+Gemini enforces server-side, so `main.py` sees one shape. `main.score_batch_size`
+drops to 3 windows per call there (local contexts are 4-8k; a truncated
+prompt scores garbage silently). Self-host `/api/process` then accepts a
+request without `X-Gemini-Key` and `/api/config.localLlm` tells the dashboard
+not to demand one. Frame-based stages (`layout_picker`, `screencast_layout`,
+`get_visual_clips`) stay on Gemini and degrade as they always did without a
+key. Never wired in cloud mode: `BILLING_ENABLED` ignores it.
+
 ### Thumbnail Studio (`thumbnail.py`, `/api/thumbnail/*`)
 
 Titles come from the transcript plus 10 frames at 1024px, never the whole
@@ -472,6 +502,13 @@ request degrades to "no effect", never to a broken filtergraph.
   back into this same app in-process (`httpx.ASGITransport`) forwarding the
   caller's auth headers, so it can never drift from the REST behavior. Cloud
   mode 401s without a resolvable user; self-host stays BYOK-open.
+- **stdio transport** (`mcp_stdio.py`): the same `handle_message` / `call_tool`
+  as a subprocess, for hosts that only launch MCP servers as a command (Glama's
+  Dockerfile deployments wrap one; a local client can skip the web server).
+  Two invariants: `sys.stdout` is swapped for stderr **before `app` is
+  imported**, because the pipeline prints everywhere and one stray line
+  corrupts the JSON-RPC stream; and the app's lifespan is entered
+  (`router.lifespan_context`), which `ASGITransport` does not do on its own.
 - **OAuth for MCP clients** (`cloud/mcp_oauth.py`, cloud mode only): claude.ai
   and ChatGPT connect by URL, so the server publishes RFC 9728/8414 metadata
   under `/.well-known/`, accepts dynamic client registration (`POST
@@ -531,6 +568,62 @@ Stripe retry the same doomed event for three days.
 ### Concurrency Model
 Async job queue with semaphore-based concurrency control. Configure via `MAX_CONCURRENT_JOBS` env var (default: 5). Jobs auto-cleanup after 1 hour.
 
+### Paid proxy accounting (`cloud/proxy_ledger.py`)
+
+Downloads go direct → static ISP proxies (flat rate) → DataImpulse (per GB),
+and the duration probe (`cloud/metering.probe_url_minutes`) follows the same
+order, with one extra free step before any per-GB attempt: the fallback
+clients through a static (`fallback-static`). **The client list is explicit
+and shared** (`yt_clients.py`: `default,mweb` + the bgutil PO token
+provider): with account cookies yt-dlp's own defaults are `tv_downgraded` +
+`web`, and on a share of videos both come back UNPLAYABLE / SABR-only, which
+yt-dlp reports as "Video unavailable". That was mistaken for an IP ban for a
+week (it happened on every static IP too) and fed ~26 downloads a week to
+the per-GB proxy, which then fetched 360p through the same dead list.
+Measured in the prod container on 6-sep-2026, same static, same video:
+cookies + defaults → unavailable; cookies + `default,mweb` → 1080p; no
+cookies → 1080p. `mweb` needs the PO token, and the token needs the
+webpage: never put `player_skip: webpage` back. A fallback attempt runs
+anonymously when an HD attempt already failed with the cookies on that
+route, and every attempt asks for the 1080p format spec (the old
+`best[ext=mp4]` fallback spec was itself the 360p progressive file).
+Two rules keep the per-GB proxy at zero on a normal day: the probe
+reaches it **only** when a static route failed for a reason another IP can
+fix (`static_failure_warrants_paid`: bot-check, 403/429, proxy/network
+errors), never for a private/removed/members-only video, an uploader's
+country block (the residential pool failed identically in 5 of 6 paid
+probes, 3-5 sep) or a live stream
+with no duration (those failed the same on every IP and used to cost ~1.7 MB
+× 2 extractors each), and **never for a non-YouTube URL** (the download
+plan already excluded those; Twitch, Kick, Rumble and product pages were
+reaching it through the probe). The probe also carries `YOUTUBE_COOKIES`,
+like the download does: an anonymous probe from the static IPs gets "Sign in
+to confirm you're not a bot" in bursts (4-sep-2026: ~10 probes in one hour,
+1.8 MB each on the per-GB proxy) because a datacenter IP's anonymous rate
+limit is low and we make ~400 YouTube hits a day from three of them, while
+the authenticated download sails through the same IPs. But the **first**
+attempt on a route carries them and the second drops them, on the probe as
+on the download: with the cookies attached YouTube answers UNPLAYABLE for
+every client (`web_embedded`, `tv_downgraded`, `web` **and** `mweb`) on a
+share of videos, which yt-dlp reports as "Video unavailable" (9-sep-2026,
+same video on all three statics; anonymous on the same IP → 1080p 137+140).
+Without that anonymous second attempt the probe read a cookie problem as an
+IP problem and escalated to the per-GB proxy, which carries the same cookies
+and fails identically, while the download recovered for free on the same
+static. `main.py` prints `PROXY_ROUTE=<json>` after
+every download (winner, paid bytes across all attempts including failed
+paid ones, each free attempt's error); `app.py` persists it as a
+`proxy_usage` row at job end and pages Telegram when the paid proxy carried
+bytes, folding a burst into one message per 5 min. The in-memory monthly
+counter and the container log (rotates within the hour) cannot answer "what
+cost $14 on the 28th"; the table can. `PAID_PROXY_DAILY_MB` (default
+500) is the hard ceiling: past it the paid proxy is dropped from the probe
+and from every new job's env until UTC midnight. The watcher probes the
+static pool against a real YouTube watch page (playable markers), not
+google.com — the 28th happened because YouTube refused the static IPs while
+google kept answering 204. On the dev Mac, do not keep
+`PROXY_URL` in `.env`: every local `main.py` run then bills DataImpulse.
+
 ### Deploys and running jobs (handover + drain)
 
 Every push to `main` redeploys the API container. Coolify starts the NEW
@@ -577,3 +670,8 @@ container before stopping the old one (rolling update) and both share
 
 Before pushing, still batch small commits (tests, docs) with the next real
 change: every deploy is a ~5 min build plus a handover.
+
+## CI: a green pipeline closes the task, not the push
+- After every `git push`, wait for the commit's workflow and confirm it is green: `ci-wait` (Victor's Mac) or `gh run watch $(gh run list -c $(git rev-parse HEAD) -L1 --json databaseId -q ".[0].databaseId") --exit-status`.
+- If it is red: fix, push, check again. Never report the task as done with a red CI.
+- Before pushing, run locally what the CI runs (lint + tests of this repo).

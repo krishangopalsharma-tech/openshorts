@@ -23,6 +23,10 @@ class TestOrdering:
             ('HD-static1', False, "http://s1"),
             ('HD-static2', False, "http://s2"),
             ('HD-static3', False, "http://s3"),
+            # Free rescue for the fake "Video unavailable" the HD client gets
+            # from datacenter-ISP IPs (4-sep-2026): conservative clients
+            # through a static BEFORE any per-GB attempt.
+            ('fallback-static', False, "http://s1"),
             ('HD', True, PAID),
             ('fallback', True, PAID),
         ]
@@ -45,6 +49,14 @@ class TestOrdering:
         got = plan(True, STATICS, PAID, True)
         for _label, capped, proxy in got:
             assert capped == (proxy == PAID)
+
+
+def test_fallback_static_only_exists_when_paid_is_configured():
+    # Without a paid proxy the final fallback already runs through a static;
+    # a fallback-static before it would be the same attempt twice.
+    got = plan(False, STATICS, None, True)
+    assert ('fallback-static', False, "http://s1") not in got
+    assert got[-1] == ('fallback', False, "http://s1")
 
 
 def test_direct_file_urls_skip_the_proxy_chain():

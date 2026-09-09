@@ -130,6 +130,13 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                 The audio will be dubbed with AI-generated voice in the selected language, matching the original speaker's characteristics.
             </p>
 
+            {/* AI Act art. 50: we mark the file, the person publishing it is the
+                one who owes the audience the disclosure. Saying so here is the
+                only place they will read it. */}
+            <p className="text-xs text-muted leading-relaxed mb-2">
+                The dubbed file is tagged as AI-generated content. When you publish it, disclose that the voice is synthetic.
+            </p>
+
             {/* Processing State */}
             {isProcessing && (
                 <div className="mt-4 p-3 bg-paper3 rounded-input">

@@ -10,12 +10,12 @@
   <meta name="theme-color" content="#0b0d12" />
   <meta name="color-scheme" content="dark" />
 
-  <!-- Fonts: Lumen system (Instrument Serif display · Geist body · JetBrains Mono labels) -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
-    rel="stylesheet" />
+  <!-- Fonts: Lumen system (Instrument Serif display · Geist body · JetBrains Mono labels).
+       Served from this origin, not fonts.googleapis.com: a Google-hosted
+       stylesheet sends every visitor's IP address to a US processor before the
+       page has rendered and before anyone consented to anything. See
+       public/fonts.css for how the subsets were generated. -->
+  <link rel="stylesheet" href="/fonts.css" />
 
   <!-- Primary SEO Meta Tags -->
   <title>OpenShorts - Open Source AI Clip Generator | Free Self-Hosted, Cloud from $12/mo</title>
@@ -254,44 +254,60 @@
     }
     </script>
 
-  <!-- Analytics — opt-in, disabled by default.
+  <!-- Analytics — opt-in, disabled by default, and never loaded before consent.
        A plain `npm run build` (and every local `npm run dev`) leaves the two
-       VITE_OPENPANEL_* variables unset, so nothing is initialised, no third
-       party script is fetched and no request leaves the browser. Self-hosted
-       instances are silent unless you deliberately turn this on.
+       VITE_OPENPANEL_* variables unset, so nothing is initialised, no script is
+       fetched and no request leaves the browser. Self-hosted instances are
+       silent unless you deliberately turn this on.
+
+       Nothing here RUNS on page load any more: it only publishes
+       window.__osAnalyticsInit, and the React consent manager
+       (src/lib/consent.js) calls it once the visitor has actually accepted the
+       analytics category. Loading a tracker in the static <head> and asking
+       afterwards is the exact pattern LSSI art. 22.2 forbids.
+
+       op1.js is served from this origin (public/op1.js), not from
+       openpanel.dev: a third-party script sees the visitor's IP and can be
+       changed under us at any time.
 
        To collect analytics for your own deployment: point
        VITE_OPENPANEL_API_URL / VITE_OPENPANEL_CLIENT_ID at your own OpenPanel
        instance (see .env.example) and add your hostname to ANALYTICS_HOSTS. -->
     <script>
       window.op = window.op || function () { var n = []; return new Proxy(function () { arguments.length && n.push([].slice.call(arguments)); }, { get: function (t, r) { return "q" === r ? n : function () { n.push([r].concat([].slice.call(arguments))); }; }, has: function (t, r) { return "q" === r; } }); }();
-      (function () {
-        // Vite substitutes these at build time and leaves the literal
-        // "%VITE_...%" placeholder in place when the variable is undefined.
-        var apiUrl = "%VITE_OPENPANEL_API_URL%";
-        var clientId = "%VITE_OPENPANEL_CLIENT_ID%";
-        var unset = function (v) { return !v || v.charAt(0) === "%"; };
-        if (unset(apiUrl) || unset(clientId)) return;
+      window.__osAnalyticsInit = (function () {
+        var started = false;
+        return function () {
+          if (started) return false;
+          // Vite substitutes these at build time and leaves the placeholder literal
+          // in place when the variable is undefined.
+          var apiUrl = "%VITE_OPENPANEL_API_URL%";
+          var clientId = "%VITE_OPENPANEL_CLIENT_ID%";
+          var unset = function (v) { return !v || v.charAt(0) === "%"; };
+          if (unset(apiUrl) || unset(clientId)) return false;
 
-        // Second gate: hosts allowed to report. A dist/ built with credentials
-        // stays inert anywhere else (a fork, a mirror, a preview domain), so a
-        // deployment can never report into somebody else's dashboard.
-        var ANALYTICS_HOSTS = /^(www\.)?openshorts\.app$/;
-        if (!ANALYTICS_HOSTS.test(location.hostname)) return;
+          // Second gate: hosts allowed to report. A dist/ built with credentials
+          // stays inert anywhere else (a fork, a mirror, a preview domain), so a
+          // deployment can never report into somebody else's dashboard.
+          var ANALYTICS_HOSTS = /^(www\.)?openshorts\.app$/;
+          if (!ANALYTICS_HOSTS.test(location.hostname)) return false;
 
-        window.op("init", {
-          apiUrl: apiUrl,
-          clientId: clientId,
-          trackScreenViews: true,
-          trackOutgoingLinks: true,
-          trackAttributes: true,
-        });
+          started = true;
+          window.op("init", {
+            apiUrl: apiUrl,
+            clientId: clientId,
+            trackScreenViews: true,
+            trackOutgoingLinks: true,
+            trackAttributes: true,
+          });
 
-        var s = document.createElement("script");
-        s.src = "https://openpanel.dev/op1.js";
-        s.defer = true;
-        s.async = true;
-        document.head.appendChild(s);
+          var s = document.createElement("script");
+          s.src = "/op1.js";
+          s.defer = true;
+          s.async = true;
+          document.head.appendChild(s);
+          return true;
+        };
       })();
     </script>
   </head>

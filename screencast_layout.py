@@ -182,6 +182,14 @@ def detect_content_ranges(video_path, video_duration):
 
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print("🔎 Checking for full-width on-screen content…")
+    # This is the ONE stage that sends the whole video file to Google rather
+    # than a handful of frames, so it is also the one that leaves a copy of a
+    # user's source on someone else's servers. The Files API keeps an upload for
+    # 48 h unless it is deleted; the finally block below deletes it as soon as
+    # the answer is back, which is what makes "we do not leave your video with
+    # the model provider" a true sentence in the privacy policy.
+    client = None
+    file_upload = None
     try:
         client = genai.Client(api_key=api_key)
         file_upload = client.files.upload(file=video_path)
@@ -210,6 +218,16 @@ def detect_content_ranges(video_path, video_duration):
     except Exception as e:
         print(f"   ⚠️ On-screen check failed ({e}) — keeping face-only routing.")
         return []
+    finally:
+        # Every exit path, including the two early returns above and the failure
+        # branch: a video left behind because the call raised is exactly the
+        # copy nobody would ever notice.
+        if client is not None and file_upload is not None:
+            try:
+                client.files.delete(name=file_upload.name)
+            except Exception as e:
+                print(f"   ⚠️ Could not delete the uploaded source from Gemini "
+                      f"Files ({e}) — it expires there in 48 h.")
 
     ranges = []
     for r in raw:

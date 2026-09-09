@@ -24,6 +24,16 @@ class User(Base):
     stripe_customer_id = Column(Text, unique=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login_at = Column(DateTime(timezone=True), nullable=True)
+    # Set by the unsubscribe link in the only email we send that is a
+    # commercial communication rather than a service notice (the out-of-minutes
+    # upsell). LSSI art. 21.2 lets us mail our own customers about a similar
+    # product, but only if every message carries a way out — so this column is
+    # what that link writes, and cloud/emails.py refuses to send when it is set.
+    # Schema bootstrap is create_all, which never ALTERs: see
+    # cloud/database.init_engine for the additive statement that adds it to an
+    # existing database.
+    marketing_opt_out = Column(Boolean, nullable=False, server_default="false",
+                               default=False)
 
 
 class MagicLinkToken(Base):
@@ -286,3 +296,26 @@ class OAuthCode(Base):
     scope = Column(Text, nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ProxyUsage(Base):
+    """One row per event that put bytes through the per-GB paid proxy, or per
+    download route decision worth keeping (the winner and why the free routes
+    failed).
+
+    The monthly proxy counter in app.py is in-memory and the container log
+    rotates within the hour, so on 28-aug-2026 a $14 DataImpulse day could not
+    be reconstructed at all. This is the durable trail: which job, which route
+    won, how many paid bytes, and the failure text of every free attempt that
+    was tried first. Not user-owned data (no FK to users): it is operational
+    accounting and survives account erasure on purpose.
+    """
+    __tablename__ = "proxy_usage"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    source = Column(String(16), nullable=False)          # download | probe
+    job_id = Column(String(64), nullable=True, index=True)
+    url_host = Column(String(120), nullable=True)
+    route = Column(String(32), nullable=True)            # winning attempt label, or "none"
+    paid_bytes = Column(Integer, nullable=False, default=0)
+    detail = Column(JSONB, nullable=True)                # attempts: [{label, ok, bytes, error}]

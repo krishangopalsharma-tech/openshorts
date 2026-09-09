@@ -124,10 +124,17 @@
   overflow: hidden;
   background: var(--color-paper-2);
 }
+.crop-frame-16-9 {
+  aspect-ratio: 16 / 9;
+}
+.crop-frame-9-16 {
+  aspect-ratio: 9 / 16;
+}
 .crop-frame video {
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: cover;
 }
 .crop-window {
   position: absolute;

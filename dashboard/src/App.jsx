@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard, Lock } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
@@ -17,6 +17,7 @@ import UsageMeter from './components/UsageMeter';
 import TopUpModal from './components/TopUpModal';
 import StarBanner from './components/StarBanner';
 import PlanChoiceModal from './components/PlanChoiceModal';
+import ClipTutorial from './components/ClipTutorial';
 import TrialUpgradeModal from './components/TrialUpgradeModal';
 import LoginModal from './components/LoginModal';
 import TrialGate from './components/TrialGate';
@@ -200,10 +201,11 @@ const pollJob = async (jobId) => {
 
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds } = useAuth();
+  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
   const [showPlanChoice, setShowPlanChoice] = useState(false);
+  const [tutorialPhase, setTutorialPhase] = useState(null); // null | intro | coach | celebrate
   const [showTrialUpgrade, setShowTrialUpgrade] = useState(false);
   const [topUpInfo, setTopUpInfo] = useState({});
   // Durable R2 URLs (per clip index) for the current job — used as a fallback when
@@ -474,6 +476,7 @@ function App() {
       }
     }
     setBulkSub({ running: false, current: total, total, errors });
+    refreshMe();
     // Refresh results so each ResultCard picks up its new subtitled video_url.
     try {
       const data = await pollJob(jobId);
@@ -792,11 +795,13 @@ function App() {
           if (data.status === 'completed') {
             setStatus('complete');
             clearInterval(interval);
+            refreshMe();
           } else if (data.status === 'failed') {
             setStatus('error');
             const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
             setLogs(prev => [...prev, "Error: " + errorMsg]);
             clearInterval(interval);
+            refreshMe();
           } else {
             // Update logs if available
             if (data.logs) setLogs(data.logs);
@@ -807,7 +812,7 @@ function App() {
       }, 2000);
     }
     return () => clearInterval(interval);
-  }, [status, jobId]);
+  }, [status, jobId, refreshMe]);
 
 
   // silent: background auto-fetch — never alert(), just log. Managed users need
@@ -837,24 +842,80 @@ function App() {
 
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
   // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
+  // A self-hosted server running the moment picker on a local LLM
+  // (LLM_BASE_URL) does not need a Gemini key for the core pipeline.
+  const geminiOk = !!apiKey || !!localLlm;
   // Upload-Post is only needed for auto-publish (/api/social/post); clip
-  // generation itself only needs Gemini, so it doesn't gate the app.
-  const keysMissing = !billingEnabled && !apiKey;
+  // generation itself only needs a moment picker, so it doesn't gate the app.
+  const keysMissing = !billingEnabled && !geminiOk;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
-  // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
-  // flag after the auth redirect). Fires for free users too, so it's gated on
-  // being signed in rather than on entitlement.
+  // Fresh sign-up: Clip Generator tutorial (AuthContext set os_show_clip_tutorial
+  // after the auth redirect). QA: #app?tutorial=1. Resume coach if they refreshed
+  // mid-job. Runs once on mount so a later isSignedIn flip cannot reset intro→coach.
   useEffect(() => {
-    if (billingEnabled && isSignedIn) {
-      let flagged = false;
-      try { flagged = localStorage.getItem('os_show_plan_choice') === '1'; } catch (_) { /* ignore */ }
-      if (flagged) {
-        setShowPlanChoice(true);
-        try { localStorage.removeItem('os_show_plan_choice'); } catch (_) { /* ignore */ }
-      }
+    let showTutorial = false;
+    let resumeCoach = false;
+    try {
+      const q = new URLSearchParams((window.location.hash.split('?')[1] || ''));
+      const qa = q.get('tutorial');
+      if (qa === '1') showTutorial = true;
+      if (qa === 'coach') resumeCoach = true;
+      if (qa === 'celebrate') { setTutorialPhase('celebrate'); return; }
+      if (localStorage.getItem('os_show_clip_tutorial') === '1') showTutorial = true;
+      if (localStorage.getItem('os_clip_tutorial') === 'coach') resumeCoach = true;
+    } catch (_) { /* ignore */ }
+    if (showTutorial) {
+      setTutorialPhase('intro');
+      setActiveTab('dashboard');
+    } else if (resumeCoach) {
+      setTutorialPhase('coach');
+      setActiveTab('dashboard');
     }
-  }, [billingEnabled, isSignedIn]);
+  }, []);
+
+  // Legacy: an older build may still have set os_show_plan_choice. Don't open it
+  // on top of the tutorial.
+  useEffect(() => {
+    if (tutorialPhase) return;
+    if (!(billingEnabled && isSignedIn)) return;
+    let showPlans = false;
+    try { showPlans = localStorage.getItem('os_show_plan_choice') === '1'; } catch (_) { /* ignore */ }
+    if (showPlans) {
+      setShowPlanChoice(true);
+      try { localStorage.removeItem('os_show_plan_choice'); } catch (_) { /* ignore */ }
+    }
+  }, [billingEnabled, isSignedIn, tutorialPhase]);
+
+  const tutorialLock = tutorialPhase === 'intro' || tutorialPhase === 'coach' || tutorialPhase === 'celebrate';
+
+  useEffect(() => {
+    if (tutorialLock && activeTab !== 'dashboard') setActiveTab('dashboard');
+  }, [tutorialLock, activeTab]);
+
+  useEffect(() => {
+    if (tutorialPhase === 'coach' && status === 'complete' && (results?.clips?.length > 0)) {
+      setTutorialPhase('celebrate');
+      track('ClipTutorialCompleted', { props: { clips: results.clips.length } });
+    }
+  }, [tutorialPhase, status, results]);
+
+  const finishTutorial = () => {
+    try { localStorage.setItem('os_clip_tutorial', 'done'); } catch (_) { /* ignore */ }
+    try { localStorage.removeItem('os_show_clip_tutorial'); } catch (_) { /* ignore */ }
+    setTutorialPhase(null);
+  };
+  const startTutorial = () => {
+    try { localStorage.setItem('os_clip_tutorial', 'coach'); } catch (_) { /* ignore */ }
+    try { localStorage.removeItem('os_show_clip_tutorial'); } catch (_) { /* ignore */ }
+    track('ClipTutorialStarted');
+    setTutorialPhase('coach');
+    setActiveTab('dashboard');
+  };
+  const skipTutorial = () => {
+    track('ClipTutorialSkipped', { props: { phase: tutorialPhase } });
+    finishTutorial();
+  };
   // Included in the plan (fully managed, no keys): Clip Generator + YouTube Studio.
   // Advanced (bring your own fal.ai + ElevenLabs keys): AI Shorts + AI Agent.
   const INCLUDED_TOOL_TABS = ['dashboard', 'thumbnails'];
@@ -867,7 +928,7 @@ function App() {
   // connected yet. userProfiles being empty (not yet fetched / none created)
   // also counts as "not connected" — that is the 97% case.
   const connectedSocials = ((userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected) || [];
-  const showSocialNudge = isManaged && !socialNudgeDismissed && connectedSocials.length === 0;
+  const showSocialNudge = isManaged && !socialNudgeDismissed && connectedSocials.length === 0 && !tutorialLock;
 
   // One Seen event per job, only when the banner actually rendered.
   const socialNudgeSeenRef = useRef(null);
@@ -993,10 +1054,13 @@ function App() {
       if (data.type === 'thumbnail_session') {
         setProcessingMedia({ type: 'server', payload: `/api/source/${resData.job_id}` });
       }
+      // Minutes are reserved at job start, not at complete.
+      refreshMe();
 
     } catch (e) {
       if (e instanceof QuotaError) {
         setStatus('idle');
+        refreshMe();
         // Trial users hit the trial minute cap → prompt them to activate the plan
         // now (unlocks full minutes). Active users → offer a top-up.
         if (me?.status === 'trialing') {
@@ -1052,7 +1116,12 @@ function App() {
     return () => document.removeEventListener('keydown', onKey);
   }, [navOpen]);
 
-  const goToTab = (id) => { setActiveTab(id); setNavOpen(false); };
+  const goToTab = (id) => {
+    if (tutorialLock && id !== 'dashboard') return;
+    setActiveTab(id);
+    setNavOpen(false);
+  };
+  const tabLocked = (id) => tutorialLock && id !== 'dashboard';
 
   // Shared footer links (landing, repo, pricing, contact) — same list in the
   // desktop rail and the mobile drawer, so they can never drift apart.
@@ -1111,16 +1180,20 @@ function App() {
           return (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id)}
-              title={item.label}
-              className={`relative w-full flex items-center gap-3 px-3 py-2.5 rounded-input transition-colors ${isActive ? 'bg-paper3 text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'}`}
+              data-tutorial={item.id === 'dashboard' ? 'nav-clips' : undefined}
+              onClick={() => goToTab(item.id)}
+              title={tabLocked(item.id) ? 'Finish your first clips to unlock' : item.label}
+              disabled={tabLocked(item.id)}
+              className={`relative w-full flex items-center gap-3 px-3 py-2.5 rounded-input transition-colors ${isActive ? 'bg-paper3 text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'} ${tabLocked(item.id) ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-muted' : ''}`}
             >
               {isActive && (
                 <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-brass rounded-full" aria-hidden="true" />
               )}
               <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
               <span className="text-sm lowercase hidden lg:block flex-1 text-left truncate">{item.label}</span>
-              {item.byok && <span className="readout hidden lg:block">BYOK</span>}
+              {tabLocked(item.id)
+                ? <Lock size={12} className="shrink-0 hidden lg:block" />
+                : item.byok ? <span className="readout hidden lg:block">BYOK</span> : null}
               <span className="readout hidden lg:block">{item.ord}</span>
             </button>
           );
@@ -1171,15 +1244,19 @@ function App() {
               <button
                 key={item.id}
                 onClick={() => goToTab(item.id)}
+                disabled={tabLocked(item.id)}
                 aria-current={isActive ? 'page' : undefined}
-                className={`relative w-full flex items-center gap-3 px-3 py-3 rounded-input transition-colors ${isActive ? 'bg-paper3 text-ink' : 'text-muted active:bg-paper3/60'}`}
+                title={tabLocked(item.id) ? 'Finish your first clips to unlock' : undefined}
+                className={`relative w-full flex items-center gap-3 px-3 py-3 rounded-input transition-colors ${isActive ? 'bg-paper3 text-ink' : 'text-muted active:bg-paper3/60'} ${tabLocked(item.id) ? 'opacity-40 cursor-not-allowed' : ''}`}
               >
                 {isActive && (
                   <span className="absolute left-0 top-2 bottom-2 w-0.5 bg-brass rounded-full" aria-hidden="true" />
                 )}
                 <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
                 <span className="text-[0.95rem] lowercase flex-1 text-left truncate">{item.label}</span>
-                {item.byok && <span className="readout shrink-0">BYOK</span>}
+                {tabLocked(item.id)
+                  ? <Lock size={12} className="shrink-0" />
+                  : item.byok ? <span className="readout shrink-0">BYOK</span> : null}
               </button>
             );
           })}
@@ -1207,9 +1284,12 @@ function App() {
             return (
               <button
                 key={item.id}
+                data-tutorial={item.id === 'dashboard' ? 'nav-clips' : undefined}
                 onClick={() => goToTab(item.id)}
+                disabled={tabLocked(item.id)}
                 aria-current={isActive ? 'page' : undefined}
-                className={`flex-1 min-w-0 flex flex-col items-center justify-center gap-1 py-2 min-h-[56px] transition-colors ${isActive ? 'text-ink' : 'text-muted active:text-ink2'}`}
+                title={tabLocked(item.id) ? 'Finish your first clips to unlock' : undefined}
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center gap-1 py-2 min-h-[56px] transition-colors ${isActive ? 'text-ink' : 'text-muted active:text-ink2'} ${tabLocked(item.id) ? 'opacity-40 cursor-not-allowed' : ''}`}
               >
                 <NavIcon size={19} className={isActive ? 'text-brass' : ''} />
                 <span className="text-[10.5px] lowercase leading-none truncate max-w-full px-0.5">{item.short}</span>
@@ -1251,7 +1331,7 @@ function App() {
             >
               <Menu size={20} />
             </button>
-            <span className="md:hidden font-display lowercase text-base text-ink truncate">
+            <span data-tutorial="nav-clips" className="md:hidden font-display lowercase text-base text-ink truncate">
               {activeNav?.label || 'openshorts'}
             </span>
             {status !== 'idle' && (
@@ -1303,7 +1383,7 @@ function App() {
                 same thing, and two warnings in a 360px header is just noise. */}
             {keysMissing && (
               <button
-                onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : setActiveTab('settings'))}
+                onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : goToTab('settings'))}
                 className="badge-warn hover:brightness-125 transition-all hidden sm:inline-flex"
                 title="Configure API keys or choose a plan"
               >
@@ -1326,7 +1406,7 @@ function App() {
               </div>
             </div>
             <button
-              onClick={() => setActiveTab('settings')}
+              onClick={() => goToTab('settings')}
               className="btn-quiet px-3 py-1.5 text-xs shrink-0 w-full sm:w-auto"
             >
               Go to Settings
@@ -1356,7 +1436,7 @@ function App() {
         {gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
 
         {/* Advanced tools (AI Shorts, AI Agent): BYOK fal.ai + ElevenLabs notice. */}
-        {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => setActiveTab('settings')} />}
+        {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => goToTab('settings')} />}
 
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
@@ -1774,16 +1854,18 @@ function App() {
                   </p>
                   {/* The same pipeline is an MCP server: point people at the
                       one place that explains how to drive it from an agent. */}
+                  {!tutorialLock && (
                   <p className="text-xs text-muted">
                     Or let an agent do it:{' '}
                     <a
                       href={billingEnabled ? '#/account' : '#app'}
-                      onClick={(e) => { if (!billingEnabled) { e.preventDefault(); setActiveTab('settings'); } }}
+                      onClick={(e) => { if (!billingEnabled) { e.preventDefault(); goToTab('settings'); } }}
                       className="text-ink2 underline underline-offset-2 hover:text-brass transition-colors"
                     >
                       connect Claude, ChatGPT or n8n →
                     </a>
                   </p>
+                  )}
                 </div>
 
                 <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
@@ -2074,7 +2156,7 @@ function App() {
               Cancel
             </button>
             <button
-              onClick={() => { setShowKeyModal(false); setActiveTab('settings'); }}
+              onClick={() => { setShowKeyModal(false); goToTab('settings'); }}
               className="btn-primary flex-1 px-4 py-2 text-sm"
             >
               Go to Settings
@@ -2204,6 +2286,15 @@ function App() {
         />
       )}
       {showLogin && <LoginModal onClose={() => setShowLogin(false)} />}
+      {tutorialPhase && (
+        <ClipTutorial
+          phase={tutorialPhase}
+          jobStatus={status}
+          onStart={startTutorial}
+          onSkip={skipTutorial}
+          onDismissCelebrate={finishTutorial}
+        />
+      )}
       {showPlanChoice && <PlanChoiceModal onClose={() => setShowPlanChoice(false)} />}
       {showTopUp && (
         <TopUpModal

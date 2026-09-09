@@ -18,7 +18,7 @@ import json
 import time
 import subprocess
 
-from ffmpeg_utils import video_encode_args, DELIVERY
+from ffmpeg_utils import video_encode_args, DELIVERY, mark_ai_generated
 import httpx
 from urllib.parse import urljoin
 from typing import Optional, List, Dict, Callable
@@ -1457,6 +1457,10 @@ def generate_full_video(
     log("[6/6] Compositing final video with FFmpeg...")
     hook_text = script.get("hook_text", "")
     composite_video(talking_head, broll_clips, srt_path, hook_text, final_path)
+
+    # AI Act art. 50(2): actor, voice and b-roll are all synthetic here, so the
+    # file carries a machine-readable marking. Best effort, never fatal.
+    mark_ai_generated(final_path, "AI actor, AI voiceover and generated b-roll")
 
     log("🎉 Video generation complete!")
 

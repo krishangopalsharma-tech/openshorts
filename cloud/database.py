@@ -10,6 +10,14 @@ Base = declarative_base()
 _engine = None
 _sessionmaker = None
 
+# Columns added to tables that already exist in production. ADD COLUMN IF NOT
+# EXISTS is a no-op on a database that already has them and on a fresh one that
+# create_all just built.
+_ADDITIVE_COLUMNS = (
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+    "marketing_opt_out BOOLEAN NOT NULL DEFAULT false",
+)
+
 
 async def init_engine():
     """Create the async engine + sessionmaker and ensure the schema exists.
@@ -30,6 +38,15 @@ async def init_engine():
         # Case-insensitive email uniqueness.
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
         await conn.run_sync(Base.metadata.create_all)
+        # create_all creates missing TABLES and never ALTERs an existing one, so
+        # a column added to a model that already shipped exists in the code and
+        # not in the database. Each statement here is additive and idempotent;
+        # keep them that way, and prefer Alembic once one of them is not.
+        for statement in _ADDITIVE_COLUMNS:
+            try:
+                await conn.execute(text(statement))
+            except Exception as e:  # pragma: no cover - depends on the server
+                print(f"⚠️  Additive schema step failed ({statement}): {e}")
 
 
 def get_sessionmaker():

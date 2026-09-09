@@ -245,9 +245,7 @@ ${page.noindex ? '' : `<link rel="canonical" href="${canonical}">\n`}<meta name=
     page.noindex ? 'noindex,follow' : 'index,follow,max-image-preview:large,max-snippet:-1'
   }">
 <link rel="icon" type="image/png" href="/logo-openshorts.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/fonts.css">
 <meta property="og:type" content="article">
 <meta property="og:url" content="${canonical}">
 <meta property="og:title" content="${esc(page.title)}">

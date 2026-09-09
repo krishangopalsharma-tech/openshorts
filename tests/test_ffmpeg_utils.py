@@ -4,10 +4,12 @@ import pytest
 
 import ffmpeg_utils
 from ffmpeg_utils import (
+    AI_DISCLOSURE,
     DELIVERY,
     METADATA_SCRUB,
     QUALITY,
     QUALITY_FAST,
+    mark_ai_generated,
     reset_encoder_cache,
     video_encode_args,
 )
@@ -96,3 +98,48 @@ def test_encode_args_stay_free_of_metadata_flags():
     # video_encode_args a pure codec/quality list.
     for tier in (QUALITY, QUALITY_FAST, DELIVERY):
         assert not any(a.startswith("-map_metadata") for a in video_encode_args(tier))
+
+
+def _tiny_mp4(path):
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=1",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+         "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p", str(path)],
+        capture_output=True, check=True)
+
+
+def _comment_tag(path):
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format_tags=comment",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, check=True)
+    return r.stdout.strip()
+
+
+def test_ai_disclosure_survives_in_a_tag_a_machine_can_read():
+    # AI Act art. 50(2) wants the marking readable by a machine, so it has to
+    # come back out of the file. `comment` is the only tag mp4 keeps: a custom
+    # key is dropped by ffmpeg without any warning.
+    pytest.importorskip("shutil")
+    import shutil, tempfile, os
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("ffmpeg/ffprobe not installed")
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "clip.mp4")
+        _tiny_mp4(p)
+        assert mark_ai_generated(p, "AI voice dubbing") is True
+        tag = _comment_tag(p)
+        assert AI_DISCLOSURE in tag
+        assert "AI voice dubbing" in tag
+
+
+def test_ai_disclosure_never_destroys_the_file_it_cannot_tag():
+    # The tag is a nicety; the video the user just paid minutes for is not.
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "broken.mp4")
+        with open(p, "wb") as f:
+            f.write(b"not a video")
+        assert mark_ai_generated(p) is False
+        assert open(p, "rb").read() == b"not a video"
+        assert not os.path.exists(p + ".aitag.mp4")

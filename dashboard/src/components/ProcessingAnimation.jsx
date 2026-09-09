@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Scan, Scissors, Activity, Radio, CheckCircle } from 'lucide-react';
 import { getApiUrl } from '../config';
+import { apiFetch } from '../lib/api';
 
 const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, syncTrigger }) => {
   const [videoSrc, setVideoSrc] = useState(null);
@@ -18,8 +19,25 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       return () => URL.revokeObjectURL(url);
     } else if (media.type === 'server') {
       // Uploaded source served from the backend (survives a page reload).
+      // The payload is the plain /api/source/<job> path, because that is what
+      // gets persisted; the signed URL is minted here, at render, so a stored
+      // session never carries a token that has since expired. A <video> tag
+      // cannot send the bearer header itself, hence the round trip.
       setIsYouTube(false);
-      setVideoSrc(getApiUrl(media.payload));
+      let cancelled = false;
+      const jobId = media.payload.split('/').pop();
+      (async () => {
+        try {
+          const res = await apiFetch(`/api/source-url/${jobId}`);
+          const { url } = await res.json();
+          if (!cancelled && url) setVideoSrc(getApiUrl(url));
+        } catch (e) {
+          // Self-host, or a backend without the endpoint: the open path still
+          // works there, and losing the preview is worse than an unsigned URL.
+          if (!cancelled) setVideoSrc(getApiUrl(media.payload));
+        }
+      })();
+      return () => { cancelled = true; };
     } else if (media.type === 'url') {
       setIsYouTube(true);
       const videoId = getYouTubeId(media.payload);

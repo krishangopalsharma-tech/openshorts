@@ -76,6 +76,15 @@ export default function LoginModal({ onClose }) {
               </button>
             </>
           )}
+
+          {/* The account is created by this button, so the terms have to be
+              reachable from it: a magic-link signup never passes the footer. */}
+          <p className="text-muted text-xs mt-5 text-center leading-relaxed">
+            By signing in you agree to our{' '}
+            <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-ink2 underline underline-offset-2 hover:text-brass transition-colors">Terms of Service</a>
+            {' '}and{' '}
+            <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-ink2 underline underline-offset-2 hover:text-brass transition-colors">Privacy Policy</a>.
+          </p>
         </>
       )}
     </Modal>

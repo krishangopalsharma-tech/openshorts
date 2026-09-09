@@ -64,6 +64,25 @@ class VideoEditor:
                 raise TimeoutError("Gemini file processing timed out after 120s.")
             time.sleep(2)
 
+    def delete_uploaded(self, video_file_obj):
+        """Remove an uploaded clip from the Gemini Files API.
+
+        The upload is a full copy of the user's video on Google's servers, kept
+        there for 48 h if nobody deletes it. The effects passes need it for one
+        request; every caller must drop it in a ``finally`` right after, so the
+        privacy policy's "we do not leave your footage with the model provider"
+        describes the code. Best-effort: an editing job must not fail because
+        the cleanup call did.
+        """
+        name = getattr(video_file_obj, "name", None)
+        if not name:
+            return
+        try:
+            self.client.files.delete(name=name)
+        except Exception as e:
+            print(f"⚠️ Could not delete {name} from Gemini Files ({e}) — "
+                  f"it expires there in 48 h.")
+
     def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None, has_captions=False):
         """Asks Gemini for an edit decision list, then builds the FFmpeg filter
         deterministically (edit_builder) so syntax and zoom limits are always safe."""

@@ -82,6 +82,7 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 
 ### Clip Generator
 - **Viral Moment Detection**: Google Gemini 3.1 Flash-Lite analyzes transcripts and scene boundaries to detect 3-15 high-potential moments
+- **Runs fully local if you want**: point `LLM_BASE_URL` at Ollama, LM Studio, vLLM or any OpenAI-compatible server and the moment picker runs on your own model, no Google key needed (see [Run without a Google key](#6-run-without-a-google-key-local-llm-optional))
 - **Smart 9:16 Cropping**: AI reframing per scene — TRACK mode (MediaPipe + YOLOv8 face tracking), GENERAL mode (blurred background), SPLIT mode (two speakers stacked, captions on the seam) and SCREENCAST mode (screen over presenter); the layout is picked per video by Gemini or forced from the dashboard
 - **Auto Subtitles**: faster-whisper with word-level timestamps, styled and burned into clips
 - **AI Voice Dubbing**: ElevenLabs integration for 30+ languages with voice cloning
@@ -163,6 +164,7 @@ Videos generated with OpenShorts AI Shorts — no camera, no studio, no actors:
 | **Social auto-publishing** | Yes | Pro only | TikTok only | Paid only | Paid only | No |
 | **Schedule uploads** | Yes | Pro only | No | Paid only | Paid only | No |
 | **Data privacy** | **Your server** | Their cloud | Their cloud | Their cloud | Their cloud | Their cloud |
+| **Works with a local LLM (Ollama)** | **Yes** | No | No | No | No | No |
 
 ---
 
@@ -173,6 +175,7 @@ Self-hosting OpenShorts is free. You provide the machine and you only pay for th
 | Service | Free Tier | Paid Cost | Used For |
 |---------|-----------|-----------|----------|
 | **Google Gemini** | Free trial with generous limits | < $0.01 per 10-min video | Viral moment detection, script generation, web research |
+| **Local LLM (Ollama, LM Studio, vLLM...)** | **Free, your hardware** | $0 | Viral moment detection instead of Gemini (`LLM_BASE_URL`) |
 | **fal.ai** | Pay-per-use | ~$0.50-1.50 per AI Short | Actor generation, talking head video, lip-sync |
 | **ElevenLabs** | Free tier available | Pay-per-use | Voiceover, voice dubbing |
 | **Upload-Post** | **10 free uploads/month** to all networks (no credit card) | Pay-per-use | Auto-publishing to TikTok, Instagram, YouTube |
@@ -270,6 +273,35 @@ The backend log on the first job reports the chosen encoder and transcription de
 
 ---
 
+### 6. Run without a Google key (local LLM, optional)
+
+The only cloud call in the clip pipeline is the moment picker: it sends the
+transcript (never the video) to Gemini. Point it at any OpenAI-compatible
+server instead and the whole pipeline stays on your box:
+
+```bash
+# .env
+LLM_BASE_URL=http://host.docker.internal:11434/v1   # Ollama on the host
+LLM_MODEL=qwen2.5:14b                                # any chat model that follows instructions
+# LLM_API_KEY=...                                    # only if your server checks one (vLLM --api-key, OpenRouter)
+```
+
+Works with Ollama, LM Studio, vLLM, llama.cpp server, LocalAI and OpenRouter.
+The dashboard stops asking for a Gemini key when this is set. Two things to
+know:
+
+- **Context length.** A scoring call carries three transcript windows
+  (~2-3k tokens) and the detail call up to ten (~5k on a long podcast).
+  Ollama defaults to a 4096-token context and truncates silently, so run it
+  with `OLLAMA_CONTEXT_LENGTH=16384` (or set `num_ctx` in a Modelfile); raise
+  `LLM_SCORE_BATCH` above 3 only if your context allows it. 7-8B models
+  return valid JSON reliably, 3B ones do not.
+- **What still needs Gemini.** Anything that has to look at frames: the
+  automatic layout picker (`AUTO_LAYOUT`), the on-screen content detector
+  and silent videos (no speech to clip by). Without a Gemini key those fall
+  back to the plain face-tracking crop, and a silent video fails with a
+  message that says so. Add a key alongside `LLM_BASE_URL` and you get both.
+
 ## Technical Pipeline
 
 ### Clip Generator
@@ -312,6 +344,9 @@ claude mcp add --transport http openshorts https://mcp.openshorts.app/mcp \
 
 # Self-hosted (no key needed, BYOK rules apply):
 claude mcp add --transport http openshorts http://localhost:8000/mcp
+
+# Self-hosted without running the web server: same tools over stdio
+claude mcp add openshorts -- python mcp_stdio.py
 ```
 
 Tools: `process_video` (URL or `upload_id`; `captions: false` when the source already has subtitles, `auto_hook: false` to skip the hook line, burned by default like the dashboard), `create_upload` (hand the agent a local file: PUT the bytes, then process), `get_job_status`, `list_clips`, `get_quota`, `add_subtitles`, `recut_clip`, `publish_clip`. A prompt like *"clip this podcast and schedule the best 3 to TikTok"* is now a one-liner in your agent of choice.
@@ -402,11 +437,15 @@ lives in [`examples/n8n/`](examples/n8n/).
 | `AWS_S3_BUCKET` | Private bucket for clip backup |
 | `AWS_S3_PUBLIC_BUCKET` | Public bucket for gallery/avatars |
 | `MAX_CONCURRENT_JOBS` | Concurrent processing limit (default: 5) |
+| `LLM_BASE_URL` | OpenAI-compatible server for the moment picker (Ollama, vLLM, LM Studio...). Set it and the Gemini key becomes optional |
+| `LLM_MODEL` | Model name on that server (default `llama3.1:8b`) |
+| `LLM_API_KEY` | Bearer token for that server, if it checks one |
+| `LLM_SCORE_BATCH` | Transcript windows per scoring call (default 3 local, 8 Gemini) |
 
 **Client-side (encrypted in localStorage):**
 | Key | Description |
 |-----|------------|
-| `GEMINI_API_KEY` | Google Gemini — required |
+| `GEMINI_API_KEY` | Google Gemini — required unless `LLM_BASE_URL` is set (then only for layout picking and silent videos) |
 | `FAL_KEY` | fal.ai — required for AI Shorts |
 | `ELEVENLABS_API_KEY` | ElevenLabs — required for voiceover/dubbing |
 | `UPLOAD_POST_API_KEY` | Upload-Post — required, for social posting |

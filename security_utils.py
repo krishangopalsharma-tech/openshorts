@@ -13,6 +13,25 @@ import socket
 from urllib.parse import urlparse
 
 
+def truncate_ip(ip: str) -> str:
+    """Drop the host part of an address so it identifies a network, not a device.
+
+    Used for the rights declaration kept with a project (art. 5.1.c: the record
+    has to show the confirmation was made from somewhere at some time, which a
+    /24 answers as well as a full address, and it does not hand anyone a
+    per-device identifier that survives for years). IPv4 keeps three octets,
+    IPv6 keeps the /48 the RIRs actually assign. Anything unparseable becomes
+    "unknown" rather than being stored verbatim.
+    """
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return "unknown"
+    if addr.version == 4:
+        return str(ipaddress.ip_network(f"{addr}/24", strict=False).network_address)
+    return str(ipaddress.ip_network(f"{addr}/48", strict=False).network_address)
+
+
 class UnsafeURLError(ValueError):
     """Raised when a URL is not safe to fetch server-side."""
 

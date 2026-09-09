@@ -516,8 +516,61 @@ def burn_thumbnail_text(img, text, position="left", color="white"):
     return img
 
 
+# AI Act art. 50(2): a synthetic image has to be marked in a machine-readable
+# way, and these thumbnails are exactly the case the article is about — an
+# image model painting a scene, often around a reference photo of the real
+# presenter. Videos get the mp4 `comment` tag (ffmpeg_utils.mark_ai_generated);
+# a JPEG's equivalent is XMP, and the interoperable vocabulary is IPTC's
+# DigitalSourceType, whose `trainedAlgorithmicMedia` value is what Google,
+# LinkedIn, TikTok and Adobe already read. Written alongside the EXIF Software
+# tag because the two survive different pipelines: a re-encode usually keeps
+# EXIF and drops XMP, a metadata scrub keeps neither, and this is the honest
+# ceiling of what a JPEG can carry without a C2PA signing key.
+AI_XMP_PACKET = (
+    '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+    '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+    '<rdf:Description rdf:about=""'
+    ' xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"'
+    ' xmlns:xmp="http://ns.adobe.com/xap/1.0/"'
+    ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
+    ' Iptc4xmpExt:DigitalSourceType='
+    '"http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia"'
+    ' xmp:CreatorTool="OpenShorts (openshorts.app)">'
+    '<dc:description><rdf:Alt><rdf:li xml:lang="x-default">'
+    'AI-generated image produced with OpenShorts (openshorts.app)'
+    '</rdf:li></rdf:Alt></dc:description>'
+    '</rdf:Description></rdf:RDF></x:xmpmeta>'
+    '<?xpacket end="w"?>'
+).encode("utf-8")
+
+AI_SOFTWARE_TAG = "OpenShorts (openshorts.app) — AI-generated image"
+
+
+def _ai_save_kwargs(img):
+    """XMP + EXIF marking for a generated image. Never raises.
+
+    Pillow grew the ``xmp=`` save argument for JPEG relatively late, so an
+    older Pillow simply gets the EXIF half rather than failing the render.
+    """
+    kwargs = {}
+    try:
+        exif = img.getexif()
+        exif[0x0131] = AI_SOFTWARE_TAG                    # Software
+        exif[0x010E] = AI_SOFTWARE_TAG                    # ImageDescription
+        kwargs["exif"] = exif.tobytes()
+    except Exception:
+        pass
+    kwargs["xmp"] = AI_XMP_PACKET
+    return kwargs
+
+
 def finalize_thumbnail(img, out_path):
-    """Cover-crop to 1280x720 and save a JPEG under YouTube's 2 MB limit."""
+    """Cover-crop to 1280x720 and save a JPEG under YouTube's 2 MB limit.
+
+    Every file that leaves here is machine-marked as AI-generated — see
+    AI_XMP_PACKET.
+    """
     img = img.convert("RGB")
     scale = max(THUMB_W / img.width, THUMB_H / img.height)
     img = img.resize((max(THUMB_W, int(img.width * scale + 0.5)),
@@ -525,8 +578,15 @@ def finalize_thumbnail(img, out_path):
     left = (img.width - THUMB_W) // 2
     top = (img.height - THUMB_H) // 2
     img = img.crop((left, top, left + THUMB_W, top + THUMB_H))
+    marks = _ai_save_kwargs(img)
     for q in (92, 88, 84, 78, 70, 60):
-        img.save(out_path, "JPEG", quality=q, optimize=True)
+        try:
+            img.save(out_path, "JPEG", quality=q, optimize=True, **marks)
+        except (TypeError, ValueError):
+            # An older Pillow without the xmp= argument: keep the EXIF mark
+            # rather than losing the thumbnail.
+            marks.pop("xmp", None)
+            img.save(out_path, "JPEG", quality=q, optimize=True, **marks)
         if os.path.getsize(out_path) <= THUMB_MAX_BYTES:
             break
     return out_path

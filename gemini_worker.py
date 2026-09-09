@@ -86,6 +86,47 @@ Order clips best to worst by how likely they are to stop a viewer scrolling.
 """
 
 
+# Grounded rewrite of hook + title for a clip whose meaning lives on screen
+# (SCREENCAST / WIDE / INSET stretches): the detail pass never saw a frame,
+# so its hook summarises the topic instead of naming what is being shown.
+class GroundedHook(BaseModel):
+    on_screen: str
+    viral_hook_text: str
+    video_title_for_youtube_short: str
+
+
+GROUNDED_HOOK_PROMPT = """
+These frames come from ONE short clip (the whole clip, in order) and the
+transcript below is exactly what is said during it. Most of this clip's
+meaning is on the screen, not in the face.
+
+1. `on_screen`: one line naming what is shown — the app, window, product,
+   document, code, chart or on-screen text — as specifically as the frames
+   allow (read visible titles and labels).
+2. `viral_hook_text`: max 10 words, in TRANSCRIPT_LANGUAGE. It MUST mention
+   the thing you named in `on_screen` (or the action being done to it: set
+   up, connect, compare, fix, type) AND keep the strongest concrete fact of
+   the clip: a number, a multiplier, a price, a name ("7x faster", "$136 a
+   month", "3,400 stars") from the transcript or the current hook. Never a
+   summary of the video's general topic, never a slogan that would fit any
+   clip of this video, never drop a figure for a vaguer phrase.
+3. `video_title_for_youtube_short`: max 100 chars, same rule, in
+   TRANSCRIPT_LANGUAGE, no fake claims.
+
+The current hook and title below were written WITHOUT seeing the frames and
+are the kind of topic summary you must replace. Do not reuse their wording.
+
+TRANSCRIPT_LANGUAGE: {language}
+CURRENT_HOOK (to replace): {current_hook}
+CURRENT_TITLE (to replace): {current_title}
+TRANSCRIPT:
+{transcript}
+
+Return only:
+{{"on_screen": "<one line>", "viral_hook_text": "<max 10 words>", "video_title_for_youtube_short": "<max 100 chars>"}}
+"""
+
+
 class LayoutChoice(BaseModel):
     layout: str
     confidence: float
@@ -278,6 +319,11 @@ HOOK PLAYBOOK — pick the strongest fitting pattern for `viral_hook_text` (max 
 - Story loop: "This one email almost ruined me."
 - POV / pattern interrupt: "POV: you finally understand it."
 (These are English PATTERNS — always write the actual hook in TRANSCRIPT_LANGUAGE.)
+- ABOUT THIS MOMENT, NOT THE VIDEO: the hook and the title name the concrete
+  thing that happens inside this clip — the tool being set up, the action,
+  the number, the claim, the name. A line that could sit on any clip of this
+  video ("I automated my clips with AI") is wrong. If nothing concrete can be
+  named, quote the clip's strongest sentence instead of summarising the topic.
 
 COPY RULES — ALL text fields (descriptions, title, hook, tags) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
 - Descriptions (TikTok + Instagram): 1-2 punchy sentences that tease the payoff

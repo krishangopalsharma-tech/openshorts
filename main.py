@@ -22,8 +22,10 @@ from google import genai
 from google.genai import types as genai_types
 
 import gemini_worker
+import hook_grounding
 import layout_picker
 import cinematic
+import llm_backend
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words,
                             trim_to_best)
@@ -706,6 +708,15 @@ def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True):
     if have_hd:
         for i, s in enumerate(statics):
             plan.append((f'HD-static{i + 1}', False, s))
+    if statics and paid:
+        # The conservative clients (tv_embed/android) through a FREE static,
+        # before any per-GB attempt: YouTube serves a fake "Video unavailable"
+        # to the web/HD client from datacenter-ISP ranges on some videos while
+        # the fallback clients pass on the very same IPs (verified 4-sep-2026,
+        # all three statics, three countries). Costs nothing and the paid path
+        # was capped to 720p anyway, so there is no quality trade.
+        plan.append(('fallback-static', False, statics[0]))
+    if have_hd:
         plan.append(('HD', bool(paid), paid))
     plan.append(('fallback', bool(paid),
                  paid if paid else (statics[0] if statics else None)))
@@ -773,18 +784,13 @@ def download_youtube_video(url, output_dir="."):
     # conservative fallback (also the only strategy for self-host).
     _bgutil_http = os.environ.get("BGUTIL_BASE_URL", "").strip()
     _bgutil_script = os.environ.get("BGUTIL_SCRIPT_PATH", "").strip()
-    if _bgutil_http:
-        hd_args = {'youtubepot-bgutilhttp': {'base_url': [_bgutil_http]}}
-    elif _bgutil_script:
-        hd_args = {'youtubepot-bgutilscript': {'script_path': [_bgutil_script]}}
-    else:
-        hd_args = None
-    fallback_args = {
-        'youtube': {
-            'player_client': ['tv_embed', 'android', 'mweb', 'web'],
-            'player_skip': ['webpage', 'configs'],
-        }
-    }
+    # Client lists live in yt_clients.py (shared with the duration probe):
+    # explicit `default,mweb` because the authed defaults alone return
+    # "Video unavailable" on a share of videos, from every IP, and that was
+    # what fed the per-GB proxy (6-sep-2026, verified in the prod container).
+    from yt_clients import hd_extractor_args, fallback_extractor_args
+    hd_args = hd_extractor_args(_bgutil_http, _bgutil_script)
+    fallback_args = fallback_extractor_args(_bgutil_http, _bgutil_script)
 
     # Cap at 720p ONLY when the bytes actually go through the PER-GB paid proxy
     # — that cap exists to control bandwidth cost, and the direct attempt and
@@ -802,12 +808,11 @@ def download_youtube_video(url, output_dir="."):
         return ('bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
                 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio/'
                 'best[height<=1080][ext=mp4]/best[ext=mp4]/best')
-    fallback_fmt = 'best[ext=mp4]/best'
 
-    def _base_opts(extractor_args, proxy):
+    def _base_opts(extractor_args, proxy, cookies=True):
         return {
             'quiet': False, 'verbose': True, 'no_warnings': False,
-            'cookiefile': cookies_path if cookies_path else None,
+            'cookiefile': cookies_path if (cookies and cookies_path) else None,
             'proxy': proxy, 'socket_timeout': 30, 'retries': 10, 'fragment_retries': 10,
             'nocheckcertificate': True, 'cachedir': False,
             'extractor_args': extractor_args,
@@ -821,24 +826,30 @@ def download_youtube_video(url, output_dir="."):
 
     # Wire bytes actually pulled through the (paid) proxy, summed across
     # fragments/streams. Reported to app.py via the PROXY_BYTES= line below.
-    _dl_bytes = {"total": 0}
+    _dl_bytes = {"total": 0, "partial": 0}
 
     def _progress_hook(d):
-        if d.get('status') == 'finished':
+        if d.get('status') == 'downloading':
+            # Bytes of a fragment still in flight: a failed attempt has
+            # already paid for these even though 'finished' never fires.
+            _dl_bytes["partial"] = int(d.get('downloaded_bytes') or 0)
+        elif d.get('status') == 'finished':
+            _dl_bytes["partial"] = 0
             _dl_bytes["total"] += int(d.get('total_bytes')
                                       or d.get('total_bytes_estimate')
                                       or d.get('downloaded_bytes') or 0)
 
-    def _attempt(extractor_args, fmt, proxy):
+    def _attempt(extractor_args, fmt, proxy, cookies=True):
         _dl_bytes["total"] = 0
-        with yt_dlp.YoutubeDL(_base_opts(extractor_args, proxy)) as ydl:
+        _dl_bytes["partial"] = 0
+        with yt_dlp.YoutubeDL(_base_opts(extractor_args, proxy, cookies)) as ydl:
             info = ydl.extract_info(url, download=False)
         sanitized = sanitize_filename(info.get('title', 'youtube_video'))
         expected = os.path.join(output_dir, f'{sanitized}.mp4')
         if os.path.exists(expected):
             os.remove(expected)
         dl_opts = {
-            **_base_opts(extractor_args, proxy),
+            **_base_opts(extractor_args, proxy, cookies),
             'format': fmt,
             'outtmpl': os.path.join(output_dir, f'{sanitized}.%(ext)s'),
             'merge_output_format': 'mp4', 'overwrites': True,
@@ -854,11 +865,21 @@ def download_youtube_video(url, output_dir="."):
     _direct_first = (os.environ.get("DIRECT_FIRST", "").strip() == "1"
                      and (_proxy or _statics) and hd_args and cookies_path)
 
+    # A fallback attempt runs anonymously when an HD attempt (with cookies)
+    # already failed on the same route: the account cookies are what narrows
+    # yt-dlp to the clients that die with "Video unavailable", and the
+    # anonymous defaults were measured at 1080p on the same static IP. With
+    # no HD path at all (self-host without a PO token provider) the fallback
+    # is the only attempt, so it keeps the cookies the operator configured.
+    # Every attempt asks for the same 1080p spec: the fallback used to ask
+    # for `best[ext=mp4]/best`, the best single-file format, which on
+    # YouTube is the 360p progressive one even with 1080p streams listed.
     attempts = [
         (label,
-         fallback_args if label == 'fallback' else hd_args,
-         fallback_fmt if label == 'fallback' else _hd_fmt_for(capped),
-         proxy)
+         fallback_args if label.startswith('fallback') else hd_args,
+         _hd_fmt_for(capped),
+         proxy,
+         not (label.startswith('fallback') and hd_args))
         for label, capped, proxy in plan_download_attempts(
             _direct_first, _statics, _proxy, bool(hd_args), youtube=is_youtube_url(url))
     ]
@@ -868,7 +889,11 @@ def download_youtube_video(url, output_dir="."):
     sanitized_title = None
     last_err = None
     used_proxy = False
-    for label, ea, fmt, proxy in attempts:
+    # Every attempt, with its bytes and failure text: printed as PROXY_ROUTE=
+    # below so app.py can keep a durable trail of WHY a job reached the paid
+    # proxy (the container log rotates within the hour; see cloud/proxy_ledger).
+    attempt_log = []
+    for label, ea, fmt, proxy, cookies in attempts:
         # A 403 on the media fetch is usually transient: the googlevideo URL is
         # bound to the IP that extracted it, and the residential proxy rotates
         # its exit IP between requests. Retrying re-extracts and usually lands
@@ -876,15 +901,22 @@ def download_youtube_video(url, output_dir="."):
         for retry in range(2):
             try:
                 print(f"📥 Download attempt: {label}" + (f" (retry {retry})" if retry else ""))
-                sanitized_title = _attempt(ea, fmt, proxy)
+                sanitized_title = _attempt(ea, fmt, proxy, cookies)
                 # Only bytes through the PER-GB proxy cost money; direct and
                 # the flat-rate static proxies are free bandwidth for the
                 # monthly counter's purposes.
                 used_proxy = proxy is not None and proxy == _proxy
+                attempt_log.append({"label": label, "ok": True,
+                                    "bytes": _dl_bytes["total"] + _dl_bytes["partial"],
+                                    "paid": used_proxy})
                 print(f"✅ Download succeeded ({label}).")
                 break
             except Exception as e:
                 last_err = e
+                attempt_log.append({"label": label, "ok": False,
+                                    "bytes": _dl_bytes["total"] + _dl_bytes["partial"],
+                                    "paid": proxy is not None and proxy == _proxy,
+                                    "error": str(e)[:300]})
                 print(f"⚠️  Download attempt '{label}' failed: {str(e)[:200]}")
                 retryable = '403' in str(e) or 'Forbidden' in str(e)
                 if not retryable or retry == 1:
@@ -916,12 +948,19 @@ Technical Details: {str(last_err)}
                 downloaded_file = os.path.join(output_dir, f)
                 break
 
-    if used_proxy and _dl_bytes["total"]:
+    # Paid bytes across EVERY attempt that used the per-GB proxy, failed ones
+    # included: a paid attempt that died after three 10 MB fragments was
+    # billed for them even though a later attempt won.
+    paid_bytes = sum(int(a.get("bytes") or 0) for a in attempt_log if a.get("paid"))
+    print("PROXY_ROUTE=" + json.dumps({
+        "winner": attempt_log[-1]["label"] if attempt_log and attempt_log[-1].get("ok") else None,
+        "paid_bytes": paid_bytes,
+        "attempts": attempt_log,
+    }, ensure_ascii=False))
+    if paid_bytes:
         # Machine-parseable marker consumed by app.py's log reader for the
         # monthly proxy-bandwidth counter. Not shown to clients (log filter).
-        # Only emitted when the winning attempt actually went through the
-        # proxy — direct-first successes are free bandwidth.
-        print(f"PROXY_BYTES={_dl_bytes['total']}")
+        print(f"PROXY_BYTES={paid_bytes}")
     print(f"✅ Video downloaded in {time.time() - step_start_time:.2f}s: {downloaded_file}")
     return downloaded_file, sanitized_title
 
@@ -1441,15 +1480,24 @@ def transcribe_video(video_path):
     return transcript
 
 def _run_gemini_stage(client, model_name, prompt, schema):
-    """One schema-enforced Gemini call with transient-error backoff.
-    Returns (parsed_dict, cost_analysis)."""
-    config = genai_types.GenerateContentConfig(
+    """One schema-enforced model call with transient-error backoff.
+    Returns (parsed_dict, cost_analysis).
+
+    With an OpenAI-compatible server configured (``llm_backend.active()``)
+    the call goes there instead of Gemini and ``client`` is unused; the
+    retry policy is shared because a local server has the same failure
+    shapes (connection refused while the model loads, a truncated body,
+    a 5xx from a busy vLLM)."""
+    use_local = llm_backend.active()
+    config = None if use_local else genai_types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
     )
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
+            if use_local:
+                return llm_backend.generate_json(prompt, schema, model=model_name)
             response = client.models.generate_content(model=model_name, contents=prompt, config=config)
             # Policy blocks are deterministic — retrying only burns quota and
             # time, and the user deserves the real reason instead of a generic
@@ -1474,11 +1522,16 @@ def _run_gemini_stage(client, model_name, prompt, schema):
                 '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
                 '500', 'INTERNAL', 'overloaded', 'Deadline',
                 'empty response body', 'did not contain a JSON object',
-                'Failed to parse Gemini JSON response'))
+                'Failed to parse Gemini JSON response',
+                # OpenAI-compatible servers: model still loading, busy, or a
+                # small model that skipped a required field this time.
+                'ConnectError', 'ReadTimeout', 'RemoteProtocolError', '502', '504',
+                'validation error'))
             if attempt == max_attempts or not transient:
                 raise
             wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
+            who = "LLM server" if use_local else "Gemini"
+            print(f"⚠️ {who} transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
             time.sleep(wait)
 
 
@@ -1510,6 +1563,18 @@ def _run_stage_split(client, model_name, items, build_prompt, schema, key, costs
                 + _run_stage_split(client, model_name, items[mid:], build_prompt, schema, key, costs, label))
 
 
+def score_batch_size():
+    """Transcript windows per scoring call: ``LLM_SCORE_BATCH`` if set, else
+    8 for Gemini (1M context) and 3 for an OpenAI-compatible server."""
+    raw = os.environ.get("LLM_SCORE_BATCH", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 3 if llm_backend.active() else 8
+
+
 def get_viral_clips(transcript_result, video_duration):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
@@ -1518,15 +1583,21 @@ def get_viral_clips(transcript_result, video_duration):
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
     """
-    print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
-        return None
-
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     language = str(transcript_result.get('language') or 'unknown')
+    if llm_backend.active():
+        # Self-hosted text model: no Google key needed for this stage.
+        client = None
+        model_name = llm_backend.model_name()
+        print(f"\U0001f916  Analyzing with local LLM at {llm_backend.base_url()} (2-pass: score → detail)...")
+    else:
+        print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("❌ Error: GEMINI_API_KEY not found in environment variables "
+                  "(set it, or point LLM_BASE_URL at an OpenAI-compatible server).")
+            return None
+        client = genai.Client(api_key=api_key)
+        model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print(f"\U0001f916  Model: {model_name} | language: {language}")
 
     # Full word list — ground truth for snapping cut points.
@@ -1549,7 +1620,10 @@ def get_viral_clips(transcript_result, video_duration):
 
         # --- Pass 1: score windows in batches, keep the highest-scoring ---
         scored = []
-        SCORE_BATCH = 8
+        # Local models usually run with a 4-8k context (Ollama defaults to
+        # 4096 unless OLLAMA_CONTEXT_LENGTH says otherwise) and 8 windows of
+        # transcript do not fit; a silently truncated prompt scores garbage.
+        SCORE_BATCH = score_batch_size()
         def _payload(ws):
             return [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in ws]
 
@@ -1655,7 +1729,12 @@ def get_visual_clips(video_path, video_duration, language="en"):
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found.")
+        if llm_backend.active():
+            print("❌ This video has no usable speech, so it has to be clipped by "
+                  "watching it, and that needs Gemini (a text-only LLM server "
+                  "cannot see the footage). Add a GEMINI_API_KEY for silent videos.")
+        else:
+            print("❌ Error: GEMINI_API_KEY not found.")
         return None
     client = genai.Client(api_key=api_key)
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
@@ -1902,7 +1981,7 @@ if __name__ == '__main__':
             # wrote no metadata.json, so app.py marked the job failed anyway
             # (app.py:1087) after burning GPU on a render nobody could see.
             raise RuntimeError(
-                "Clip detection failed — Gemini did not return usable clips for this video.")
+                "Clip detection failed — the AI model did not return usable clips for this video.")
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
 
@@ -1966,6 +2045,11 @@ if __name__ == '__main__':
                     # seam there, and /api/subtitle needs it again later.
                     import layout_ranges as _layouts
                     clip['layout_ranges'] = _layouts.read(clip_final_path)
+                    # The hook was written from the transcript alone. When the
+                    # render put this clip's meaning on the screen, rewrite hook
+                    # and title from three of its frames BEFORE burning them.
+                    if success and hook_grounding.wanted(clip['layout_ranges'], end - start):
+                        hook_grounding.reground(clip_final_path, clip, transcript, start, end)
                     if success and os.environ.get("AUTO_HOOK") == "1":
                         hooked = auto_hook_clip(clip_final_path, clip)
                         if hooked:
@@ -2004,7 +2088,7 @@ if __name__ == '__main__':
 
             # Persist per-clip render results added by the workers (auto_hook)
             # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c for c in shorts):
+            if any('auto_hook' in c or 'hook_grounding' in c for c in shorts):
                 with open(metadata_file, 'w') as f:
                     json.dump(clips_data, f, indent=2)
 

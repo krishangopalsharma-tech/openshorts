@@ -26,7 +26,8 @@ def setup_sync(app):
     from starlette.middleware.sessions import SessionMiddleware
     app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret)
 
-    from . import auth, oauth, billing, social_profiles, videos, api_keys, account, mcp_oauth
+    from . import (auth, oauth, billing, social_profiles, videos, api_keys,
+                   account, mcp_oauth, marketing)
     oauth.register()
     billing._init_stripe()
     app.include_router(auth.router)
@@ -37,6 +38,8 @@ def setup_sync(app):
     app.include_router(api_keys.router)
     app.include_router(mcp_oauth.router)
     app.include_router(account.router)
+    # Unsubscribe from the one commercial email (LSSI art. 21.2).
+    app.include_router(marketing.router)
 
 
 async def setup_async(app, keep_reservation_ids=None):
