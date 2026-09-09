@@ -261,7 +261,41 @@ the candidates. Verified no variant is claimed by two different English words.
 Three loanwords the measurement exposed outright were added: `hairstyle`,
 `sexy`, `century`. 3 of the 4 slices improved; 739 tests pass.
 
-**Still pending:** the fine-tune itself. `vasista22/whisper-hindi-large-v2`
+**Finding 3 — the fine-tune is REJECTED.** `vasista22/whisper-hindi-large-v2`
+converted to CTranslate2 float16 (2.9GB) and run over the same four slices.
+The stated caveat was real, and the failure is worse than "handles code-switch
+less well":
+
+- `cs2_long_english`: 14 seconds of speech became **two words** (`आपका फर्स्ट`).
+  large-v3 transcribed the whole thing.
+- `cs1`: lost both `सर` and the `नो` of `नो प्रॉब्लम`.
+- It **hallucinates All India Radio news boilerplate** in silence and
+  uncertainty: `इसी के साथ ये समाचार बुलेटिन समाप्त हुआ नमस्कार`,
+  `आप आकाशवाणी रांची से सुन रहे हैं`,
+  `प्रादेशिक समाचारों के इस बुलेटिन में आपका फिर से स्वागत है` (twice in one
+  10s slice). These models are trained on Shrutilipi/AIR news corpora, so the
+  model is domain-locked to broadcast news while this pipeline's input is
+  entertainment and podcasts. Retrying with `vad_filter=True`,
+  `condition_on_previous_text=False` and `temperature=0.0` made it **worse**,
+  which is what rules out a config fix: the boilerplate is in the weights.
+
+For captions this is disqualifying in a way that a WER number would hide — a
+hallucinated sign-off produces timed captions for words nobody said.
+
+Its wins were real but narrow, all Hindi word identity: `मैसेज भेज` where
+large-v3 wrote `मेसेज बेच` (bech, "sell" — wrong verb), `डेब्यू` for large-v3's
+`डेबिव`, `सेंचुरी मारी` for `सेंचरी महरी`. So a Hindi-specialised acoustic model
+does hear Hindi better; it just cannot be trusted to stay on the audio. Not
+worth chasing with a correction table either, since these are ASR confusions
+between real Hindi words and a lookup cannot tell which was meant — the same
+reason चीज़ and बस are out of the loanword table.
+
+**Conclusion: stay on `large-v3`.** Phases 0 and 1 were the whole win. If this
+is revisited, the candidate would be a broader-domain Indic model (IndicWhisper
+on IndicSUPERB) and the acceptance test is this one: transcribe entertainment
+audio with silence in it and check for invented sign-offs.
+
+**Not pending any more:** the fine-tune itself. `vasista22/whisper-hindi-large-v2`
 converted to CTranslate2 float16 and run over the same four slices, against
 these `large-v3` outputs. What would sink it: Devanagari-only output on
 `cs2_long_english`, or losing the English nouns in `cs3`.

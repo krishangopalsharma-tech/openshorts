@@ -357,6 +357,21 @@ So it earns its place on name-bearing lines and costs stability elsewhere,
 which is why it stays opt-in per job rather than becoming a default. Keep it
 short, keep it to proper nouns, and keep it in Latin script.
 
+A **Hindi fine-tuned whisper is not the upgrade it looks like.** Measured:
+`vasista22/whisper-hindi-large-v2` (CTranslate2 float16) hears Hindi words
+better than large-v3 — `मैसेज भेज` where large-v3 writes `मेसेज बेच` ("sell"),
+`डेब्यू` for `डेबिव`, `सेंचुरी मारी` for `सेंचरी महरी` — and is disqualified
+anyway. It reduced a 14-second English stretch to two words, and it
+hallucinates All India Radio boilerplate into silence
+(`आप आकाशवाणी रांची से सुन रहे हैं`, `इसी के साथ ये समाचार बुलेटिन समाप्त हुआ`),
+because these models are trained on Shrutilipi/AIR news corpora and this
+pipeline's input is entertainment. `vad_filter` and
+`condition_on_previous_text=False` made it worse, so it is not a config
+problem. A hallucinated sign-off becomes timed captions for words nobody said,
+which is a failure a WER number hides. Any future candidate gets this
+acceptance test: entertainment audio with silence in it, checked for invented
+sign-offs.
+
 One Windows-only trap worth knowing: the CUDA libs CTranslate2 needs ship
 inside torch's own package (`torch/lib/cublas64_12.dll`) and it is torch's
 import that puts that directory on the DLL search path. `_get_whisper_model`
