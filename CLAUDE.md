@@ -244,6 +244,97 @@ typed Hinglish rather than a dictionary: **schwa deletion** (final always —
 schwa) and **long `ā` doubles inside a word but not at the end** (`aap`,
 `pyaar`, but `kya`, `sharma`).
 
+Both of those rules key off the **last syllable unit**, which is why attached
+punctuation had to be peeled off before the syllable walk (`_split_affixes`):
+`_units()` made a trailing comma the last unit, so neither rule fired and
+`सर,` came out `sara,`, `कपिल,` `kapila,`, `क्या,` `kyaa,`. Caption text is
+mostly sentence-final words, so it was visible on nearly every line. The
+peeled punctuation is still romanised (`।` → `.`), just separately.
+
+The `aa`/`a` choice also used to require more than one syllable, which left
+`का` as `kaa`, `था` as `thaa`, `ना` as `naa` — some of the most frequent words
+in the language. A single syllable shortens too now, as long as a consonant
+carries the vowel; the two things that keep both letters are a bare vowel that
+IS the whole word (`आ` = `aa`) and a nasalised ending, where the long vowel is
+audible and typed (`हाँ` = `haan`). A final independent vowel after another
+syllable still shortens (`हुआ` = `hua`).
+
+**English loanwords get their English spelling back** (`_LOANWORDS`, ~150
+entries plus nukta variants). Rule-based romanisation can only spell what it
+heard, so `नेल पेंट` came out `nel pent`, `हेलो` `helo`, `स्टाइल` `staail` —
+and these are a large share of Hindi media speech. The table is per TOKEN, not
+per phrase, because each timed word is romanised on its own and that is what
+keeps per-word caption timings (`नेल पेंट` is two entries).
+
+Lookup folds the spellings whisper alternates between for the same word. Nukta
+marks, since it writes both `फ़ोन` and `फोन`. And **two matra pairs**, `े`/`ै`
+and `ो`/`ॉ`, because Devanagari has no settled spelling for an English vowel:
+`मैसेज` was in the table and `मेसेज` was not, so one real episode captioned the
+same word `message` on one line and `mesej` on another. `ि`/`ी` and `ु`/`ू` are
+NOT folded — whisper does not alternate those. The fold skips `_NO_VARIANT`,
+because a variant spelling can be a different word (`रोड` road but `रॉड` rod,
+`रॉल` a roll not a role, `फेन` Hindi for foam, `टोप` a cap); that is the same
+call as the ambiguous words kept out of the table.
+
+A word that is ALSO a common Hindi word is deliberately absent: a lookup
+cannot tell which was meant, and the Hindi reading usually wins. Counted over
+one real episode, `चीज़` appeared 4 times and meant "thing" every time, never
+"cheese"; `बस` 3 times, never the vehicle. Also out: `पास` (paas, "near"),
+`हाय`. `सर` IS in, because "sir" dominates interview and comedy speech and the
+cost when it means "head" is a mild `sir dard`.
+
+### The model matters more than any of this on Hindustani
+
+`WHISPER_MODEL=large-v3-turbo` is the wrong model for Hindi/Urdu and was the
+real cause of "the Hinglish captions are not up to the mark". Measured on a
+Comedy Nights episode (24-36s), turbo against full `large-v3`: `कापिल`/`कपिल`,
+`सार`/`सर`, `अंगुथे पर`/`अंगुठे पे`, `नेलपेंट लगाय`/`नेल पेंट लगा`. Turbo is a
+4-decoder-layer distillation and it degrades on low-resource languages and
+code-switching, which is all Hinglish is.
+
+So `subtitles.get_whisper_config(language)` takes the language and swaps a
+turbo build for `large-v3` (override: `WHISPER_MODEL_HINDUSTANI`) on
+`TURBO_UNSAFE_LANGUAGES` — an explicitly named non-turbo model is never
+overridden, and English keeps turbo because it is unaffected there and
+faster. Once the weights are cached this costs nothing measurable: 2.7s
+against turbo's 4.3s on a 12s slice (float16, RTX 2070 SUPER).
+
+`POST /api/process` also takes `transcribe_prompt` → `TRANSCRIBE_PROMPT`, the
+names and domain words for the decode (dashboard: "names & terms in this
+video"). Whisper spells a name it has never heard the way it sounded — `अजीए`
+for अजय — and listing it fixes that word. **It is withheld from turbo**
+(`whisper_supports_prompt`): prompted, turbo answers a Hindi source in English
+("Hello Ajay sir.") and then returns nonsense, so the prompt is only safe
+alongside the model swap above. Do not seed this from the video title either —
+titles are usually English, and an English prompt over Hindi audio invites the
+same drift.
+
+**The prompt is not free, and it must not be written in Devanagari.** Measured
+on four code-switched slices of the same episode against no prompt at all:
+
+- A **Devanagari** prompt got **echoed verbatim** as the transcript on the
+  English-heavy slice (`अजय देवगन, करीना कपूर, सिंघम रिटर्न्स` twice, and the
+  actual speech gone). Whisper's `initial_prompt` is prior decoder context, so
+  a prompt in the output script is indistinguishable from text it just emitted.
+- An **English names-only** prompt destabilised Hindi-dominant lines
+  (`नो प्रॉब्लम` → `नू प्रॉब्लम`, plus a hallucinated tail) but recovered a long
+  English stretch as **real Latin English** — `I like your hairstyle first of
+  all I am going to teach you dance` where the unprompted decode produced a
+  semantically broken Devanagari transliteration.
+- **No prompt** was the most stable on Hindi-dominant lines.
+
+So it earns its place on name-bearing lines and costs stability elsewhere,
+which is why it stays opt-in per job rather than becoming a default. Keep it
+short, keep it to proper nouns, and keep it in Latin script.
+
+One Windows-only trap worth knowing: the CUDA libs CTranslate2 needs ship
+inside torch's own package (`torch/lib/cublas64_12.dll`) and it is torch's
+import that puts that directory on the DLL search path. `_get_whisper_model`
+therefore imports torch before `faster_whisper` — without it a GPU load dies
+with "Library cublas64_12.dll is not found or cannot be loaded" and trips
+`_whisper_force_cpu` for the rest of the process. `main.py` only ever got away
+with it because ultralytics imports torch first.
+
 A transcript that is REUSED rather than produced (the Thumbnail Studio
 handover, the checkpoint an interrupted run leaves) never passed through the
 backend's language choice, so `main.py` romanises it on the way in — only when
@@ -354,7 +445,7 @@ request degrades to "no effect", never to a broken filtergraph.
 ### API Endpoints
 | Method | Route | Purpose |
 |--------|-------|---------|
-| POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`) |
+| POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`; `transcribe_prompt`: names/terms for the decode) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |
 | POST | `/api/subtitle` | Burn captions on one clip: `preset` + `overrides` (caption_styles) or the legacy fields; auto-transcribes dubbed videos |
