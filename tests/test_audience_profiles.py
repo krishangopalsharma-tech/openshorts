@@ -32,8 +32,26 @@ def test_cli_defaults_never_override_the_env(monkeypatch):
 
 def test_gemini_block_only_with_a_profile():
     assert ap.gemini_block(None) == ""
-    assert "Hinglish" in ap.gemini_block("in")
-    assert "American English" in ap.gemini_block("us")
+    india, usa = ap.gemini_block("in"), ap.gemini_block("us")
+    # The load-bearing parts, not the wording: the block has to outrank the
+    # repo's own prompt, and the India profile has to demand Roman script or
+    # the captions land in Devanagari that the Latin presets cannot draw.
+    for block in (india, usa):
+        assert "take priority" in block
+    assert "ROMAN script" in india and "Hinglish" in india
+    assert "Plain English" in usa
+
+
+def test_the_profiles_claim_nothing_about_the_channel_itself():
+    """The prose is a prompt, so an invented claim about the niche or the
+    viewer steers every title and hook. Until there are real numbers the
+    profiles say only what is known: the language, and what any clip must do
+    to stand alone. Guard against the placeholder copy coming back."""
+    invented = ("shaadi", "padosi", "WhatsApp", "Bollywood", "cricket",
+                "personalfinance", "counterintuitive", "18-35", "desi")
+    for key, profile in ap.PROFILES.items():
+        for word in invented:
+            assert word not in profile["context"], f"{word!r} back in {key}"
 
 
 def test_chat_round_trip(tmp_path):

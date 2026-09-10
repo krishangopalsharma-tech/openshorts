@@ -22,21 +22,28 @@ PROFILES = {
         "transcribe_language": "hinglish",
         # Becomes TRANSCRIBE_PROMPT: names / words Whisper keeps getting wrong.
         "vocabulary": "",
-        "context": """AUDIENCE: Indian YouTube Shorts viewers, 18-35, watching on mobile, Hindi/Hinglish speakers.
+        # NOTE: everything below is deliberately about the LANGUAGE and about
+        # what any clip has to do to stand alone. It says nothing about what
+        # this channel is or who watches it, because nobody has measured that
+        # yet. Add a "WHAT WINS" section here from your own numbers — the top
+        # and bottom clips by viewed-vs-swiped — and not from taste.
+        "context": """AUDIENCE: Hindi / Hinglish speakers watching Shorts on a phone.
 
-WHAT WINS WITH THIS AUDIENCE:
-- Relatable desi situations: family, shaadi, office, boss, salary, padosi, school, exams, cricket, Bollywood.
-- Banter, roasts, savage replies, and "yeh kya bol diya" moments. The viewer should want to forward it on WhatsApp.
-- Emotion over information: big laugh, shock, pride, nostalgia.
-- COMEDY: the clip MUST contain the full setup AND the punchline, ending 1-2 s after the laugh. A clip that cuts before the payoff is worthless.
-- Open on the setup line or the most outrageous line. Never on a greeting, applause, host intro or filler.
+WHAT THE CLIP MUST DO:
+- Stand alone. Someone who has seen nothing else must understand it.
+- Contain its own payoff. On comedy that means the full setup AND the
+  punchline, ending 1-2 s after the laugh; a clip that cuts before the payoff
+  is worthless however good the setup was.
+- Open on the line that carries the moment. Never on a greeting, applause, a
+  host introduction, a sponsor read or filler.
 
 COPY STYLE (overrides any other language rule):
-- title and hook in natural Hinglish written in ROMAN script, the way friends text each other
-  (e.g. "Jab boss ne salary ka sawaal pucha 😂"). Not pure English, not Devanagari.
-- The hook names the situation or tension of THIS clip, not the show or the topic in general.
-- Max 1 emoji. No "POV:" or translated English templates.
-- Hashtags: 3-5, mix Hinglish and English, e.g. #comedy #hindicomedy #funny plus 1-2 topic tags.
+- Title and hook in Hinglish written in ROMAN script, the way people type it
+  in a chat. Not pure English, not Devanagari.
+- The hook names the situation or tension of THIS clip, not the show or the
+  topic in general.
+- Max 1 emoji. No "POV:" and no translated English templates.
+- Hashtags: 3-5, drawn from what the clip is actually about.
 - Never put words in a real person's mouth that they did not say.""",
     },
     "us": {
@@ -45,19 +52,26 @@ COPY STYLE (overrides any other language rule):
         "clip_seconds": (25, 50),
         "transcribe_language": "en",
         "vocabulary": "",
-        "context": """AUDIENCE: US YouTube Shorts viewers watching on mobile, American English.
+        # Same note as the India profile: no claim here about the channel's
+        # subject or audience, because none has been measured.
+        "context": """AUDIENCE: English speakers watching Shorts on a phone.
 
-WHAT WINS WITH THIS AUDIENCE:
-- One clear idea per clip, delivered fast: a surprising fact, a counterintuitive claim, a story with a twist, or a strong opinion.
-- Open on the claim or the conflict itself ("Most people pay twice for this..."), never on background or context-setting.
-- The payoff must be concrete: a number, a reveal, a name, or a takeaway the viewer can repeat to a friend.
-- Cut rambling setups. US viewers swipe away within 1-2 seconds of a slow start.
+WHAT THE CLIP MUST DO:
+- One idea per clip, and it must be clear without the rest of the video.
+- Open on the idea itself, not on background or context-setting.
+- Land a concrete payoff: a number, a reveal, a name, or something the viewer
+  could repeat to someone else.
+- Cut rambling setups.
 
 COPY STYLE (overrides any other language rule):
-- Plain American English, sentence case. Curiosity-driven but truthful: no fake claims, no ALL CAPS, 0-1 emoji.
-- Hook: 3-7 words, a question or bold statement about THIS moment specifically.
-- Hashtags: 3-5 topical tags (e.g. #personalfinance #history #science). No #fyp or #viral spam.
-- Money, insurance, health or legal topics: no promises, guarantees, or "you should buy/cancel X" advice framing.""",
+- Plain English, sentence case. Curiosity-driven but truthful: no fake claims,
+  no ALL CAPS, 0-1 emoji.
+- Hook: 3-7 words, a question or a statement about THIS moment specifically.
+- Hashtags: 3-5, drawn from what the clip is actually about. No #fyp or
+  #viral spam.
+- Money, insurance, health or legal topics: no promises, no guarantees, no
+  "you should buy/cancel X" framing.
+- Never put words in a real person's mouth that they did not say.""",
     },
 }
 

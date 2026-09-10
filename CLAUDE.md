@@ -495,9 +495,15 @@ and each had to name it — and the CSV's `DictWriter` has an explicit
 that list is part of the change. Clips made before this existed have no
 `picked_by`; both exports handle its absence rather than failing.
 
-The **prose in each profile is a placeholder** and needs rewriting against the
-real channels. It is prompt text, not logic — treat it as copy, and keep the
-"WHAT WINS" lines tied to measured performance rather than taste.
+**Each profile claims nothing about the channel itself, on purpose.** The
+prose is prompt text: an invented line about the niche or the viewer steers
+every title and hook the model writes. It shipped full of them — desi
+situations, shaadi, padosi, WhatsApp forwards, "#personalfinance" — none of
+which anyone had measured, so they were removed. What is left is the language,
+the Roman-script rule, and what any clip has to do to stand alone. Add a "WHAT
+WINS" section from the top and bottom clips by viewed-vs-swiped once there are
+numbers, not from taste; `tests/test_audience_profiles.py` fails if the old
+placeholder words come back.
 
 ### The same video twice (`source_history.py`, `/api/source/check`)
 
