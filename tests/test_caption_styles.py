@@ -68,7 +68,7 @@ class TestOverrides:
 
     def test_api_projection_carries_ids(self):
         presets = cs.presets_for_api()
-        assert len(presets) == 19
+        assert len(presets) == 22      # 19 from ClipForge + 3 added in Phase 5
         assert {p["id"] for p in presets} == set(cs.STYLE_PRESETS)
         assert all("label" in p for p in presets)
 
@@ -131,6 +131,57 @@ class TestStyledAss:
         word wider than max_chars could never be placed and would vanish."""
         _, _, events = _ass(tmp_path, "bold_white", {"max_lines": 1, "max_chars": 3})
         assert _spoken(events) == ["HELLO", "IS", "IT", "THIS", "WORLD"]
+
+    def test_pop_scales_only_vertically_so_the_line_cannot_jitter(self, tmp_path):
+        """A uniform pop is what it looks like, but libass advances text by the
+        scaled glyph width, so growing one word inside a VISIBLE line shoves the
+        rest sideways and back on every word. fscy changes no advance."""
+        _, _, events = _ass(tmp_path, "punch_pop")
+        body = " ".join(events)
+        assert "FSCY112" in body.upper() and "FSCY100" in body.upper()
+        assert "fscx" not in body            # the whole point
+        # One pop per word, timed from the event start.
+        assert body.count("\\t(") >= 2
+
+    def test_slide_up_moves_the_whole_group_from_its_real_anchor(self, tmp_path):
+        """slide_up is a group animation: ASS has no per-span offset tag, so the
+        rise has to be the event's own move, from wherever the caption would
+        have sat."""
+        _, _, events = _ass(tmp_path, "clean_slide", video_w=1080, video_h=1920)
+        ev = events[0]
+        assert "\\move(" in ev and "\\fad(120,0)" in ev
+        import re
+        x1, y1, x2, y2 = map(int, re.search(
+            r"move\((\d+),(\d+),(\d+),(\d+),", ev).groups())
+        assert x1 == x2 == 540                       # centred horizontally
+        assert y1 - y2 == 20                         # 20 px at 1920 tall
+        assert y2 == 1920 - round(1920 * 0.08)       # the bottom anchor itself
+
+    def test_the_slide_scales_with_the_frame_like_every_other_px_value(self, tmp_path):
+        import re
+        _, _, tall = _ass(tmp_path, "clean_slide", video_w=1080, video_h=1920)
+        _, _, short = _ass(tmp_path, "clean_slide", video_w=1920, video_h=1080)
+        rise = lambda ev: (lambda m: int(m.group(2)) - int(m.group(4)))(
+            re.search(r"move\((\d+),(\d+),(\d+),(\d+),", ev))
+        assert rise(tall[0]) == 20
+        assert rise(short[0]) == round(20 * 1080 / 1920)
+
+    def test_a_pinned_caption_slides_from_where_the_user_put_it(self, tmp_path):
+        import re
+        _, _, events = _ass(tmp_path, "clean_slide",
+                            {"pos_x": 25, "pos_y": 40}, video_w=1080, video_h=1920)
+        x1, y1, _, y2 = map(int, re.search(
+            r"move\((\d+),(\d+),(\d+),(\d+),", events[0]).groups())
+        assert x1 == 270 and y2 == 768        # 25% of 1080, 40% of 1920
+        assert y1 - y2 == 20
+        assert "\\pos(" not in events[0]   # move replaces pos, never both
+
+    def test_the_new_animations_are_offered_by_the_api(self):
+        assert "pop" in cs.ANIMATIONS and "slide_up" in cs.ANIMATIONS
+        # bounce is deliberately absent: no per-span vertical offset exists.
+        assert "bounce" not in cs.ANIMATIONS
+        for name in ("punch_pop", "hinglish_pop", "clean_slide"):
+            assert name in cs.STYLE_PRESETS
 
     def test_word_reveal_and_glow_layer(self, tmp_path):
         _, _, events = _ass(tmp_path, "word_reveal", {"glow_enabled": True, "glow_color": "#22D3EE"})

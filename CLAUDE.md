@@ -52,7 +52,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
 | `cinematic.py` | Cinematic look (grade/glow/grain/vignette/gradients/letterbox): one ffmpeg pass, applied per clip after generation (`/api/clip/look`) or at render for API callers |
-| `caption_styles.py` | Caption looks ported from ClipForge: 19 presets, 5 theme bundles, the override schema and the bundled font registry (`fonts/`) |
+| `caption_styles.py` | Caption looks: 22 presets (19 ported from ClipForge), 5 theme bundles, the override schema and the bundled font registry (`fonts/`) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT/ASS generation (legacy karaoke + `generate_ass_styled` for the ClipForge presets), FFmpeg subtitle burning, dubbed video transcription |
@@ -260,7 +260,7 @@ stops it.
 `hinglish` is not a whisper language: it transcribes as Hindi (Devanagari) and
 then romanises the transcript word by word (`translit.py`), which is what the
 audience actually types ("aap kaise hain") and what keeps the caption presets
-usable — all 19 are Latin display faces, so Devanagari drops out of the chosen
+usable — every one is a Latin display face, so Devanagari drops out of the chosen
 style into whatever libass finds. The romanisation happens once, on the
 transcript, so clip titles and the Gemini prompts see the same text the
 captions do; `transcript["language"]` becomes `"hinglish"`.
@@ -430,7 +430,7 @@ transcript's language (`hinglish`/`hi`/`ur`/… → `in`, `en` → `us`), and
 rules with no new API parameter, purely from the language they already carry.
 
 The India profile transcribes as **`hinglish`, not `hi`** — the profile asks
-for Roman-script titles and hooks, all 19 caption presets are Latin display
+for Roman-script titles and hooks, every caption preset is a Latin display
 faces, and Devanagari would drop out of the chosen style. Profile settings go
 in through `setdefault`, so an explicit env var still wins.
 
@@ -556,6 +556,23 @@ a restart, the R2 archive and the ZIP export resolve the newest derivative.
   `_reapply_captions` / `_clip_layer_hooks` use it, so a later format change
   or trim brings back the user's captions, not `AUTO_CAPTION_STYLE`. A
   legacy-field request clears it.
+
+  Two later additions and one that could not be built. **`pop`** punches the
+  spoken word and settles it — scaling `scy` **only**, which is the whole
+  design: libass advances text by the scaled glyph width, so a uniform
+  `scx`/`scy` pop on a word inside a VISIBLE line shoves the rest of the
+  line sideways and back on every word. Measured on a burn, the caption's ink
+  box goes 51px → 57px → 51px tall while its x span stays byte-identical at
+  339-740. (`word_reveal` gets away with a uniform scale because the words it
+  pushes are still at `lpha&HFF&`.) **`slide_up`** is a group animation:
+  `\move` + `ad` on the event, sliding 20px (scaled) from wherever the
+  caption would have sat, which is why the anchor point is now computed even
+  when the caption is not pinned. **`bounce`** was asked for and is absent:
+  moving one word vertically inside a line needs a per-span offset, and ASS
+  has only `\pos`/`\move`, which are per event — `slide_up` is that motion at
+  the level the format can express. The three presets using them are
+  `punch_pop`, `hinglish_pop` (bigger `max_chars`: romanised Hindi runs longer
+  per word) and `clean_slide`.
 
   **Caption layout** (`max_lines` 1-2, `max_chars` 8-48, or the `one_word`
   animation) is the shape of the caption rather than its style, and the modal

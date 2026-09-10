@@ -788,6 +788,29 @@ def _styled_highlight(ev, cfg, uppercase):
     return "\\N".join(out)
 
 
+def _styled_pop(ev, uppercase):
+    """Whole phrase on screen; the spoken word punches out and settles.
+
+    Scales \\fscy ONLY, on purpose. A uniform \\fscx/\\fscy pop is what this
+    reads like, but libass advances text by the scaled glyph width, so growing
+    one word inside a visible line shoves the rest of the line sideways and
+    back on every word — the whole caption jitters. \\fscy grows the glyph about
+    its baseline and changes no advance, so nothing moves horizontally.
+    (\\word_reveal gets away with a uniform scale because the words it pushes
+    are still at \\alpha&HFF& and invisible.)
+    """
+    ev_start, out = ev["start"], []
+    for line in ev["lines"]:
+        toks = []
+        for w in line:
+            t0 = max(0, int(round((w["start"] - ev_start) * 1000)))
+            toks.append(f"{{\\t({t0},{t0 + 90},\\fscy112)"
+                        f"\\t({t0 + 90},{t0 + 180},\\fscy100)}}"
+                        f"{_styled_tok(w['word'], uppercase)}")
+        out.append(" ".join(toks))
+    return "\\N".join(out)
+
+
 def _styled_one_word(word, uppercase):
     return f"{{\\fad(60,0)\\fscx82\\fscy82\\t(0,130,\\fscx100\\fscy100)}}{_styled_tok(word['word'], uppercase)}"
 
@@ -889,26 +912,33 @@ def generate_ass_styled(transcript, clip_start, clip_end, output_path, *,
     # an2 stands on the bottom edge, an5 is centred) so "bottom, 6% higher"
     # still grows upward like a bottom caption does. All in % of the frame,
     # so the same style lands in the same place on a 9:16, 1:1 or 16:9 render.
+    animation = cfg.get("animation") or "none"
     pos_tags = []
     pos_x, pos_y = cfg.get("pos_x"), cfg.get("pos_y")
     off_x = float(cfg.get("offset_x") or 0.0)
     off_y = float(cfg.get("offset_y") or 0.0)
     pinned = (pos_x is not None and pos_y is not None) or off_x != 0.0 or off_y != 0.0
+    # The anchor point of an unpinned caption: where libass would put it
+    # from Alignment + MarginV on its own. slide_up needs it as a number,
+    # because \\move takes coordinates and cannot ride the margins.
+    anchor = alignment
+    base_x = video_w / 2.0
+    base_y = {8: float(margin_v), 5: video_h / 2.0}.get(alignment, video_h - float(margin_v))
     if pinned:
         if pos_x is not None and pos_y is not None:
             anchor = 5
             base_x, base_y = float(pos_x) / 100.0 * video_w, float(pos_y) / 100.0 * video_h
-        else:
-            anchor = alignment
-            base_x = video_w / 2.0
-            base_y = {8: float(margin_v), 5: video_h / 2.0}.get(alignment, video_h - float(margin_v))
         x = int(round(min(video_w, max(0.0, base_x + off_x / 100.0 * video_w))))
         y = int(round(min(video_h, max(0.0, base_y + off_y / 100.0 * video_h))))
         pos_tags.append(f"\\an{anchor}\\pos({x},{y})")
+        base_x, base_y = float(x), float(y)   # slide from where the user put it
     rotation = cfg.get("rotation")
-    if rotation:
-        pos_tags.append(f"\\frz{float(rotation):g}")
+    rotation_tag = f"\\frz{float(rotation):g}" if rotation else ""
+    if rotation_tag:
+        pos_tags.append(rotation_tag)
     pos_inner = "".join(pos_tags)
+    # 20 px at 1080x1920, scaled like every other px value in a preset.
+    slide_rise = max(1, int(round(20 * scale)))
 
     seam_ranges = [(float(a), float(b)) for a, b in (split_ranges or [])]
 
@@ -921,7 +951,6 @@ def generate_ass_styled(transcript, clip_start, clip_end, output_path, *,
     glow_col = _ass_bgr(cfg.get("glow_color", "#7C4DFF"))
     main_layer = 1 if glow_on else 0
 
-    animation = cfg.get("animation") or "none"
     max_lines = max(1, int(cfg.get("max_lines") or 1))
     max_chars = max(1, int(cfg.get("max_chars") or 22))
     if animation == "one_word":
@@ -936,6 +965,8 @@ def generate_ass_styled(transcript, clip_start, clip_end, output_path, *,
             continue
         if animation == "one_word":
             text = _styled_one_word(ev["lines"][0][0], uppercase)
+        elif animation == "pop":
+            text = _styled_pop(ev, uppercase)
         elif animation == "word_reveal":
             text = _styled_reveal(ev, uppercase)
         elif animation == "highlight":
@@ -945,7 +976,20 @@ def generate_ass_styled(transcript, clip_start, clip_end, output_path, *,
         else:
             text = _styled_plain(ev["lines"], uppercase)
 
-        inner = pos_inner + ("\\an5" if seam(start) else "")
+        on_seam = seam(start)
+        if animation == "slide_up":
+            # A group animation, not a per-word one: the whole event rises
+            # into place. \\move needs coordinates, so it replaces
+            # \\pos rather than joining it, and it slides from wherever
+            # the caption was going to sit — including the SPLIT seam.
+            a = 5 if on_seam else anchor
+            bx = video_w / 2.0 if on_seam else base_x
+            by = video_h / 2.0 if on_seam else base_y
+            inner = (f"\\an{a}"
+                     f"\\move({int(bx)},{int(by) + slide_rise},{int(bx)},{int(by)},0,200)"
+                     f"\\fad(120,0)" + rotation_tag)
+        else:
+            inner = pos_inner + ("\\an5" if on_seam else "")
         prefix = "{" + inner + "}" if inner else ""
         if glow_on:
             glow_prefix = "{" + inner + f"\\1c{glow_col}\\3c{glow_col}\\bord{glow_px}\\shad0\\blur{glow_px}" + "}"

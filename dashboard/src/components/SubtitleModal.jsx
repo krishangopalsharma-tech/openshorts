@@ -533,6 +533,15 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                 return { ...base, color: i <= cur ? cfg.highlight_color : cfg.primary_color };
             case 'word_reveal':
                 return { ...base, color: i === cur ? cfg.highlight_color : cfg.primary_color, opacity: i <= cur ? 1 : 0, transform: i <= cur ? 'scale(1)' : 'scale(0.6)' };
+            case 'pop':
+                // scaleY only, and from the baseline: mirrors \fscy in the ASS,
+                // which is vertical precisely so the line cannot reflow.
+                return {
+                    ...base,
+                    color: i === cur ? cfg.highlight_color : cfg.primary_color,
+                    transformOrigin: 'bottom',
+                    transform: i === cur ? 'scaleY(1.12)' : 'scaleY(1)',
+                };
             case 'one_word':
                 return { ...base, color: cfg.highlight_color };
             default:
@@ -671,8 +680,17 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             </div>
                         )}
                         <div className="absolute flex justify-center pointer-events-none px-2" style={wrapperStyle}>
+                            <style>{`@keyframes os-cap-slide-up {
+                                from { opacity: 0; transform: translateY(20px); }
+                                to   { opacity: 1; transform: translateY(0); }
+                            }`}</style>
                             <span
-                                style={chipStyle}
+                                key={effectiveAnimation === 'slide_up'
+                                    ? lines.map((l) => l.map((w) => w.text).join(' ')).join('|')
+                                    : 'static'}
+                                style={effectiveAnimation === 'slide_up'
+                                    ? { ...chipStyle, animation: 'os-cap-slide-up 200ms ease-out' }
+                                    : chipStyle}
                                 onPointerDown={startDrag}
                                 onPointerMove={moveDrag}
                                 onPointerUp={endDrag}

@@ -320,7 +320,7 @@ class TestStyledSubtitleEndpoint:
         styles = _request("GET", "/api/caption-styles")
         assert styles.status_code == 200
         body = styles.json()
-        assert len(body["presets"]) == 19 and body["default"] == "bold_white"
+        assert len(body["presets"]) == 22 and body["default"] == "bold_white"   # 19 + Phase 5
         assert any(f["family"] == "Montserrat" for f in body["fonts"])
         assert len(body["themes"]) == 5 and len(body["position_grid"]) == 9
         assert _request("GET", "/api/fonts").json()["fonts"]

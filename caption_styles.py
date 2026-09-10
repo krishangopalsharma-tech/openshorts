@@ -98,6 +98,21 @@ STYLE_PRESETS = {
                       animation="highlight", highlight_color="#FFD400", font_size=86, outline=4),
     "green_word": _P("Green Word", trending=True, font_family="Poppins",
                      animation="highlight", highlight_color="#27E36B", font_size=84, outline=5),
+
+    # Phase 5. One line each on purpose: pop punches the spoken word, and a
+    # second line of static text under a punching word reads as noise.
+    "punch_pop": _P("Punch Pop", trending=True, font_family="Anton",
+                    animation="pop", highlight_color="#FFD400", font_size=104,
+                    outline=6, max_lines=1, max_chars=18),
+    # Hinglish: romanised Hindi is longer per word than English, so the size
+    # comes down and the line gets wider than punch_pop's.
+    "hinglish_pop": _P("Hinglish Pop", trending=True, font_family="Montserrat",
+                       animation="pop", highlight_color="#27E36B", font_size=82,
+                       outline=5, max_lines=1, max_chars=26),
+    # The quiet one: no colour change, no scaling, just the group easing in.
+    "clean_slide": _P("Clean Slide", font_family="Poppins", animation="slide_up",
+                      bold=False, uppercase=False, highlight_color="#FFFFFF",
+                      font_size=70, outline=3, shadow=2, max_chars=30),
 }
 
 DEFAULT_PRESET = "bold_white"
@@ -130,7 +145,12 @@ THEMES = [
 SWATCHES = ["#FFFFFF", "#FFD400", "#FFB020", "#FF3B30", "#FF2D78",
             "#27E36B", "#22D3EE", "#3B82F6", "#7C4DFF", "#000000"]
 
-ANIMATIONS = ("none", "highlight", "word_reveal", "one_word", "karaoke")
+# pop and slide_up are Phase 5 of plan/VIRAL_UPGRADE_PLAN.md. "bounce" was
+# asked for too and is NOT here: it needs to move one word vertically inside
+# a line, and ASS has no per-span offset tag — only \pos/\move, which are
+# per event. slide_up is that same motion at the level ASS can express it.
+ANIMATIONS = ("none", "highlight", "word_reveal", "one_word", "karaoke",
+              "pop", "slide_up")
 POSITIONS = ("top", "center", "bottom")
 
 # The nine-dot placement grid the UI offers, as (pos_x, pos_y) percentages.
