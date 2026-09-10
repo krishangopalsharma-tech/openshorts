@@ -60,3 +60,33 @@ class TestPromptSupport:
         assert subtitles.transcribe_prompt() is None
         monkeypatch.setenv("TRANSCRIBE_PROMPT", "   ")
         assert subtitles.transcribe_prompt() is None
+
+
+class TestHotwordsStaysOff:
+    """`initial_prompt` only reaches whisper's first 30s window here, because
+    condition_on_previous_text=False makes faster-whisper reset the prompt after
+    every window. `hotwords` persists and is the obvious fix — and measured on a
+    110s Hindi slice it dropped ~52s of 110s of speech and drifted toward
+    English. Pinned so it is not re-added on the strength of the mechanism
+    alone; see CLAUDE.md for the numbers."""
+
+    def test_the_shared_transcribe_params_do_not_carry_hotwords(self):
+        assert "hotwords" not in subtitles.WHISPER_TRANSCRIBE_PARAMS
+
+    def test_the_prompt_is_never_sent_as_hotwords(self, monkeypatch):
+        import transcribe_backends
+        monkeypatch.setenv("TRANSCRIBE_PROMPT", "Kapil Sharma, Ajay Devgn")
+        monkeypatch.setenv("WHISPER_MODEL", "large-v3")
+        captured = {}
+
+        def fake_run(media_path, **params):
+            captured.update(params)
+            return [], type("I", (), {"language": "hi"})()
+
+        monkeypatch.setattr(transcribe_backends, "run_whisper_transcription", fake_run)
+        # The language comes from TRANSCRIBE_LANGUAGE, not an argument.
+        monkeypatch.setenv("TRANSCRIBE_LANGUAGE", "hi")
+        transcribe_backends._transcribe_with_whisper("x.wav")
+
+        assert captured.get("initial_prompt") == "Kapil Sharma, Ajay Devgn"
+        assert "hotwords" not in captured

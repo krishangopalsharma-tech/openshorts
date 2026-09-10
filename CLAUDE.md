@@ -357,6 +357,32 @@ So it earns its place on name-bearing lines and costs stability elsewhere,
 which is why it stays opt-in per job rather than becoming a default. Keep it
 short, keep it to proper nouns, and keep it in Latin script.
 
+**`initial_prompt` only reaches the FIRST 30s window, and `hotwords` — the fix
+for that — is worse.** Because `WHISPER_TRANSCRIBE_PARAMS` sets
+`condition_on_previous_text=False`, faster-whisper advances
+`prompt_reset_since` after every window (`transcribe.py`: the
+`not options.condition_on_previous_text` branch), so the initial-prompt tokens
+sit in `all_tokens` below the cursor and `previous_tokens` is empty from
+window 2 on. `hotwords` is re-read from `options` on every `get_prompt` call
+instead, so it does persist — which is why it looks like the obvious fix. It
+is not. Measured on a 110s slice of the same episode (3.7 windows, names at
++45s and +69s), one pass each:
+
+| arm | segments | what happened |
+|---|---|---|
+| no prompt | 37 | all of 0-110s, coherent |
+| `initial_prompt` | 37 | **the whole first 36s is gone** |
+| `initial_prompt` + `hotwords` | 16 | **~52s of 110s dropped**, plus drift to `100 episode`, `70`, `इंवाइट` |
+
+So the prompt does not merely destabilise wording, it can drop entire
+windows of speech, and making it persist multiplies that across the file.
+`hotwords` is deliberately NOT wired up. If it is ever revisited, the
+acceptance test is coverage — spoken seconds emitted and the largest silent
+gap — not whether one name came out right; a name-only check scores the arm
+that dropped half the audio as the winner. (One pass per arm on one slice;
+whisper's temperature fallback makes it worth repeating before treating the
+exact numbers as settled. The direction was not subtle.)
+
 A **Hindi fine-tuned whisper is not the upgrade it looks like.** Measured:
 `vasista22/whisper-hindi-large-v2` (CTranslate2 float16) hears Hindi words
 better than large-v3 — `मैसेज भेज` where large-v3 writes `मेसेज बेच` ("sell"),
