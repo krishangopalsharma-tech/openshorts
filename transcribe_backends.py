@@ -212,6 +212,9 @@ def _transcribe_with_whisper(media_path):
     if prompt:
         model_size = get_whisper_config(params.get("language"))["model_size"]
         if whisper_supports_prompt(model_size):
+            # NOT also sent as hotwords, though that is the only thing that
+            # would survive past the first 30s window: measured, it dropped
+            # ~52s of a 110s Hindi slice. See CLAUDE.md.
             params["initial_prompt"] = prompt
         else:
             print(f"🎙️ [ASR] initial_prompt skipped — '{model_size}' "

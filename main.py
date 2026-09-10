@@ -1627,8 +1627,14 @@ def get_viral_clips(transcript_result, video_duration):
         def _payload(ws):
             return [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in ws]
 
+        import audience_profiles
+        audience = audience_profiles.pick(language)
+        profile_block = audience_profiles.gemini_block(audience)
+        if audience:
+            print(f"🎯 Audience profile: {audience_profiles.PROFILES[audience]['label']}")
+
         def _score_prompt(ws):
-            return gemini_worker.SCORE_PROMPT_TEMPLATE.format(
+            return profile_block + gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 windows_json=json.dumps(_payload(ws), ensure_ascii=False))
 
@@ -1653,7 +1659,7 @@ def get_viral_clips(transcript_result, video_duration):
         def _detail_prompt(ws):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
-            return gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
+            return profile_block + gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 min_clips=min_clips, max_clips=max_clips,
                 min_secs=min_secs, max_secs=max_secs,
@@ -1826,9 +1832,20 @@ if __name__ == '__main__':
                         help="Output aspect: vertical/auto (9:16), horizontal (keep 16:9), square (1:1).")
     parser.add_argument('--transcript', type=str,
                         help="Path to a precomputed transcript JSON (transcribe_media shape); skips transcription.")
+    parser.add_argument('--transcribe-only', action='store_true',
+                        help="Transcribe, write paste_into_chat.txt for Claude/ChatGPT, then stop.")
+    parser.add_argument('--clips', type=str,
+                        help="Clips JSON picked in Claude/ChatGPT; skips the AI moment picker.")
+    parser.add_argument('--audience', type=str, default="auto", choices=["auto", "in", "us"],
+                        help="Channel profile: in (India, Hinglish), us (USA, English), auto = by language.")
 
     args = parser.parse_args()
     output_format = args.format
+
+    import audience_profiles
+    if args.audience != "auto":
+        os.environ["AUDIENCE"] = args.audience          # read by get_viral_clips
+        audience_profiles.apply_transcription_settings(args.audience)
 
     # Cinematic look is per-job (like WATERMARK/AUTO_HOOK), read once here and
     # closed over by every worker in _process_one_clip below.
@@ -1962,6 +1979,17 @@ if __name__ == '__main__':
             except NoAudioError as e:
                 print(f"🔇 {e} — switching to visual analysis.")
 
+        if args.transcribe_only:
+            import manual_clips
+            if transcript is None:
+                print("❌ No speech found — nothing to export for a chat app.")
+                sys.exit(1)
+            audience = audience_profiles.pick(transcript.get('language'))
+            out = manual_clips.write_ai_transcript(output_dir, transcript, duration,
+                                                   video_title, audience)
+            print(f"📝 Paste into Claude/ChatGPT: {out}")
+            sys.exit(0)
+
         # Music-only or wordless footage transcribes to a handful of words.
         # Clip it by what is on screen instead, like a video with no audio.
         if transcript is not None and speech_is_sparse(transcript, duration):
@@ -1971,7 +1999,10 @@ if __name__ == '__main__':
             transcript = None
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
-        if transcript is not None:
+        if args.clips:
+            import manual_clips
+            clips_data = manual_clips.load_manual_clips(args.clips, transcript, duration)
+        elif transcript is not None:
             clips_data = get_viral_clips(transcript, duration)
         else:
             clips_data = get_visual_clips(input_video, duration)

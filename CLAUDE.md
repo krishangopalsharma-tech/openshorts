@@ -418,6 +418,32 @@ ALLOWLIST (`app._RESUMABLE_ENV_KEYS`) — a resumed job rebuilds its env from
 deployment defaults. The allowlist, rather than an env diff, is what keeps
 `GEMINI_API_KEY` out of a file sitting next to the user's video.
 
+### Audience profiles and the chat route (`audience_profiles.py`, `manual_clips.py`)
+
+Two channels are being fed from this fork — India (Hindi/Hinglish) and USA
+(English) — and what makes a clip work differs enough between them that one
+prompt cannot serve both. `PROFILES` holds a block of audience rules per
+channel; `pick()` resolves one from `--audience`, then `AUDIENCE`, then the
+transcript's language (`hinglish`/`hi`/`ur`/… → `in`, `en` → `us`), and
+`gemini_block()` is prepended to **both** Gemini prompt templates in
+`get_viral_clips`. That placement is the point: dashboard jobs get the right
+rules with no new API parameter, purely from the language they already carry.
+
+The India profile transcribes as **`hinglish`, not `hi`** — the profile asks
+for Roman-script titles and hooks, all 19 caption presets are Latin display
+faces, and Devanagari would drop out of the chosen style. Profile settings go
+in through `setdefault`, so an explicit env var still wins.
+
+`--transcribe-only` writes `paste_into_chat.txt` (the profile's prompt plus a
+timestamped transcript) and stops; picks pasted back as `--clips clips.json`
+are snapped to word edges (`clip_selection.snap_clip_to_words`) and skip the
+Gemini picker entirely. That is the no-API-key route: a strong model picks the
+moments in a chat window, this repo renders them.
+
+The **prose in each profile is a placeholder** and needs rewriting against the
+real channels. It is prompt text, not logic — treat it as copy, and keep the
+"WHAT WINS" lines tied to measured performance rather than taste.
+
 ### The same video twice (`source_history.py`, `/api/source/check`)
 
 Re-submitting a video by accident is the most expensive mistake the UI allows:

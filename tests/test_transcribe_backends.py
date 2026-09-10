@@ -271,3 +271,25 @@ def test_parakeet_is_skipped_for_a_language_it_cannot_speak(monkeypatch):
     sentinel = {"text": "ok", "language": "hinglish", "segments": []}
     monkeypatch.setattr(tb, "_transcribe_with_whisper", lambda path: sentinel)
     assert tb.transcribe_media("video.mp4") is sentinel
+
+
+# --- the decode prompt and the window it dies in ------------------------------
+# A test asserting the prompt also goes out as `hotwords` was removed with the
+# code: the mechanism is real (initial_prompt is reset after every window when
+# condition_on_previous_text is off) but making it persist dropped ~52s of a
+# 110s Hindi slice. tests/test_whisper_model_choice.py pins it staying off.
+
+
+def test_turbo_gets_neither_prompt_nor_hotwords(monkeypatch):
+    monkeypatch.setenv("WHISPER_MODEL", "large-v3-turbo")
+    monkeypatch.setenv("TRANSCRIBE_LANGUAGE", "en")
+    monkeypatch.setenv("TRANSCRIBE_PROMPT", "deductible, copay")
+    seen = {}
+
+    def fake_run(path, **params):
+        seen.update(params)
+        return [], SimpleNamespace(language="en", duration=1.0)
+
+    monkeypatch.setattr(tb, "run_whisper_transcription", fake_run)
+    tb._transcribe_with_whisper("video.mp4")
+    assert "initial_prompt" not in seen and "hotwords" not in seen
