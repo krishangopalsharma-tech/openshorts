@@ -54,3 +54,31 @@ def test_chat_round_trip(tmp_path):
     assert 9.5 <= shorts[0]["start"] <= 10.5
     assert shorts[0]["video_tags"] == "a, b"
     assert shorts[0]["viral_hook_text"] == "H"
+
+
+# --- who picked the clip ------------------------------------------------------
+# Phase 2 of plan/VIRAL_UPGRADE_PLAN.md. This cannot be reconstructed after the
+# fact, and it is the whole question the picker A/B asks, so it is stamped at
+# the source and every export that projects fields has to name it.
+
+def test_manual_clips_are_recorded_as_picked_by_claude(tmp_path):
+    import json
+    import manual_clips
+    path = tmp_path / "clips.json"
+    path.write_text(json.dumps({"shorts": [
+        {"start": 1.0, "end": 20.0, "title": "t", "hook": "h", "description": "d"},
+    ]}), encoding="utf-8")
+
+    out = manual_clips.load_manual_clips(str(path), None, 120.0)
+    assert out["shorts"][0]["picked_by"] == "claude"
+
+
+def test_an_explicit_picked_by_in_the_json_is_kept(tmp_path):
+    import json
+    import manual_clips
+    path = tmp_path / "clips.json"
+    path.write_text(json.dumps({"shorts": [
+        {"start": 1.0, "end": 20.0, "picked_by": "me, by hand"},
+    ]}), encoding="utf-8")
+    out = manual_clips.load_manual_clips(str(path), None, 120.0)
+    assert out["shorts"][0]["picked_by"] == "me, by hand"

@@ -1675,11 +1675,16 @@ def get_viral_clips(transcript_result, video_duration):
             shorts = trim_to_best(shorts, max_clips)
             print(f"   Kept the {max_clips} best-scoring clip(s) of "
                   f"{max_clips + dropped}.")
-        # Snap each proposed clip onto real word boundaries (+ a bit of silence).
+        # Snap each proposed clip onto real word boundaries (+ a bit of silence),
+        # and record WHO chose it. That last part cannot be reconstructed after
+        # the fact, and it is the whole question the picker A/B asks: whether
+        # Gemini's picks or a chat model's picks get more views.
+        picked_by = f"{'local' if llm_backend.active() else 'gemini'}:{model_name}"
         for s in shorts:
             ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
                                         min_duration=min_secs, max_duration=max_secs)
             s["start"], s["end"] = ns, ne
+            s.setdefault("picked_by", picked_by)
 
         # Aggregate cost across both passes.
         cost_analysis = None

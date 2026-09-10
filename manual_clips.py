@@ -111,6 +111,8 @@ def load_manual_clips(path, transcript, duration):
             "video_description_for_tiktok": item.get("video_description_for_tiktok") or desc,
             "video_description_for_instagram": item.get("video_description_for_instagram") or desc,
             "video_tags": item.get("video_tags") or item.get("tags") or "",
+            # These came out of a chat window, not the in-pipeline picker.
+            "picked_by": item.get("picked_by") or "claude",
             "reason": item.get("reason", ""),
         })
 

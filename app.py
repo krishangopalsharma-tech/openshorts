@@ -1872,6 +1872,10 @@ async def _webhook_clip_entries(job_id, job):
             "index": i,
             "title": clip.get('title') or clip.get('video_title_for_youtube_short'),
             "video_url": f"{base}{rel}" if rel.startswith("/") and base else rel,
+            # Which picker chose this moment ("gemini:<model>", "local:<model>",
+            # "claude"). A consumer logging clips per picker cannot work this
+            # out later, and it is the question the picker A/B asks.
+            "picked_by": clip.get('picked_by'),
         })
     if BILLING_ENABLED and job.get('user_id'):
         try:
@@ -3276,6 +3280,7 @@ async def download_all_clips(job_id: str, request: Request):
                 "description": (clip.get("video_description_for_instagram")
                                  or clip.get("video_description_for_tiktok") or ""),
                 "tags": clip.get("video_tags", ""),
+                "picked_by": clip.get("picked_by", ""),
             })
 
     if not files:
@@ -3302,7 +3307,9 @@ async def download_all_clips(job_id: str, request: Request):
             # an update of that job's sheet rather than a growing pile of
             # duplicates.
             csv_buffer = io.StringIO()
-            writer = csv.DictWriter(csv_buffer, fieldnames=["id", "title", "description", "tags"])
+            writer = csv.DictWriter(
+                csv_buffer,
+                fieldnames=["id", "title", "description", "tags", "picked_by"])
             writer.writeheader()
             writer.writerows(csv_rows)
             zf.writestr(f"clips_{job_id}.csv", csv_buffer.getvalue())

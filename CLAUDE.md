@@ -440,6 +440,17 @@ are snapped to word edges (`clip_selection.snap_clip_to_words`) and skip the
 Gemini picker entirely. That is the no-API-key route: a strong model picks the
 moments in a chat window, this repo renders them.
 
+Every clip records **`picked_by`**: `gemini:<model>` or `local:<model>` stamped
+in `get_viral_clips` (from `llm_backend.active()`, so it names the model that
+actually answered), `claude` in `manual_clips.load_manual_clips`. It cannot be
+reconstructed afterwards and it is the whole question the picker A/B asks, so
+it is stamped at the source. `metadata.json` is dumped wholesale and carries it
+for free; the ZIP's CSV and the webhook payload both project fields explicitly
+and each had to name it — and the CSV's `DictWriter` has an explicit
+`fieldnames`, which raises on an unknown row key rather than dropping it, so
+that list is part of the change. Clips made before this existed have no
+`picked_by`; both exports handle its absence rather than failing.
+
 The **prose in each profile is a placeholder** and needs rewriting against the
 real channels. It is prompt text, not logic — treat it as copy, and keep the
 "WHAT WINS" lines tied to measured performance rather than taste.
