@@ -629,6 +629,19 @@ a restart, the R2 archive and the ZIP export resolve the newest derivative.
   `punch_pop`, `hinglish_pop` (bigger `max_chars`: romanised Hindi runs longer
   per word) and `clean_slide`.
 
+  **pycaps was evaluated as a second caption engine and rejected** (spike,
+  10-sep-2026). CSS-styled captions rendered through headless Chromium, and it
+  does reuse an existing transcript rather than re-transcribing. On a 22s clip
+  it took 16-18s against this pipeline's 2.6s (0.01s to write the ASS plus a
+  2.55s nvenc burn) — 6-7x, where the bar was 2x — and it did not win on
+  timing either: measured by diffing each render against the uncaptioned clip,
+  captions matched speech 13/14 here, 13/14 on its best template and 9/14 on
+  `hype`, which holds captions through silence. It also costs 1.24 GB (venv
+  plus user-global Playwright browsers). The one thing worth taking is that
+  `word-focus` fills a box behind ONLY the spoken word; `highlight` recolours
+  the word and cannot box it, because `BorderStyle=3` is style-level, so that
+  would need drawing commands rather than a tag.
+
   **Caption layout** (`max_lines` 1-2, `max_chars` 8-48, or the `one_word`
   animation) is the shape of the caption rather than its style, and the modal
   offers the three states as one choice at the top of the presets tab: 2
