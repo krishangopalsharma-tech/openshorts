@@ -50,3 +50,15 @@ skills-lock.json
 
 # User-uploaded logos for the overlay editor (private; the dir is created at startup)
 assets/overlays/
+
+# The plan/ drop is working material, not part of the app.
+plan/audience_profiles.py
+plan/openshorts-fork-v3.patch
+plan/VIRAL_UPGRADE_PLAN.md
+plan/openshorts-chat-picker.patch
+plan/openshorts-chat-picker-v2.patch
+plan/manual_clips.py
+plan/CLIP_PICKER_PROMPT.md
+plan/behind_subject.py
+plan/behind_subject_test.png
+plan/behind_example.ass

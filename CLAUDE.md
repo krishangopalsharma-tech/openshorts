@@ -398,6 +398,50 @@ which is a failure a WER number hides. Any future candidate gets this
 acceptance test: entertainment audio with silence in it, checked for invented
 sign-offs.
 
+### Transcribing the voice alone on noisy sources (`vocal_isolation.py`)
+
+`TRANSCRIBE_VOCALS=1` (API: `isolate_vocals` on `/api/process`) separates the
+voice from laughter, crowd and music with Demucs and transcribes that instead
+of the mix. Off by default: it is a second model on a shared 8 GB GPU and buys
+nothing on a clean source.
+
+**Coverage is the wrong metric here, and that is the finding.** Three 60s
+slices of a Comedy Nights episode, `large-v3`, `temperature=0` on both arms so
+only the audio differs:
+
+| arm | segments | covered | characters | chars/s |
+|---|---|---|---|---|
+| raw | 33 | **165s** | 1348 | 8.2 |
+| vocals | 53 | 142s | **1877** | 13.2 |
+
+Raw "covers" more seconds and says 39% less, because its coverage is inflated
+by long segments spanning noise without words — real Hindi runs about 12-15
+chars/s, so 8.2 is the tell. One slice showed it plainly: raw returned the
+whole 60s as **two** run-on segments and lost the entire 18-50s exchange
+including its punchline, where the vocals stem returned all eighteen lines
+with per-line timing. On a second video raw collapsed 33-52s into ONE
+19-second segment while vocals found seven real lines in it.
+
+It is not uniformly better: on that same clip the opening line came out
+cleaner from the raw mix. The win is recovering speech that noise buries, not
+higher fidelity everywhere.
+
+Cost, once the weights are cached: 35x realtime on an RTX 2070 SUPER (~2 min
+for a 72-minute source). The stem is written beside the source as
+`<video>.vocals.wav` — about 2 MB per minute of audio — so a resumed job
+reuses it, and uploads/ already sweeps by age and caps at `UPLOADS_MAX_GB`.
+It runs inside the same `_ASR_GATE` as whisper, not alongside it.
+
+**Two implementation constraints.** It imports `demucs.pretrained` and
+`demucs.apply`, never `demucs.api` or the CLI: those pull in `demucs.audio`,
+which imports `lameenc` — an LGPL LAME binding needed only for MP3 output.
+The model path needs neither, so this module does its own WAV I/O and the
+dependency set stays MIT/Apache. Install with
+`pip install demucs && pip uninstall -y lameenc`. And demucs is an **optional**
+import: without it, or on any failure, `isolate_vocals` returns None and the
+caller transcribes the original audio, so a broken separation costs a little
+time and nothing else.
+
 One Windows-only trap worth knowing: the CUDA libs CTranslate2 needs ship
 inside torch's own package (`torch/lib/cublas64_12.dll`) and it is torch's
 import that puts that directory on the DLL search path. `_get_whisper_model`
@@ -618,7 +662,7 @@ request degrades to "no effect", never to a broken filtergraph.
 | Method | Route | Purpose |
 |--------|-------|---------|
 | POST | `/api/source/check` | Has this source been cut before? (title/size/URL, no file) |
-| POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`; `transcribe_prompt`: names/terms for the decode) |
+| POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`; `transcribe_prompt`: names/terms for the decode; `isolate_vocals`: transcribe the voice alone on noisy sources) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |
 | POST | `/api/subtitle` | Burn captions on one clip: `preset` + `overrides` (caption_styles) or the legacy fields; auto-transcribes dubbed videos |

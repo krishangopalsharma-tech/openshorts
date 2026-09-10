@@ -46,6 +46,8 @@ from subtitles import (
     whisper_supports_prompt,
 )
 
+import vocal_isolation
+
 PARAKEET_MODEL_ID = "nemo-parakeet-tdt-0.6b-v3"
 
 # Not a whisper language code: Hindi audio, Latin script. See translit.py.
@@ -220,7 +222,22 @@ def _transcribe_with_whisper(media_path):
             print(f"🎙️ [ASR] initial_prompt skipped — '{model_size}' "
                   f"translates instead of transcribing when prompted")
 
-    segments, info = run_whisper_transcription(media_path, **params)
+    # Laughter, crowd and music are the biggest remaining cause of dropped
+    # lines on comedy sources, so optionally transcribe the voice alone. Fails
+    # open to the original audio (vocal_isolation returns None), and the stem
+    # is cached beside the transcript checkpoint so a resumed job pays once.
+    asr_path = media_path
+    if vocal_isolation.enabled():
+        # Cached beside the source rather than in the job dir: this function
+        # is not told where that is, and uploads/ is already swept by age and
+        # capped by UPLOADS_MAX_GB, so the stem ages out with the video it
+        # came from. A resumed job then reuses it instead of separating twice.
+        stem = vocal_isolation.isolate_vocals(
+            media_path, cache_path=f"{media_path}.vocals.wav", gate=_ASR_GATE)
+        if stem:
+            asr_path = stem
+
+    segments, info = run_whisper_transcription(asr_path, **params)
 
     out_segments = []
     text_parts = []

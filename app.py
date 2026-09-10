@@ -1165,7 +1165,7 @@ def _install_drain_signal_handler():
 # ALLOWLIST, never as an env diff: that is what keeps GEMINI_API_KEY and every
 # other server credential out of a file sitting next to the user's video.
 _RESUMABLE_ENV_KEYS = (
-    "TRANSCRIBE_LANGUAGE", "TRANSCRIBE_PROMPT",
+    "TRANSCRIBE_LANGUAGE", "TRANSCRIBE_PROMPT", "TRANSCRIBE_VOCALS",
     "AUTO_CAPTIONS", "AUTO_HOOK", "AUTO_HOOK_STYLE", "CINEMATIC_EFFECTS",
     "CLIP_TARGET_MIN", "CLIP_TARGET_MAX", "CLIP_MIN_SECONDS", "CLIP_MAX_SECONDS",
     "AUTO_LAYOUT", "SPLIT_LAYOUT", "SCREENCAST_LAYOUT", "SPEAKER_CUT",
@@ -2665,6 +2665,7 @@ async def process_endpoint(
     captions: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
     transcribe_prompt: Optional[str] = Form(None),
+    isolate_vocals: Optional[bool] = Form(None),
     upload_id: Optional[str] = Form(None),
     cinematic_effects: Optional[str] = Form(None),
 ):
@@ -2702,6 +2703,7 @@ async def process_endpoint(
         captions = body.get("captions")
         language = body.get("language")
         transcribe_prompt = body.get("transcribe_prompt")
+        isolate_vocals = body.get("isolate_vocals")
         upload_id = body.get("upload_id")
         cinematic_effects = body.get("cinematic_effects")
 
@@ -2918,6 +2920,14 @@ async def process_endpoint(
         if prompt:
             env["TRANSCRIBE_PROMPT"] = prompt
             print(f"[prompt] job={job_id} terms={prompt[:80]!r}")
+
+    # Transcribe the voice alone, with laughter/crowd/music separated out
+    # (vocal_isolation). Measured on noisy comedy audio it recovers whole
+    # stretches the raw mix loses; off by default because it is a second GPU
+    # model and gains nothing on a clean source.
+    if isolate_vocals is not None:
+        env["TRANSCRIBE_VOCALS"] = "1" if isolate_vocals else "0"
+        print(f"[vocals] job={job_id} isolate={bool(isolate_vocals)}")
 
     input_path = None
     if url:
