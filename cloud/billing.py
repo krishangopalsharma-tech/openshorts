@@ -182,6 +182,20 @@ async def create_checkout(body: CheckoutRequest, request: Request):
         success_url=f"{fe}/#/account?checkout=success",
         cancel_url=f"{fe}/#/pricing?checkout=cancel",
         allow_promotion_codes=True,
+        # Business customers need their legal name and VAT on the invoice to
+        # deduct the tax, and this is the only place they can ever type them:
+        # nothing in the dashboard asks for fiscal data. Without it every
+        # company is invoiced as an anonymous e-mail address and writes to
+        # support asking for a corrected invoice (ticket #4520), which cannot
+        # be done in place — the invoice is already issued and its customer
+        # data frozen, so it takes a rectificativa in the accounting.
+        # ``customer_update.name`` is required for Checkout to save the name
+        # onto an EXISTING customer (we always pass one); ``address`` saves the
+        # billing address the same way. Not made ``required``: it is shown only
+        # in supported countries and forcing it would add a field to a funnel
+        # that already converts at ~1%.
+        tax_id_collection={"enabled": True},
+        customer_update={"name": "auto", "address": "auto"},
         metadata={
             "user_id": str(user.id),
             "kind": entry["kind"],
