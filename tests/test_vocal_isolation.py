@@ -116,3 +116,72 @@ def test_the_choice_survives_a_redeploy():
     allowlist is silently replaced by the deployment default."""
     import app
     assert "TRANSCRIBE_VOCALS" in app._RESUMABLE_ENV_KEYS
+
+
+class TestLongInputsAreWindowed:
+    """The bug this class exists for: demucs allocates its output for the WHOLE
+    input and for EVERY stem on the mix's own device, and `split=True` chunks
+    only the compute. A 72-minute video therefore asked for 29 GiB on an 8 GB
+    card and fell back to the raw audio on the first real job — while the 60 s
+    slices the feature was measured on needed ~7 MB and could never show it.
+    These tests are about SHAPE and DEVICE, so they need no GPU and no demucs.
+    """
+
+    def _fake_model(self, torch):
+        class M:
+            samplerate = 44100
+            sources = ["drums", "bass", "other", "vocals"]
+        return M()
+
+    def _run(self, monkeypatch, seconds):
+        import numpy as np
+        import torch
+        import torchaudio
+        calls = []
+
+        def fake_apply_model(model, mix, device=None, **kw):
+            # What the real one does wrong if handed a cuda mix: allocate
+            # (stems x channels x full length) here.
+            calls.append({"samples": mix.shape[-1], "device": str(mix.device),
+                          "split": kw.get("split")})
+            return torch.zeros(1, len(model.sources), mix.shape[-2], mix.shape[-1])
+
+        import sys
+        import types
+        mod = types.ModuleType("demucs.apply")
+        mod.apply_model = fake_apply_model
+        monkeypatch.setitem(sys.modules, "demucs.apply", mod)
+
+        model = self._fake_model(torch)
+        wav = torch.zeros(2, int(seconds * model.samplerate))
+        out = vi._separate_windowed(model, wav, "cuda", 1.0, 0.0,
+                                    torch, torchaudio, np)
+        return out, calls
+
+    def test_a_long_input_is_split_into_several_windows(self, monkeypatch):
+        out, calls = self._run(monkeypatch, vi.WINDOW_SECONDS * 2.5)
+        assert len(calls) >= 3, f"expected windowing, got {len(calls)} call(s)"
+
+    def test_no_window_is_longer_than_the_window_size(self, monkeypatch):
+        _, calls = self._run(monkeypatch, vi.WINDOW_SECONDS * 2.5)
+        cap = int(vi.WINDOW_SECONDS * 44100)
+        assert all(c["samples"] <= cap for c in calls), [c["samples"] for c in calls]
+
+    def test_the_mix_never_goes_to_the_gpu(self, monkeypatch):
+        """This is the fix. The compute device is still cuda; it is the MIX
+        that has to stay on CPU, because demucs sizes its output tensor from
+        `mix.device`."""
+        _, calls = self._run(monkeypatch, vi.WINDOW_SECONDS * 2.5)
+        assert all(c["device"] == "cpu" for c in calls), [c["device"] for c in calls]
+
+    def test_a_short_input_is_one_window_and_still_works(self, monkeypatch):
+        out, calls = self._run(monkeypatch, 30.0)
+        assert len(calls) == 1
+        assert len(out) > 0
+
+    def test_the_stem_keeps_the_length_of_the_input(self, monkeypatch):
+        seconds = vi.WINDOW_SECONDS * 2.5
+        out, _ = self._run(monkeypatch, seconds)
+        expected = seconds * vi.SAMPLE_RATE
+        # Cross-fades and resampling move the tail by a few ms, not seconds.
+        assert abs(len(out) - expected) < vi.SAMPLE_RATE, (len(out), expected)

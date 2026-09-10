@@ -43,6 +43,12 @@ SAMPLE_RATE = 16000
 # htdemucs is the v4 default: 4 stems, and we keep one. "htdemucs_ft" is
 # better and four times slower for the same stem, which is not worth it when
 # the input is a talk show rather than a music master.
+# demucs' output tensor is full-length and all-stems, so the window — not
+# the video — is what bounds memory. 240 s costs ~340 MB of host RAM.
+WINDOW_SECONDS = 240.0
+# Cross-faded, so a window boundary cannot clip a word in half.
+OVERLAP_SECONDS = 3.0
+
 DEFAULT_MODEL = "htdemucs"
 
 
@@ -135,11 +141,9 @@ def isolate_vocals(media_path, cache_path=None, gate=None):
         ctx = gate if gate is not None else _NullGate()
         with ctx:
             with torch.inference_mode():
-                stems = apply_model(model, wav[None].to(device), device=device,
-                                    split=True, overlap=0.25, progress=False)[0]
-        vocals = stems[model.sources.index("vocals")] * ref.std() + ref.mean()
-        vocals = torchaudio.functional.resample(
-            vocals.mean(0, keepdim=True).cpu(), model.samplerate, SAMPLE_RATE)[0].numpy()
+                vocals = _separate_windowed(
+                    model, wav, device, float(ref.std()), float(ref.mean()),
+                    torch, torchaudio, np)
 
         out_path = cache_path or (tempfile.mkstemp(suffix=".vocals.wav")[1])
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -158,6 +162,72 @@ def isolate_vocals(media_path, cache_path=None, gate=None):
                 os.remove(tmp_wav)
             except OSError:
                 pass
+
+
+def _separate_windowed(model, wav, device, ref_std, ref_mean, torch, torchaudio, np):
+    """The vocals stem at SAMPLE_RATE, mono, computed a window at a time.
+
+    demucs allocates its output for the WHOLE input and for EVERY stem on the
+    mix's own device (`apply.py`: ``out = th.zeros(batch, len(model.sources),
+    channels, length, device=mix.device)``), and `split=True` chunks only the
+    compute, not that tensor. A 72-minute source therefore asks for 29 GiB on
+    an 8 GB card — which is exactly what happened on the first real video,
+    while the 60 s slices this was measured on needed about 7 MB and could
+    never have shown it. Moving the mix to CPU only moves the problem: the
+    same tensor is then ~6 GB of RAM.
+
+    So the window is ours. Each one allocates its own output, only the vocals
+    stem is kept, and it is downmixed and resampled to 16 kHz before the next
+    window runs, which bounds both GPU and host memory by WINDOW_SECONDS
+    rather than by the length of the video. Windows overlap and are
+    cross-faded, because a hard cut at a boundary can clip a word in half and
+    the whole point of this is to not lose speech.
+    """
+    from demucs.apply import apply_model   # the caller already proved it imports
+
+    sr_m = model.samplerate
+    total = wav.shape[-1]
+    win = int(WINDOW_SECONDS * sr_m)
+    ov = int(OVERLAP_SECONDS * sr_m)
+    step = max(1, win - ov)
+    vocals_idx = model.sources.index("vocals")
+
+    out_len = int(total / sr_m * SAMPLE_RATE) + SAMPLE_RATE
+    acc = np.zeros(out_len, dtype=np.float32)
+    wsum = np.zeros(out_len, dtype=np.float32)
+
+    starts = list(range(0, total, step)) or [0]
+    for n, start in enumerate(starts):
+        chunk = wav[:, start:start + win]
+        if chunk.shape[-1] < int(0.2 * sr_m):
+            break
+        # Mix stays on CPU: apply_model moves each sub-chunk to the GPU itself,
+        # so this window's full-length tensor never lands in VRAM.
+        stems = apply_model(model, chunk[None], device=device,
+                            split=True, overlap=0.25, progress=False)[0]
+        v = stems[vocals_idx].mean(0, keepdim=True) * ref_std + ref_mean
+        v16 = torchaudio.functional.resample(
+            v.cpu(), sr_m, SAMPLE_RATE)[0].numpy().astype(np.float32)
+
+        ramp = np.ones(len(v16), dtype=np.float32)
+        ov16 = int(OVERLAP_SECONDS * SAMPLE_RATE)
+        if n > 0 and ov16 and len(ramp) > ov16:
+            ramp[:ov16] = np.linspace(0.0, 1.0, ov16, dtype=np.float32)
+        if start + win < total and ov16 and len(ramp) > ov16:
+            ramp[-ov16:] = np.linspace(1.0, 0.0, ov16, dtype=np.float32)
+
+        pos = int(start / sr_m * SAMPLE_RATE)
+        end = min(pos + len(v16), out_len)
+        take = end - pos
+        if take <= 0:
+            break
+        acc[pos:end] += v16[:take] * ramp[:take]
+        wsum[pos:end] += ramp[:take]
+
+    keep = wsum > 1e-6
+    acc[keep] /= wsum[keep]
+    last = int(np.flatnonzero(keep)[-1]) + 1 if keep.any() else 0
+    return acc[:last]
 
 
 class _NullGate:

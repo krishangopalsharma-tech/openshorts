@@ -426,11 +426,29 @@ It is not uniformly better: on that same clip the opening line came out
 cleaner from the raw mix. The win is recovering speech that noise buries, not
 higher fidelity everywhere.
 
-Cost, once the weights are cached: 35x realtime on an RTX 2070 SUPER (~2 min
-for a 72-minute source). The stem is written beside the source as
-`<video>.vocals.wav` — about 2 MB per minute of audio — so a resumed job
-reuses it, and uploads/ already sweeps by age and caps at `UPLOADS_MAX_GB`.
-It runs inside the same `_ASR_GATE` as whisper, not alongside it.
+**Long inputs have to be windowed, and finding out why cost a real job.**
+demucs allocates its output for the WHOLE input and for EVERY stem on the
+mix's own device (`apply.py`: `out = th.zeros(batch, len(model.sources),
+channels, length, device=mix.device)`), and `split=True` chunks only the
+compute, not that tensor. The first real video asked for **29 GiB on an 8 GB
+card**, and every measurement behind this section was taken on 60s slices,
+which need about 7 MB — the bug could not have shown. Moving the mix to CPU
+only moves the problem: the same tensor is then ~6 GB of RAM for 72 minutes.
+So `_separate_windowed` does the windowing itself (`WINDOW_SECONDS` 240,
+`OVERLAP_SECONDS` 3, cross-faded because a hard cut at a boundary can clip a
+word in half): each window allocates its own output, only the vocals stem is
+kept, and it is downmixed to 16 kHz mono before the next window runs. Peak
+VRAM measured on a 10-minute input: **552 MB**. `tests/test_vocal_isolation.py`
+asserts the shape and, specifically, that the mix stays on CPU while the
+compute device is still cuda.
+
+Cost, once the weights are cached: measured 7x realtime on a 10-minute input
+with the GPU already busy serving a job (~10 min for a 72-minute source). An
+earlier "35x" here came from a 12s slice on an idle GPU and did not survive a
+real run. The stem is written beside the source as `<video>.vocals.wav` —
+about 2 MB per minute of audio — so a resumed job reuses it, and uploads/
+already sweeps by age and caps at `UPLOADS_MAX_GB`. It runs inside the same
+`_ASR_GATE` as whisper, not alongside it.
 
 **Two implementation constraints.** It imports `demucs.pretrained` and
 `demucs.apply`, never `demucs.api` or the CLI: those pull in `demucs.audio`,
