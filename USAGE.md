@@ -99,6 +99,20 @@ warning; the others still render.
 timestamp, delete a clip, rewrite a title. Or iterate in the chat ("clip 2
 cuts before the punchline, extend to 0:48") and re-save.
 
+### Seeing CLI clips in the dashboard
+
+A job rendered from the command line writes to disk but the dashboard never
+started it, so it does not appear on its own. On the idle screen, under the
+uploader, open **"Open clips from a job made outside this window"** and paste
+the job id — the folder name under `output/`. The clips load with every
+per-clip tool available: subtitles, format & look, music, overlays,
+download-all.
+
+No restart needed: `/api/status` reads the job directory when the id is not in
+memory. The one exception is an id the backend already holds in a different
+state — for example a dashboard job that failed, which you then re-rendered
+into the same folder from the CLI. Restart the backend and it reads from disk.
+
 ### CLI reference
 
 ```

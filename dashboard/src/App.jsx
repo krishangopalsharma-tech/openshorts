@@ -244,6 +244,12 @@ function App() {
   });
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [jobId, setJobId] = useState(null);
+  // Opening a job the dashboard did not start: a CLI run (the chat route) or
+  // one from a previous browser. /api/status falls back to reading the job
+  // dir, so nothing has to be in memory for this to work.
+  const [openJobId, setOpenJobId] = useState('');
+  const [openJobError, setOpenJobError] = useState(null);
+  const [openingJob, setOpeningJob] = useState(false);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
   // Best clips first. The backend hands them back in transcript order, which
@@ -639,6 +645,37 @@ function App() {
     } finally {
       setDownloadingAll(false);
       setDownloadAllPct(null);
+    }
+  };
+
+  // Load a job by its id: check it exists and actually produced clips before
+  // switching the view, so a typo says so instead of showing an empty screen.
+  const openJobById = async (e) => {
+    if (e) e.preventDefault();
+    const id = openJobId.trim();
+    if (!id || openingJob) return;
+    setOpeningJob(true);
+    setOpenJobError(null);
+    try {
+      const data = await pollJob(id);
+      const clips = (data && data.result && data.result.clips) || [];
+      if (!clips.length) {
+        setOpenJobError(data && data.status === 'failed'
+          ? 'That job failed and has no clips.'
+          : 'No clips found for that id.');
+        return;
+      }
+      setJobId(id);
+      setResults(data.result);
+      setLogs(data.logs || []);
+      setNoSource(false);
+      setProcessingMedia({ type: 'server', payload: `/api/source/${id}` });
+      setStatus('complete');
+      setOpenJobId('');
+    } catch (err) {
+      setOpenJobError('No job with that id. Check output/ for the folder name.');
+    } finally {
+      setOpeningJob(false);
     }
   };
 
@@ -1869,6 +1906,39 @@ function App() {
                 </div>
 
                 <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+
+                {/* Clips made outside this browser — a CLI run (the chat
+                    route), or a job started before the tab was closed — are
+                    on disk but invisible here, because the dashboard only
+                    knows the job it started itself. /api/status reads the job
+                    dir when the id is not in memory, so pasting the folder
+                    name is enough to get the per-clip tools on them. */}
+                <details className="text-left max-w-xl mx-auto">
+                  <summary className="cursor-pointer text-xs text-muted hover:text-ink2 transition-colors select-none">
+                    Open clips from a job made outside this window
+                  </summary>
+                  <form onSubmit={openJobById} className="mt-2.5 flex gap-2">
+                    <input
+                      type="text"
+                      value={openJobId}
+                      onChange={(e) => { setOpenJobId(e.target.value); setOpenJobError(null); }}
+                      placeholder="job id — the folder name under output/"
+                      spellCheck={false}
+                      className="input-field flex-1 font-mono text-[12px]"
+                      aria-label="job id"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!openJobId.trim() || openingJob}
+                      className="btn-secondary shrink-0"
+                    >
+                      {openingJob ? <Loader2 size={15} className="animate-spin" /> : 'Open'}
+                    </button>
+                  </form>
+                  {openJobError && (
+                    <p className="mt-1.5 text-[11px] text-[color:var(--color-accent)]">{openJobError}</p>
+                  )}
+                </details>
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
                   <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
