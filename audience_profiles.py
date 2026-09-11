@@ -82,7 +82,7 @@ SHARED_RULES = """CLIP RULES:
 - PAYOFF INSIDE: the punchline / reveal / conclusion must be inside the clip.
 - No two clips that make the same point or tell the same joke.
 - Skip intros, outros, sponsor reads and filler.
-- Pick 3 to 8 clips. Quality over quantity: never pad with a clip you would not post yourself."""
+- Pick {min_clips} to {max_clips} clips. Quality over quantity: never pad with a clip you would not post yourself."""
 
 OUTPUT_FORMAT = """COPY FIELDS:
 - title: max 70 characters.  - hook: on-screen text for the first seconds, max 8 words.
@@ -121,14 +121,25 @@ def apply_transcription_settings(key):
     os.environ.setdefault("CLIP_MAX_SECONDS", str(hi))
 
 
-def chat_prompt(key):
-    """Full prompt for Claude.ai / ChatGPT, placed above the transcript."""
+def chat_prompt(key, clip_counts=None):
+    """Full prompt for Claude.ai / ChatGPT, placed above the transcript.
+
+    ``clip_counts`` is the (min, max) band this video's length justifies —
+    the same one the Gemini detail pass gets. It used to be a hardcoded
+    "3 to 8" whatever the source, so a 60-minute episode was asked for fewer
+    clips through the chat route than through the dashboard (6-12 there),
+    which also made the two routes incomparable for the picked_by A/B: one
+    picker was simply allowed more clips than the other.
+    """
     lo, hi = PROFILES[key]["clip_seconds"] if key in PROFILES else (20, 45)
+    min_clips, max_clips = clip_counts or (3, 8)
     parts = ["You are a senior YouTube Shorts editor. Below is a timestamped transcript of a long video. "
              "Read ALL of it, then pick the moments most likely to go viral as standalone Shorts."]
     if key in PROFILES:
         parts.append(PROFILES[key]["context"])
-    parts += [SHARED_RULES.format(lo=lo, hi=hi), OUTPUT_FORMAT]
+    parts += [SHARED_RULES.format(lo=lo, hi=hi,
+                                  min_clips=min_clips, max_clips=max_clips),
+              OUTPUT_FORMAT]
     return "\n\n".join(parts)
 
 

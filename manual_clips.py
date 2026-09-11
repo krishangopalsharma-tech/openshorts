@@ -15,7 +15,36 @@ import json
 import os
 import re
 
-from clip_selection import clip_duration_bounds, snap_clip_to_words
+from clip_selection import (build_transcript_windows, clip_count_targets,
+                            clip_duration_bounds, snap_clip_to_words)
+
+
+def chat_clip_counts(transcript, duration):
+    """The (min, max) clip band to ask a chat model for.
+
+    Mirrors what the Gemini detail pass is given, so both pickers are asked for
+    the same thing and the picked_by A/B compares like with like:
+    get_viral_clips shortlists max(3, min(10, duration // 90 + 2)) windows and
+    calls clip_count_targets on that. There is no scoring pass here, so the
+    shortlist size is taken as its own ceiling — the count then depends on how
+    much material there is rather than on which windows scored well.
+
+    It was a hardcoded "3 to 8" before, whatever the source, so a 60-minute
+    episode was asked for FEWER clips through the chat route than through the
+    dashboard, and the A/B was comparing a picker allowed 6-12 against one
+    allowed 3-8.
+
+    Falls back to the old fixed band if the transcript is unusable: this only
+    decides prompt wording and must never stop the export.
+    """
+    try:
+        _, max_secs = clip_duration_bounds()
+        windows = build_transcript_windows(
+            transcript, duration, window_seconds=max(90, int(max_secs * 1.5)))
+        target = max(3, min(10, int(float(duration) // 90) + 2))
+        return clip_count_targets(min(target, len(windows)) or 1)
+    except Exception:
+        return (3, 8)
 
 
 def write_ai_transcript(output_dir, transcript, duration, title="", audience=None):
@@ -41,8 +70,9 @@ def write_ai_transcript(output_dir, transcript, duration, title="", audience=Non
 
     import audience_profiles
     path = os.path.join(output_dir, "paste_into_chat.txt")
+    counts = chat_clip_counts(transcript, duration)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(audience_profiles.chat_prompt(audience) + "\n\n=== TRANSCRIPT ===\n" + body)
+        f.write(audience_profiles.chat_prompt(audience, counts) + "\n\n=== TRANSCRIPT ===\n" + body)
     label = audience_profiles.PROFILES.get(audience, {}).get("label", "generic (no audience matched)")
     print(f"🎯 Prompt profile: {label}")
     return path

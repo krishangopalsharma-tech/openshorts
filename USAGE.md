@@ -66,6 +66,13 @@ Stops before any picking or rendering and writes into `output\myjob\`:
 | `transcript_for_ai.txt` | the transcript alone |
 | `transcript.json` | full transcript with per-word timings |
 
+The brief tells the model **how many clips to pick**, scaled to the length of
+the video — a 60-minute episode asks for 6 to 12, a short one asks for fewer.
+It is the same band the Gemini path uses, and `CLIP_TARGET_MIN` /
+`CLIP_TARGET_MAX` override it here too. Nothing caps the render, so if you
+want more than the brief suggests, just ask the chat for more and save the
+longer reply.
+
 **Step 2 — paste it into the chat.** Open `paste_into_chat.txt`, select all,
 paste. You write nothing yourself; the file already contains the role, the
 audience profile, the clip rules and the required JSON shape. A 72-minute

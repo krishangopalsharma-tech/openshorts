@@ -100,3 +100,66 @@ def test_an_explicit_picked_by_in_the_json_is_kept(tmp_path):
     ]}), encoding="utf-8")
     out = manual_clips.load_manual_clips(str(path), None, 120.0)
     assert out["shorts"][0]["picked_by"] == "me, by hand"
+
+
+# --- how many clips the chat route asks for -----------------------------------
+
+def _transcript(seconds, every=6.0):
+    segs, t = [], 0.0
+    while t < seconds:
+        segs.append({"start": t, "end": min(t + every, seconds),
+                     "text": "some spoken words here", "words": []})
+        t += every
+    return {"language": "en", "segments": segs}
+
+
+def test_the_chat_brief_asks_for_the_same_band_gemini_gets():
+    """The count was hardcoded "3 to 8" whatever the source, so a long episode
+    was asked for fewer clips through the chat route than through the
+    dashboard — and the picked_by A/B was then comparing a picker allowed
+    6-12 against one allowed 3-8."""
+    import manual_clips
+    from clip_selection import clip_count_targets, build_transcript_windows
+
+    duration = 3600.0
+    tr = _transcript(duration)
+    got = manual_clips.chat_clip_counts(tr, duration)
+
+    # the same computation main.get_viral_clips does
+    windows = build_transcript_windows(tr, duration, window_seconds=90)
+    target = max(3, min(10, int(duration // 90) + 2))
+    assert got == clip_count_targets(min(target, len(windows)))
+    assert got[0] > 3, "a 60-minute source should ask for more than the old floor"
+
+
+def test_a_short_source_asks_for_fewer_than_a_long_one():
+    import manual_clips
+    short = manual_clips.chat_clip_counts(_transcript(60.0), 60.0)
+    long_ = manual_clips.chat_clip_counts(_transcript(3600.0), 3600.0)
+    assert short[1] < long_[1], (short, long_)
+
+
+def test_the_env_override_reaches_the_chat_route_too(monkeypatch):
+    import manual_clips
+    monkeypatch.setenv("CLIP_TARGET_MIN", "9")
+    monkeypatch.setenv("CLIP_TARGET_MAX", "9")
+    assert manual_clips.chat_clip_counts(_transcript(3600.0), 3600.0) == (9, 9)
+
+
+def test_an_unusable_transcript_never_stops_the_export():
+    """This only decides prompt wording. It must not be the reason
+    --transcribe-only fails."""
+    import manual_clips
+    assert manual_clips.chat_clip_counts(None, 600.0) == (3, 8)
+    assert manual_clips.chat_clip_counts({"segments": "not a list"}, 600.0) == (3, 8)
+
+
+def test_the_band_reaches_the_written_prompt(tmp_path):
+    import manual_clips
+    duration = 3600.0
+    out = manual_clips.write_ai_transcript(str(tmp_path), _transcript(duration),
+                                           duration, "A show", "us")
+    text = open(out, encoding="utf-8").read()
+    lo, hi = manual_clips.chat_clip_counts(_transcript(duration), duration)
+    assert f"Pick {lo} to {hi} clips" in text
+    assert "Pick 3 to 8 clips" not in text
