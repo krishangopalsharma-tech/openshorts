@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets a run be started by hand from the Actions tab. Without it the only
+  # way to exercise CI is to push, which means an empty commit every time you
+  # want to check something — and on a fork, where Actions starts disabled,
+  # it means there is no way to get a first run at all without a code change.
+  workflow_dispatch:
 
 jobs:
   backend-tests:
