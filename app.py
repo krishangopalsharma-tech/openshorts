@@ -2804,7 +2804,11 @@ async def process_local_endpoint(request: Request):
     if clips_path:
         cmd.extend(["--clips", clips_path])
 
-    env = {}
+    # Inherit the real environment. A bare dict looks tidy and breaks the job
+    # before main.py runs a line: without USERPROFILE, ultralytics' import-time
+    # Path.home() raises "Could not determine home directory". /api/process
+    # has always done this; this endpoint did not.
+    env = os.environ.copy()
     audience = str(body.get("audience") or "").strip().lower()
     if audience in ("in", "us"):
         env["AUDIENCE"] = audience
@@ -2835,8 +2839,8 @@ async def process_local_endpoint(request: Request):
     }
     _write_resume_manifest(job_id, cmd, 2, None, None, watermark=False,
                            base_url=jobs[job_id]['base_url'],
-                           job_env={k: v for k, v in env.items()
-                                    if k in _RESUMABLE_ENV_KEYS})
+                           job_env={k: env[k] for k in _RESUMABLE_ENV_KEYS
+                                    if k in env and os.environ.get(k) != env[k]})
     _enqueue_job(job_id, 2)
     print(f"[local] job={job_id} video={video_path!r} clips={clips_path or '(AI picker)'}")
     return {"job_id": job_id, "status": "queued"}
