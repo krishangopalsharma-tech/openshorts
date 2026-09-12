@@ -2645,6 +2645,112 @@ def layout_env(requested):
     return env
 
 
+@app.post("/api/process/local")
+async def process_local_endpoint(request: Request):
+    """Render clips from a video ALREADY on this machine, with picks already
+    made — the chat route, without the command line.
+
+    The two paths are read from the local filesystem, so this exists only in
+    self-host: on a hosted instance it would let any visitor name a path on
+    the server. BILLING_ENABLED is the switch the rest of the app already uses
+    to mean "multi-tenant", and here it means 404.
+
+    `clips_path` is optional. Without it the job runs the normal AI picker on
+    a local file, which is the other thing the dashboard could not do —
+    uploading a 4 GB episode to a server running on the same disk is a copy
+    for no reason.
+    """
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    body = await request.json() if await request.body() else {}
+    video_path = str(body.get("video_path") or "").strip().strip('"')
+    clips_path = str(body.get("clips_path") or "").strip().strip('"')
+
+    if not video_path:
+        raise HTTPException(status_code=400, detail="video_path is required")
+    if not os.path.isfile(video_path):
+        raise HTTPException(status_code=400,
+                            detail=f"No video at that path: {video_path}")
+    if clips_path and not os.path.isfile(clips_path):
+        raise HTTPException(status_code=400,
+                            detail=f"No clips file at that path: {clips_path}")
+
+    # Fail on a broken picks file HERE, not forty minutes into a render.
+    if clips_path:
+        try:
+            import manual_clips
+            picks = manual_clips.load_manual_clips(clips_path, None, 10 ** 9)
+            if not picks.get("shorts"):
+                raise ValueError("no usable clips in the file")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400,
+                                detail=f"Could not read the clips file: {e}")
+
+    duration = _media_duration_seconds(video_path)
+    if MIN_SOURCE_SECONDS > 0 and 0 < duration < MIN_SOURCE_SECONDS:
+        _reject_short_source(duration)
+
+    job_id = str(uuid.uuid4())
+    job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(job_output_dir, exist_ok=True)
+
+    # Hardlink the source under the job's name, exactly as the Thumbnail
+    # Studio handover does: the clip editor, the preview and source lookup all
+    # expect uploads/<job_id>_<name>, and a hardlink copies no bytes. Across
+    # volumes (the source is often on another drive) that is not possible, so
+    # fall back to pointing at the original in place — the retention sweep only
+    # ever removes files it finds under uploads/.
+    input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{os.path.basename(video_path)}")
+    try:
+        os.link(video_path, input_path)
+    except OSError:
+        input_path = video_path
+
+    cmd = [sys.executable, "-u", "main.py", "-i", input_path, "-o", job_output_dir]
+    if clips_path:
+        cmd.extend(["--clips", clips_path])
+
+    env = {}
+    audience = str(body.get("audience") or "").strip().lower()
+    if audience in ("in", "us"):
+        env["AUDIENCE"] = audience
+    language = str(body.get("language") or "").strip().lower()
+    if language and language != "auto":
+        env["TRANSCRIBE_LANGUAGE"] = language
+
+    jobs[job_id] = {
+        'status': 'queued',
+        'logs': [f"Job {job_id} queued."],
+        'cmd': cmd,
+        'env': env,
+        'output_dir': job_output_dir,
+        'attestation': {"acknowledged": True, "ip": "local", "user_agent": "",
+                        "timestamp": time.time(), "source": "local_path"},
+        'user_id': None,
+        'reservation_id': None,
+        'watermark': False,
+        'webhook_url': None,
+        'webhook_secret': None,
+        'base_url': (os.environ.get("PUBLIC_API_URL", "").rstrip("/")
+                     or str(request.base_url).rstrip("/")),
+        'source_fp': source_history.fingerprint(
+            title=os.path.basename(video_path),
+            size_bytes=os.path.getsize(video_path),
+            duration_seconds=duration or None,
+        ),
+    }
+    _write_resume_manifest(job_id, cmd, 2, None, None, watermark=False,
+                           base_url=jobs[job_id]['base_url'],
+                           job_env={k: v for k, v in env.items()
+                                    if k in _RESUMABLE_ENV_KEYS})
+    _enqueue_job(job_id, 2)
+    print(f"[local] job={job_id} video={video_path!r} clips={clips_path or '(AI picker)'}")
+    return {"job_id": job_id, "status": "queued"}
+
+
 @app.post("/api/process")
 async def process_endpoint(
     request: Request,

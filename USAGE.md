@@ -94,6 +94,9 @@ parser tolerates:
 venv\Scripts\python main.py -i "uploads\video.mp4" -o output\myjob --clips clips.json
 ```
 
+`--clips` is resolved against the directory you are IN, not the job folder, so
+give it the full path — `--clips output\myjob\clips.json`, not `clips.json`.
+
 Use the **same `-i` and `-o`** as step 1, or it re-transcribes. Each clip is
 snapped to real word boundaries, so rough timestamps are fine, and Gemini is
 skipped entirely. A clip with a broken `start`/`end` is skipped with a
@@ -105,6 +108,25 @@ warning; the others still render.
 **What you can do with the JSON:** edit it by hand before step 4 — change a
 timestamp, delete a clip, rewrite a title. Or iterate in the chat ("clip 2
 cuts before the punchline, extend to 0:48") and re-save.
+
+### The same thing from the dashboard, no command line
+
+On the idle screen, under the uploader: **"Use a file on this computer, or
+picks from a chat"**. Two fields:
+
+| field | |
+|---|---|
+| video path | `E:\shows\episode.mp4` — read where it is, nothing is uploaded |
+| clips.json path | optional. Blank runs the normal AI picker on that file |
+
+It checks both paths and parses the picks **before** queueing, so a wrong path
+or a broken JSON says so immediately instead of forty minutes into a render.
+The job then behaves like any other: progress, clip cards, and every per-clip
+tool.
+
+Self-host only. The endpoint reads local filesystem paths, so it does not
+exist when `BILLING_ENABLED` is set — on a hosted instance it would let a
+visitor name a path on the server.
 
 ### Seeing CLI clips in the dashboard
 

@@ -248,6 +248,12 @@ function App() {
   // one from a previous browser. /api/status falls back to reading the job
   // dir, so nothing has to be in memory for this to work.
   const [openJobId, setOpenJobId] = useState('');
+  // Render a file that is already on this machine, optionally with picks
+  // already made in a chat. Self-host only; the endpoint 404s in cloud mode.
+  const [localVideoPath, setLocalVideoPath] = useState('');
+  const [localClipsPath, setLocalClipsPath] = useState('');
+  const [localError, setLocalError] = useState(null);
+  const [localBusy, setLocalBusy] = useState(false);
   const [openJobError, setOpenJobError] = useState(null);
   const [openingJob, setOpeningJob] = useState(false);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
@@ -676,6 +682,42 @@ function App() {
       setOpenJobError('No job with that id. Check output/ for the folder name.');
     } finally {
       setOpeningJob(false);
+    }
+  };
+
+  // Start a job from paths on this machine. Nothing is uploaded: the backend
+  // reads the file where it already is, which is the point — copying a 4 GB
+  // episode into a server running off the same disk is a copy for no reason.
+  const startLocalJob = async (e) => {
+    if (e) e.preventDefault();
+    const video = localVideoPath.trim().replace(/^"|"$/g, '');
+    if (!video || localBusy) return;
+    setLocalBusy(true);
+    setLocalError(null);
+    try {
+      const res = await apiFetch('/api/process/local', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_path: video,
+          clips_path: localClipsPath.trim().replace(/^"|"$/g, '') || null,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLocalError(data.detail || 'Could not start the job.');
+        return;
+      }
+      setJobId(data.job_id);
+      setResults(null);
+      setLogs([]);
+      setNoSource(false);
+      setProcessingMedia({ type: 'server', payload: `/api/source/${data.job_id}` });
+      setStatus('processing');
+    } catch (err) {
+      setLocalError('Could not reach the backend.');
+    } finally {
+      setLocalBusy(false);
     }
   };
 
@@ -1913,6 +1955,51 @@ function App() {
                     knows the job it started itself. /api/status reads the job
                     dir when the id is not in memory, so pasting the folder
                     name is enough to get the per-clip tools on them. */}
+                {/* Self-host only. Renders a file where it already sits, and
+                    optionally takes picks already made in a chat — the chat
+                    route without the command line. Hidden in cloud mode,
+                    where the endpoint does not exist. */}
+                {!billingEnabled && (
+                <details className="text-left max-w-xl mx-auto">
+                  <summary className="cursor-pointer text-xs text-muted hover:text-ink2 transition-colors select-none">
+                    Use a file on this computer, or picks from a chat
+                  </summary>
+                  <form onSubmit={startLocalJob} className="mt-2.5 space-y-2">
+                    <input
+                      type="text"
+                      value={localVideoPath}
+                      onChange={(e) => { setLocalVideoPath(e.target.value); setLocalError(null); }}
+                      placeholder="video path, e.g. E:\shows\episode.mp4"
+                      spellCheck={false}
+                      className="input-field w-full font-mono text-[12px]"
+                      aria-label="video path"
+                    />
+                    <input
+                      type="text"
+                      value={localClipsPath}
+                      onChange={(e) => { setLocalClipsPath(e.target.value); setLocalError(null); }}
+                      placeholder="clips.json from the chat — optional, blank uses the AI picker"
+                      spellCheck={false}
+                      className="input-field w-full font-mono text-[12px]"
+                      aria-label="clips json path"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!localVideoPath.trim() || localBusy}
+                      className="w-full btn-secondary"
+                    >
+                      {localBusy ? <Loader2 size={15} className="animate-spin" /> : 'Generate from these paths'}
+                    </button>
+                  </form>
+                  {localError && (
+                    <p className="mt-1.5 text-[11px] text-[color:var(--color-accent)]">{localError}</p>
+                  )}
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
+                    Nothing is uploaded — the file is read where it is.
+                  </p>
+                </details>
+                )}
+
                 <details className="text-left max-w-xl mx-auto">
                   <summary className="cursor-pointer text-xs text-muted hover:text-ink2 transition-colors select-none">
                     Open clips from a job made outside this window
