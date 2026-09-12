@@ -2645,6 +2645,70 @@ def layout_env(requested):
     return env
 
 
+LOCAL_VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
+                    ".mpg", ".mpeg", ".wmv", ".flv", ".ts")
+
+
+def _local_drives():
+    """Every drive letter that answers, or "/" off Windows."""
+    if os.name != "nt":
+        return ["/"]
+    import string
+    return [f"{d}:{os.sep}" for d in string.ascii_uppercase
+            if os.path.exists(f"{d}:{os.sep}")]
+
+
+@app.get("/api/local/browse")
+async def local_browse(path: Optional[str] = None, kind: str = "video"):
+    """List folders and matching files, so the dashboard can offer a file
+    picker for a path the BROWSER is not allowed to see.
+
+    A file input gives JavaScript the name of a file and never its path
+    (`File.path` is Electron, not the web), so "browse for a video" cannot be
+    done client-side at all: the only way to name a 4 GB file that must not be
+    uploaded is to walk the server's own filesystem. Self-host only, for the
+    same reason /api/process/local is.
+    """
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if not path:
+        return {"path": "", "parent": None, "drives": _local_drives(),
+                "dirs": [], "files": []}
+
+    target = os.path.abspath(os.path.expanduser(path.strip().strip('"')))
+    if not os.path.isdir(target):
+        raise HTTPException(status_code=400, detail=f"Not a folder: {target}")
+
+    wanted = (".json",) if kind == "clips" else LOCAL_VIDEO_EXTS
+    dirs, files = [], []
+    try:
+        with os.scandir(target) as it:
+            for entry in it:
+                try:
+                    if entry.name.startswith("."):
+                        continue
+                    if entry.is_dir():
+                        dirs.append(entry.name)
+                    elif entry.name.lower().endswith(wanted):
+                        files.append({"name": entry.name,
+                                      "size": entry.stat().st_size})
+                except OSError:
+                    continue          # a permission-denied entry is skipped
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"No access to {target}")
+
+    parent = os.path.dirname(target.rstrip(os.sep))
+    return {
+        "path": target,
+        "parent": parent if parent and parent != target else None,
+        "drives": _local_drives(),
+        "dirs": sorted(dirs, key=str.lower)[:500],
+        "files": sorted(files, key=lambda f: f["name"].lower())[:500],
+        "sep": os.sep,
+    }
+
+
 @app.post("/api/process/local")
 async def process_local_endpoint(request: Request):
     """Render clips from a video ALREADY on this machine, with picks already
@@ -2666,6 +2730,9 @@ async def process_local_endpoint(request: Request):
     body = await request.json() if await request.body() else {}
     video_path = str(body.get("video_path") or "").strip().strip('"')
     clips_path = str(body.get("clips_path") or "").strip().strip('"')
+    # The browser can read a small file's CONTENTS but can never learn its
+    # path, so the picker sends the text of clips.json rather than a location.
+    clips_text = body.get("clips_json")
 
     if not video_path:
         raise HTTPException(status_code=400, detail="video_path is required")
@@ -2676,18 +2743,33 @@ async def process_local_endpoint(request: Request):
         raise HTTPException(status_code=400,
                             detail=f"No clips file at that path: {clips_path}")
 
-    # Fail on a broken picks file HERE, not forty minutes into a render.
-    if clips_path:
+    # Fail on broken picks HERE, not forty minutes into a render. Inline text
+    # from the browser's file picker gets the same check as a path.
+    if clips_path or clips_text:
+        import tempfile as _tmp
+        probe, tmp = clips_path, None
+        if not probe:
+            fd, tmp = _tmp.mkstemp(suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(clips_text if isinstance(clips_text, str)
+                        else json.dumps(clips_text))
+            probe = tmp
         try:
             import manual_clips
-            picks = manual_clips.load_manual_clips(clips_path, None, 10 ** 9)
+            picks = manual_clips.load_manual_clips(probe, None, 10 ** 9)
             if not picks.get("shorts"):
-                raise ValueError("no usable clips in the file")
+                raise ValueError("no usable clips in it")
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=400,
-                                detail=f"Could not read the clips file: {e}")
+                                detail=f"Could not read the clips: {e}")
+        finally:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     duration = _media_duration_seconds(video_path)
     if MIN_SOURCE_SECONDS > 0 and 0 < duration < MIN_SOURCE_SECONDS:
@@ -2696,6 +2778,15 @@ async def process_local_endpoint(request: Request):
     job_id = str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
+
+    # Picks pasted or picked in the browser are written into the job dir, so
+    # the rest of the pipeline sees an ordinary --clips file and the job keeps
+    # a record of exactly what it was asked to cut.
+    if clips_text and not clips_path:
+        clips_path = os.path.join(job_output_dir, "clips.json")
+        with open(clips_path, "w", encoding="utf-8") as f:
+            f.write(clips_text if isinstance(clips_text, str)
+                    else json.dumps(clips_text))
 
     # Hardlink the source under the job's name, exactly as the Thumbnail
     # Studio handover does: the clip editor, the preview and source lookup all

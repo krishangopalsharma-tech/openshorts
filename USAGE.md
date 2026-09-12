@@ -112,12 +112,19 @@ cuts before the punchline, extend to 0:48") and re-save.
 ### The same thing from the dashboard, no command line
 
 On the idle screen, under the uploader: **"Use a file on this computer, or
-picks from a chat"**. Two fields:
+picks from a chat"**.
 
-| field | |
+| control | |
 |---|---|
-| video path | `E:\shows\episode.mp4` — read where it is, nothing is uploaded |
-| clips.json path | optional. Blank runs the normal AI picker on that file |
+| **Browse…** | walks this machine's drives and folders; click a video to choose it. Nothing is uploaded — it is read where it sits |
+| **Choose clips.json…** | an ordinary file picker. Optional: without it the AI picks the moments |
+
+The two use different mechanisms on purpose. A browser **never** tells
+JavaScript a file's path (`File.path` is Electron, not the web), so a video
+that must not be uploaded can only be named by walking the SERVER's
+filesystem — hence `GET /api/local/browse`. clips.json is small, so its picker
+reads the file's **contents** in the browser and posts the JSON itself; no
+path involved, and it works wherever the file happens to sit.
 
 It checks both paths and parses the picks **before** queueing, so a wrong path
 or a broken JSON says so immediately instead of forty minutes into a render.

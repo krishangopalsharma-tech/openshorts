@@ -251,9 +251,17 @@ function App() {
   // Render a file that is already on this machine, optionally with picks
   // already made in a chat. Self-host only; the endpoint 404s in cloud mode.
   const [localVideoPath, setLocalVideoPath] = useState('');
-  const [localClipsPath, setLocalClipsPath] = useState('');
   const [localError, setLocalError] = useState(null);
   const [localBusy, setLocalBusy] = useState(false);
+  // The browse dialog for the video. A browser file input only ever reports a
+  // file's NAME, so the path has to be chosen by walking the server's disk.
+  const [browse, setBrowse] = useState(null);      // { path, dirs, files, drives, parent }
+  const [browseBusy, setBrowseBusy] = useState(false);
+  // clips.json is small, so its picker reads the CONTENTS instead: no path
+  // needed, and it works the same whether the file sits next to the video or
+  // in the downloads folder.
+  const [clipsFileName, setClipsFileName] = useState('');
+  const [clipsText, setClipsText] = useState('');
   const [openJobError, setOpenJobError] = useState(null);
   const [openingJob, setOpeningJob] = useState(false);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
@@ -688,6 +696,28 @@ function App() {
   // Start a job from paths on this machine. Nothing is uploaded: the backend
   // reads the file where it already is, which is the point — copying a 4 GB
   // episode into a server running off the same disk is a copy for no reason.
+  const loadBrowse = async (path) => {
+    setBrowseBusy(true);
+    try {
+      const q = path ? `?path=${encodeURIComponent(path)}` : '';
+      const res = await apiFetch(`/api/local/browse${q}`);
+      const data = await res.json();
+      if (!res.ok) { setLocalError(data.detail || 'Could not read that folder.'); return; }
+      setBrowse(data);
+    } catch { setLocalError('Could not reach the backend.'); }
+    finally { setBrowseBusy(false); }
+  };
+
+  const pickClipsFile = async (file) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setClipsText(text);
+      setClipsFileName(file.name);
+      setLocalError(null);
+    } catch { setLocalError('Could not read that file.'); }
+  };
+
   const startLocalJob = async (e) => {
     if (e) e.preventDefault();
     const video = localVideoPath.trim().replace(/^"|"$/g, '');
@@ -700,7 +730,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           video_path: video,
-          clips_path: localClipsPath.trim().replace(/^"|"$/g, '') || null,
+          clips_json: clipsText || null,
         }),
       });
       const data = await res.json();
@@ -1965,30 +1995,56 @@ function App() {
                     Use a file on this computer, or picks from a chat
                   </summary>
                   <form onSubmit={startLocalJob} className="mt-2.5 space-y-2">
-                    <input
-                      type="text"
-                      value={localVideoPath}
-                      onChange={(e) => { setLocalVideoPath(e.target.value); setLocalError(null); }}
-                      placeholder="video path, e.g. E:\shows\episode.mp4"
-                      spellCheck={false}
-                      className="input-field w-full font-mono text-[12px]"
-                      aria-label="video path"
-                    />
-                    <input
-                      type="text"
-                      value={localClipsPath}
-                      onChange={(e) => { setLocalClipsPath(e.target.value); setLocalError(null); }}
-                      placeholder="clips.json from the chat — optional, blank uses the AI picker"
-                      spellCheck={false}
-                      className="input-field w-full font-mono text-[12px]"
-                      aria-label="clips json path"
-                    />
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={localVideoPath}
+                        onChange={(e) => { setLocalVideoPath(e.target.value); setLocalError(null); }}
+                        placeholder="video on this computer"
+                        spellCheck={false}
+                        className="input-field flex-1 font-mono text-[12px]"
+                        aria-label="video path"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => { setLocalError(null); loadBrowse(''); }}
+                        className="btn-secondary shrink-0"
+                      >
+                        Browse…
+                      </button>
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <label className="btn-secondary shrink-0 cursor-pointer">
+                        Choose clips.json…
+                        <input
+                          type="file"
+                          accept=".json,.txt,application/json"
+                          className="hidden"
+                          onChange={(e) => pickClipsFile(e.target.files?.[0])}
+                        />
+                      </label>
+                      <span className="text-[11px] text-muted truncate">
+                        {clipsFileName
+                          ? `${clipsFileName} — picks from your chat`
+                          : 'optional — without it the AI picks the moments'}
+                      </span>
+                      {clipsFileName && (
+                        <button
+                          type="button"
+                          onClick={() => { setClipsText(''); setClipsFileName(''); }}
+                          className="text-muted hover:text-ink2 shrink-0"
+                          aria-label="clear clips file"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
                     <button
                       type="submit"
                       disabled={!localVideoPath.trim() || localBusy}
-                      className="w-full btn-secondary"
+                      className="w-full btn-primary"
                     >
-                      {localBusy ? <Loader2 size={15} className="animate-spin" /> : 'Generate from these paths'}
+                      {localBusy ? <Loader2 size={15} className="animate-spin" /> : 'Generate from this file'}
                     </button>
                   </form>
                   {localError && (
@@ -1998,6 +2054,70 @@ function App() {
                     Nothing is uploaded — the file is read where it is.
                   </p>
                 </details>
+                )}
+
+                {/* Server-side file browser. The file input above can read
+                    clips.json's contents, but a browser never exposes a file's
+                    PATH, so choosing a multi-GB video that must not be uploaded
+                    means walking the server's own disk. */}
+                {browse && (
+                  <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+                    onClick={() => setBrowse(null)}
+                  >
+                    <div
+                      className="w-full max-w-lg max-h-[70vh] flex flex-col rounded-input border border-rule2 bg-paper2 p-3"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center gap-2 mb-2">
+                        <p className="eyebrow flex-1 truncate">{browse.path || 'This computer'}</p>
+                        <button type="button" onClick={() => setBrowse(null)}
+                                className="text-muted hover:text-ink2" aria-label="close">
+                          <X size={16} />
+                        </button>
+                      </div>
+                      <div className="flex-1 overflow-y-auto custom-scrollbar text-[13px]">
+                        {browseBusy && <p className="text-muted px-2 py-1">Reading…</p>}
+                        {!browse.path && (browse.drives || []).map((d) => (
+                          <button key={d} type="button" onClick={() => loadBrowse(d)}
+                                  className="block w-full text-left px-2 py-1.5 rounded hover:bg-paper3 font-mono">
+                            {d}
+                          </button>
+                        ))}
+                        {browse.path && (
+                          <button type="button"
+                                  onClick={() => loadBrowse(browse.parent || '')}
+                                  className="block w-full text-left px-2 py-1.5 rounded hover:bg-paper3 text-muted">
+                            ../
+                          </button>
+                        )}
+                        {(browse.dirs || []).map((d) => (
+                          <button key={d} type="button"
+                                  onClick={() => loadBrowse(browse.path + browse.sep + d)}
+                                  className="block w-full text-left px-2 py-1.5 rounded hover:bg-paper3 truncate">
+                            {d}/
+                          </button>
+                        ))}
+                        {(browse.files || []).map((f) => (
+                          <button key={f.name} type="button"
+                                  onClick={() => {
+                                    setLocalVideoPath(browse.path + browse.sep + f.name);
+                                    setBrowse(null);
+                                  }}
+                                  className="flex w-full items-center gap-2 px-2 py-1.5 rounded hover:bg-paper3 text-ink2">
+                            <span className="flex-1 truncate text-left">{f.name}</span>
+                            <span className="text-[11px] text-muted shrink-0">
+                              {(f.size / 1048576).toFixed(0)} MB
+                            </span>
+                          </button>
+                        ))}
+                        {browse.path && !browseBusy
+                          && !(browse.dirs || []).length && !(browse.files || []).length && (
+                          <p className="text-muted px-2 py-1">No folders or videos here.</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 )}
 
                 <details className="text-left max-w-xl mx-auto">
