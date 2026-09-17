@@ -112,6 +112,136 @@ NARRATION_RULES = {
 - The last 2-3 lines open the question above. Do not answer it.""",
 }
 
+# What the series is FOR. "teaser" is the original design: appetite-building,
+# nothing after 75%, every payoff withheld. "story" (the channel's choice,
+# 18-sep-2026) tells the whole film in three parts with a cliffhanger between
+# them and the ending in part 3: a viewer who loved the telling goes to the
+# film, a viewer who was teased scrolls on. Library default stays "teaser" so
+# the original tests keep their meaning; film_api defaults sessions to "story".
+RECAP_MODES = ("story", "teaser")
+
+NARRATION_RULES_FULL = """NARRATION RULES - you are telling the whole story, as a storyteller:
+- Line 1 is the hook: one sentence a stranger cannot scroll past. A person, a
+  choice, a cost. No throat-clearing, no "in this film".
+- Then tell what happens, in order, cause and effect. Present tense. Names,
+  not roles. What this person wants, what stands in the way, what it costs.
+- The mood of this part is {MOOD}: {MOOD_GUIDE}. Every line carries it.
+- Plain spoken words, short sentences, the way you would tell a friend about
+  a night that changed someone. Make the viewer feel the room before they
+  understand it. Stakes in every third line at the latest.
+- NEVER name the apparatus. Banned: "the film", "the camera", "the director",
+  "the script", "the edit", "the cut", "the shot", "the frame", "the score",
+  "the lens", "close-up", "wide shot", "screen time", "rhyme", "design",
+  "the viewer", "the audience". Say "he", "she", "Sam", never "we see".
+- Do not lecture. "Notice", "watch how", "listen for" at most ONCE in the
+  whole part. You are not pointing at things; you are living them.
+- Spoilers are allowed and wanted. Tell the twist when it comes. Tell the
+  ending in part 3. What you withhold is only TIMING: never announce a beat
+  before its clip; land it on the clip that shows it.
+- Each chunk's line says what is happening in that footage and what it
+  means to the person in it. No line that only informs.
+- {ENDING_RULE}"""
+
+ENDING_RULES = {
+    "cliffhanger": ("The last 2-3 lines are the cliffhanger: the thing that has just gone "
+                    "wrong or the choice now on the table, and one question the viewer cannot "
+                    "leave without answering. Point straight at the next part."),
+    "ending": ("This is the last part: tell the ending, all of it, and let the last 2 lines "
+               "land what it cost and what it meant. One sentence of stillness at the end; "
+               "no moral, no 'and that is why'."),
+}
+
+CLIP_RULES = {
+    "teaser": """CLIP SELECTION RULES:
+- Prefer the moment BEFORE a beat: the reaction without the cause, the
+  establishing wide, the breath before the line.
+- Cut out of scenes early. Leaving the viewer hanging is the point.
+- Never use the film's best shot or best line. Use the second-best.
+- No chunk may show an outcome, a resolution, or a consequence landing.""",
+    "story": """CLIP SELECTION RULES:
+- Pick the moments that CARRY the story: the choice, the blow, the look that
+  answers it. Every chunk should move the story one step.
+- Faces over places. A reaction beats an establishing shot every time.
+- Chunks in story order. The part must read as one continuous telling.
+- Land each beat on the footage that shows it; the narration for a chunk is
+  about what is on screen in that chunk.
+- The last chunk of a part is its cliffhanger (or, in the last part, the
+  ending); spend a full 10-15 s chunk on it.""",
+}
+
+PROMPT_A_STORY = """You are helping build a three-part story retelling of a film for a short-video
+channel. Your only job in this step is to map the story: who, what they want,
+what stops them, where it turns, how it ends. Spoilers are wanted.
+
+Below is a time-indexed digest of the film's subtitles. Runtime: {RUNTIME}.
+
+Return ONLY JSON, no preamble, no markdown fences:
+
+{{
+  "premise": "Two sentences. A person, a want, an obstacle.",
+  "protagonist": "Name and one line: who they are when we meet them.",
+  "want": "What they want, plainly.",
+  "obstacle": "What stands in the way, plainly.",
+  "hook_line": "One sentence that would make a stranger stop scrolling. A
+    person, a choice, a cost. No 'in this film'.",
+  "turning_points": [
+    {{"at": "HH:MM:SS", "what": "One sentence: the event and what it costs
+      someone. 6 to 10 of these, in order, covering the WHOLE film."}}
+  ],
+  "climax_at": "HH:MM:SS",
+  "ending": "What happens at the end and what it means, plainly, 2-3 sentences.",
+  "mood_arc": ["one mood per act, three entries, from: tense, ominous, sad,
+    epic, romantic, eerie, driving, warm, bitter"]
+}}
+
+SUBTITLE DIGEST:
+{DIGEST}
+"""
+
+PROMPT_B_STORY = """You are structuring a three-part story retelling of a film for a short-video
+channel. Each part is {PART_MINUTES} minutes of narration over clips, told by a
+storyteller, not a critic. Spoilers are wanted: the series tells the whole
+film, in order, and part 3 tells the ending.
+
+THE RULE THAT OVERRIDES EVERYTHING: a viewer who watches part 1 must NEED
+part 2. Each of parts 1 and 2 ends on a cliffhanger: the thing that just went
+wrong or the choice now on the table. Part 3 pays everything off.
+
+Story map: {PREMISE}
+Protagonist: {PROTAGONIST}. Wants: {WANT}. Against: {OBSTACLE}.
+Turning points: {TURNING_POINTS}
+Climax at {CLIMAX_AT}. Ending: {ENDING}
+Mood arc: {MOOD_ARC}
+{EXCLUDED}
+
+Return ONLY JSON:
+
+{{
+  "series_title": "...",
+  "parts": [
+    {{
+      "index": 1,
+      "title": "A spoken hook, present tense, under 10 words, a statement not a
+        chapter heading. 'He walked out of prison and straight into a fight'
+        - never 'Part 1', 'The Setup', 'Explained'.",
+      "claim": "2-3 sentences: the stretch of story this part tells, with its
+        turning points named.",
+      "evidence_band": {{"start": "00:00:00", "end": "00:38:00"}},
+      "open_question": "The cliffhanger this part ends on (parts 1 and 2), or
+        for part 3 the last thing the viewer is left holding.",
+      "mood": "one of: tense, ominous, sad, epic, romantic, eerie, driving,
+        warm, bitter"
+    }}
+  ]
+}}
+
+The three evidence_bands cover the film in order, part 3's ends at the film's
+end ({RUNTIME}). Titles must not contain: Explained, Recap, Summary, Part.
+
+SUBTITLE DIGEST:
+{DIGEST}
+"""
+
 RESOLUTION_PHRASES = (
     "then he", "then she", "then they", "turns out", "finally", "ends with", "we learn",
     "it is revealed", "it's revealed", "in the end", "the twist is", "dies", "kills",
@@ -234,12 +364,7 @@ BUDGET - these are hard limits, not targets:
 - Nothing after {WALL}
 - Times are seconds from the start of the film.
 
-CLIP SELECTION RULES:
-- Prefer the moment BEFORE a beat: the reaction without the cause, the
-  establishing wide, the breath before the line.
-- Cut out of scenes early. Leaving the viewer hanging is the point.
-- Never use the film's best shot or best line. Use the second-best.
-- No chunk may show an outcome, a resolution, or a consequence landing.
+{CLIP_RULES}
 
 {NARRATION_RULES}
 
@@ -311,13 +436,31 @@ def _ranges_text(ranges):
         for r in ranges)
 
 
-def build_prompt_a(cues, duration):
-    return PROMPT_A.format(RUNTIME=fp.format_timestamp(duration, hours=True),
+def build_prompt_a(cues, duration, mode="teaser"):
+    template = PROMPT_A_STORY if mode == "story" else PROMPT_A
+    return template.format(RUNTIME=fp.format_timestamp(duration, hours=True),
                            DIGEST=fp.digest(cues))
 
 
-def build_prompt_b(cues, duration, spoilers, protected, target=PART_TARGET_SECONDS):
-    """``spoilers``: validated pass-A dict; ``protected``: the unioned ranges."""
+def build_prompt_b(cues, duration, spoilers, protected, target=PART_TARGET_SECONDS, mode="teaser"):
+    """``spoilers``: validated pass-A dict (a spoiler map in teaser mode, a
+    story map in story mode); ``protected``: the unioned ranges."""
+    if mode == "story":
+        tps = spoilers.get("turning_points") or []
+        excluded = ""
+        manual = [r for r in protected if r.get("tier") == "manual"]
+        if manual:
+            excluded = "Never use these ranges (the user excluded them): " + _ranges_text(manual)
+        return PROMPT_B_STORY.format(
+            PART_MINUTES=f"{target / 60:.1f}".rstrip("0").rstrip("."),
+            PREMISE=spoilers.get("premise", ""), PROTAGONIST=spoilers.get("protagonist", ""),
+            WANT=spoilers.get("want", ""), OBSTACLE=spoilers.get("obstacle", ""),
+            TURNING_POINTS="; ".join(f"{t.get('at')}: {t.get('what')}" for t in tps) or "(none given)",
+            CLIMAX_AT=spoilers.get("climax_at") or "?", ENDING=spoilers.get("ending", ""),
+            MOOD_ARC=", ".join(spoilers.get("mood_arc") or []) or "?",
+            EXCLUDED=excluded, RUNTIME=fp.format_timestamp(duration, hours=True),
+            DIGEST=fp.digest(cues),
+        )
     wall = wall_seconds(duration)
     return PROMPT_B.format(
         PART_MINUTES=f"{target / 60:.1f}".rstrip("0").rstrip("."),
@@ -333,28 +476,41 @@ def build_prompt_b(cues, duration, spoilers, protected, target=PART_TARGET_SECON
 
 
 def build_prompt_c(cues, duration, part, protected, target=PART_TARGET_SECONDS, speed=SPEED,
-                   style="story"):
+                   style="story", mode="teaser"):
     """``part``: one validated pass-B part (``Part`` or dict). ``style`` picks
     the narrator's register (NARRATION_STYLES); the part's ``mood`` from
-    Pass B shapes the story voice."""
+    Pass B shapes the story voice; ``mode`` (RECAP_MODES) decides whether the
+    story is told in full or withheld."""
     part = part if isinstance(part, Part) else Part.model_validate(part)
     b_start, b_end = part.band_seconds()
-    wall = wall_seconds(duration)
+    full = mode == "story"
+    wall = float(duration) if full else wall_seconds(duration)
     b_end = min(b_end, wall)
     style = style if style in NARRATION_STYLES else "story"
     mood = (part.mood or "").lower() if part.mood in MOODS else "tense"
-    rules = NARRATION_RULES[style].format(MOOD=mood, MOOD_GUIDE=MOOD_GUIDE[mood])
+    if full:
+        ending = ENDING_RULES["ending" if part.index >= 3 else "cliffhanger"]
+        rules = NARRATION_RULES_FULL.format(MOOD=mood, MOOD_GUIDE=MOOD_GUIDE[mood], ENDING_RULE=ending)
+        withheld = "nothing. Tell it all; only the timing is yours to hold."
+        cannot = part.cannot_deliver or "the two hours of being there"
+        ranges = [r for r in protected if r.get("tier") == "manual"]
+    else:
+        rules = NARRATION_RULES[style].format(MOOD=mood, MOOD_GUIDE=MOOD_GUIDE[mood])
+        withheld = part.withheld
+        cannot = part.cannot_deliver or "the experience of not knowing"
+        ranges = protected
     return PROMPT_C.format(
         N=part.index, TITLE=part.title, CLAIM=part.claim,
-        OPEN_QUESTION=part.open_question, WITHHELD=part.withheld,
-        CANNOT_DELIVER=part.cannot_deliver or "the experience of not knowing",
+        OPEN_QUESTION=part.open_question, WITHHELD=withheld,
+        CANNOT_DELIVER=cannot,
         MOOD=f"{mood} ({MOOD_GUIDE[mood]})", NARRATION_RULES=rules,
+        CLIP_RULES=CLIP_RULES["story" if full else "teaser"],
         TARGET=int(target), SPEED=speed, FOOTAGE_BUDGET=footage_budget(target, speed),
         CHUNKS_MIN=CHUNKS_RANGE[0], CHUNKS_MAX=CHUNKS_RANGE[1],
         CHUNK_MIN=int(CHUNK_SECONDS_RANGE[0]), CHUNK_MAX=int(CHUNK_SECONDS_RANGE[1]),
         WORDS=WORDS_PER_PART, WORDS_PER_CHUNK=round(WORDS_PER_PART / 18),
         EVIDENCE_BAND=f"{fp.format_timestamp(b_start, hours=True)}-{fp.format_timestamp(b_end, hours=True)}",
-        PROTECTED_RANGES=_ranges_text(protected),
+        PROTECTED_RANGES=_ranges_text(ranges),
         WALL=fp.format_timestamp(wall, hours=True),
         BAND_DIGEST=fp.digest(cues, start=b_start, end=b_end),
     )
@@ -381,13 +537,31 @@ class SpoilerMap(BaseModel):
     twist_effect: Optional[str] = None
 
 
+class TurningPoint(BaseModel):
+    at: str | float
+    what: str = ""
+
+
+class StoryMap(BaseModel):
+    """Pass A in story mode: the spine of the whole film, spoilers included."""
+    premise: str = ""
+    protagonist: str = ""
+    want: str = ""
+    obstacle: str = ""
+    hook_line: str = ""
+    turning_points: List[TurningPoint] = Field(default_factory=list)
+    climax_at: Optional[str | float] = None
+    ending: str = ""
+    mood_arc: List[str] = Field(default_factory=list)
+
+
 class Part(BaseModel):
     index: int
     title: str
     claim: str
     evidence_band: Range
-    open_question: str
-    withheld: str
+    open_question: str = ""
+    withheld: str = ""
     cannot_deliver: str = ""
     mood: str = ""
 
@@ -448,8 +622,12 @@ def normalize_ranges(ranges, duration):
     return sorted(out, key=lambda r: r["start"])
 
 
-def union_protected(spoilers, duration, manual=None):
-    """Pass A ranges + the 75% wall + the user's own exclusions, merged."""
+def union_protected(spoilers, duration, manual=None, mode="teaser"):
+    """Pass A ranges + the 75% wall + the user's own exclusions, merged.
+    In story mode there is no wall and no spoiler map: only what the user
+    excluded by hand is off limits."""
+    if mode == "story":
+        return normalize_ranges(manual or [], duration)
     ranges = normalize_ranges(spoilers.get("protected") if isinstance(spoilers, dict) else
                               getattr(spoilers, "protected", []), duration)
     ranges += normalize_ranges(manual or [], duration)
@@ -477,7 +655,32 @@ def _hits(start, end, ranges):
 
 # --- validation -------------------------------------------------------------
 
-def validate_spoilers(data, duration):
+def validate_spoilers(data, duration, mode="teaser"):
+    """Pass A back from the chat: a spoiler map (teaser) or a story map
+    (story). Returns ``(model | None, errors)``."""
+    if mode == "story":
+        try:
+            sm = StoryMap.model_validate(data)
+        except ValidationError as exc:
+            return None, _schema_errors(exc)
+        errors = []
+        if len(sm.turning_points) < 3:
+            errors.append(_err("turning_points", f"{len(sm.turning_points)} turning points; the whole film needs at least 3"))
+        for i, tp in enumerate(sm.turning_points):
+            try:
+                at = fp.parse_timestamp(tp.at)
+                if at > duration + 1:
+                    errors.append(_err("turning_points", f"turning point {i} is after the film ends"))
+            except fp.SubtitleError as exc:
+                errors.append(_err("turning_points", f"turning point {i}: {exc}"))
+        if not sm.ending.strip():
+            errors.append(_err("ending", "ending is empty; in story mode the ending is told"))
+        if not sm.hook_line.strip():
+            errors.append(_err("hook", "hook_line is empty; it opens part 1"))
+        for m in sm.mood_arc:
+            if m not in MOODS:
+                errors.append(_err("mood", f'mood "{m}" is not one of {", ".join(MOODS)}'))
+        return sm, errors
     try:
         sm = SpoilerMap.model_validate(data)
     except ValidationError as exc:
@@ -503,24 +706,31 @@ def validate_spoilers(data, duration):
     return sm, errors
 
 
-def validate_structure(data, duration, protected):
+STORY_BANNED_TITLE_WORDS = ("explained", "recap", "summary", "part")
+
+
+def validate_structure(data, duration, protected, mode="teaser"):
     try:
         st = Structure.model_validate(data)
     except ValidationError as exc:
         return None, _schema_errors(exc)
+    full = mode == "story"
     errors = []
     if len(st.parts) != 3:
         errors.append(_err("parts", f"{len(st.parts)} parts; the series has three"))
-    wall = wall_seconds(duration)
+    wall = float(duration) if full else wall_seconds(duration)
     withhelds = {}
+    banned_words = STORY_BANNED_TITLE_WORDS if full else BANNED_TITLE_WORDS
     for p in st.parts:
         low = p.title.lower()
-        for banned in BANNED_TITLE_WORDS:
+        for banned in banned_words:
             if re.search(r"\b" + re.escape(banned) + r"\b", low):
                 errors.append(_err("title_banned", f'title "{p.title}" contains "{banned}"', part=p.index))
-        for field in ("claim", "open_question", "withheld"):
+        required = ("claim", "open_question") if full else ("claim", "open_question", "withheld")
+        for field in required:
             if not getattr(p, field).strip():
-                errors.append(_err("missing", f"{field} is empty", part=p.index))
+                what = "cliffhanger (open_question)" if full and field == "open_question" else field
+                errors.append(_err("missing", f"{what} is empty", part=p.index))
         try:
             s, e = p.band_seconds()
             if e <= s:
@@ -530,6 +740,8 @@ def validate_structure(data, duration, protected):
                                    f"{fp.format_timestamp(wall, hours=True)}", part=p.index))
         except fp.SubtitleError as exc:
             errors.append(_err("band", str(exc), part=p.index))
+        if full:
+            continue  # a story series withholds nothing and its cliffhangers ARE about the plot
         key = re.sub(r"\W+", " ", p.withheld.lower()).strip()
         if key in withhelds:
             errors.append(_err("withheld_dup", f"withheld repeats part {withhelds[key]}: the arc has not been thought about",
@@ -537,6 +749,14 @@ def validate_structure(data, duration, protected):
         withhelds.setdefault(key, p.index)
         if re.search(r"\bwhat happens next\b", p.open_question.lower()):
             errors.append(_err("question_plot", "open_question is about the plot, not the method", part=p.index))
+    if full and len(st.parts) == 3:
+        try:
+            last_end = st.parts[-1].band_seconds()[1]
+            if last_end < float(duration) * 0.9:
+                errors.append(_err("band_end", f"part 3's band ends at {fp.format_timestamp(last_end, hours=True)}; "
+                                   "in story mode the series tells the ending, so it must reach the film's end", part=3))
+        except fp.SubtitleError:
+            pass
     return st, errors
 
 
@@ -554,7 +774,7 @@ def lint_craft(text):
 
 
 def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, speed=SPEED,
-                  style="story"):
+                  style="story", mode="teaser"):
     """Returns ``(PartPlan | None, errors, warnings)``. Errors block the
     render; warnings (the lint) are for the user to read. In the ``story``
     style, lecture vocabulary is warned per chunk (``craft_language``) and a
@@ -566,12 +786,16 @@ def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, s
     part = part if isinstance(part, Part) else Part.model_validate(part)
     errors, warnings = [], []
     craft_chunks = 0
+    full = mode == "story"
+    if full:
+        # Story mode: no wall, spoilers wanted; only the user's own exclusions bind.
+        protected = [r for r in protected if r.get("tier") == "manual"]
     if plan.index != part.index:
         errors.append(_err("index", f"plan is for part {plan.index}, expected {part.index}"))
     n = len(plan.chunks)
     if not CHUNKS_RANGE[0] <= n <= CHUNKS_RANGE[1]:
         errors.append(_err("chunk_count", f"{n} chunks; need {CHUNKS_RANGE[0]}-{CHUNKS_RANGE[1]}"))
-    wall = wall_seconds(duration)
+    wall = float(duration) if full else wall_seconds(duration)
     b_start, b_end = part.band_seconds()
     total = 0.0
     words = 0
@@ -606,8 +830,9 @@ def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, s
         if not c.narration.strip():
             errors.append(_err("silent", "chunk has no narration; silent footage is a failure", chunk=i))
         words += len(c.narration.split())
-        for hit in lint_narration(c.narration):
-            warnings.append(_err("resolution_language", f'"{hit}" in narration', chunk=i))
+        if not full:
+            for hit in lint_narration(c.narration):
+                warnings.append(_err("resolution_language", f'"{hit}" in narration', chunk=i))
         if style == "story":
             craft = lint_craft(c.narration)
             if craft:
@@ -641,12 +866,13 @@ def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, s
                              f"story in the part's mood ({part.mood or 'tense'}), no camera, no 'notice'."))
     check = plan.spoiler_self_check.strip().lower().rstrip(".!")
     # "Nothing." is the failure; "Nothing about who is behind the door" is
-    # the answer the prompt asked for.
-    if check in NOTHING_WORDS or (check.startswith("nothing") and len(check.split()) <= 2):
+    # the answer the prompt asked for. Story mode withholds nothing.
+    if not full and (check in NOTHING_WORDS or (check.startswith("nothing") and len(check.split()) <= 2)):
         errors.append(_err("self_check", "spoiler_self_check is empty or 'nothing': the part is wrong"))
-    for line in plan.closing_lines:
-        for hit in lint_narration(line):
-            warnings.append(_err("resolution_language", f'"{hit}" in a closing line'))
+    if not full:
+        for line in plan.closing_lines:
+            for hit in lint_narration(line):
+                warnings.append(_err("resolution_language", f'"{hit}" in a closing line'))
     return plan, errors, warnings
 
 

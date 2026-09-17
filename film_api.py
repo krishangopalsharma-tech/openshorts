@@ -52,7 +52,15 @@ RECAP_DEFAULTS = {
     # Narrator register for Pass C: "story" (from inside the moment, in the
     # part's mood) or "essay" (the original video-essay voice).
     "narration_style": "story",
+    # What the series is for: "story" tells the whole film with cliffhangers
+    # and the ending (spoilers wanted); "teaser" is the spoiler-free design.
+    "recap_mode": "story",
 }
+
+
+def _mode(sess):
+    m = (sess.get("settings") or {}).get("recap_mode", "story")
+    return m if m in mr.RECAP_MODES else "story"
 _RATIO_TO_FORMAT = {"9:16": "vertical", "1:1": "square", "vertical": "vertical", "square": "square"}
 
 
@@ -332,7 +340,12 @@ def _recap(sess):
 
 def _protected(sess):
     rc = _recap(sess)
-    return mr.union_protected(rc.get("spoilers") or {}, sess["duration"], manual=rc.get("manual_excluded") or [])
+    return mr.union_protected(rc.get("spoilers") or {}, sess["duration"], manual=rc.get("manual_excluded") or [],
+                              mode=_mode(sess))
+
+
+def _wall(sess):
+    return None if _mode(sess) == "story" else mr.wall_seconds(sess["duration"])
 
 
 def _part(sess, index):
@@ -354,25 +367,27 @@ async def recap_prompt(sid: str, request: Request, part: Optional[int] = None):
     rc = _recap(sess)
     cues = _cues(sess)
     protected = _protected(sess)
+    mode = _mode(sess)
     if which == "a":
-        text = mr.build_prompt_a(cues, sess["duration"])
+        text = mr.build_prompt_a(cues, sess["duration"], mode=mode)
     elif which == "b":
         if not rc.get("spoilers"):
-            raise HTTPException(status_code=400, detail="paste the pass-A spoiler map first")
+            raise HTTPException(status_code=400, detail="paste the pass-A "
+                                + ("story map" if mode == "story" else "spoiler map") + " first")
         text = mr.build_prompt_b(cues, sess["duration"], rc["spoilers"], protected,
-                                 target=float(sess["settings"]["target_seconds"]))
+                                 target=float(sess["settings"]["target_seconds"]), mode=mode)
     elif which == "c":
         if part is None:
             raise HTTPException(status_code=400, detail="pass=c needs ?part=N")
         text = mr.build_prompt_c(cues, sess["duration"], _part(sess, part), protected,
                                  target=float(sess["settings"]["target_seconds"]), speed=float(sess["settings"]["speed"]),
-                                 style=sess["settings"].get("narration_style", "story"))
+                                 style=sess["settings"].get("narration_style", "story"), mode=mode)
     else:
         raise HTTPException(status_code=400, detail="pass must be a, b or c")
     if request.query_params.get("format") == "text":
         return PlainTextResponse(text)
     return {"pass": which, "part": part, "prompt": text, "words": len(text.split()),
-            "protected": protected, "wall": mr.wall_seconds(sess["duration"])}
+            "protected": protected, "wall": _wall(sess), "mode": mode}
 
 
 @router.post("/api/movierecap/spoilers/{sid}")
@@ -380,18 +395,20 @@ async def recap_spoilers(sid: str, request: Request):
     _guard()
     data = _pasted(await _body(request))
     sess = _load(sid)
-    sm, errors = mr.validate_spoilers(data, sess["duration"])
+    mode = _mode(sess)
+    sm, errors = mr.validate_spoilers(data, sess["duration"], mode=mode)
     if sm is None:
         return {"ok": False, "errors": errors, "errors_text": mr.format_errors(errors)}
     if not errors:
         def fn(s):
             s["recap"]["spoilers"] = sm.model_dump()
-            s["recap"]["protected"] = mr.union_protected(sm.model_dump(), s["duration"], s["recap"].get("manual_excluded"))
+            s["recap"]["protected"] = mr.union_protected(sm.model_dump(), s["duration"],
+                                                         s["recap"].get("manual_excluded"), mode=mode)
             s["recap"]["structure"] = None
             s["recap"]["plans"] = {}
         sess = _update(sid, fn)
     return {"ok": not errors, "errors": errors, "errors_text": mr.format_errors(errors),
-            "protected": sess["recap"].get("protected"), "wall": mr.wall_seconds(sess["duration"])}
+            "protected": sess["recap"].get("protected"), "wall": _wall(sess), "mode": mode}
 
 
 @router.post("/api/movierecap/exclusions/{sid}")
@@ -404,9 +421,11 @@ async def recap_exclusions(sid: str, request: Request):
     sess = _load(sid)
     clean = mr.normalize_ranges(ranges, sess["duration"])
 
+    mode = _mode(sess)
+
     def fn(s):
         s["recap"]["manual_excluded"] = clean
-        s["recap"]["protected"] = mr.union_protected(s["recap"].get("spoilers") or {}, s["duration"], clean)
+        s["recap"]["protected"] = mr.union_protected(s["recap"].get("spoilers") or {}, s["duration"], clean, mode=mode)
     sess = _update(sid, fn)
     return {"manual_excluded": clean, "protected": sess["recap"]["protected"]}
 
@@ -416,7 +435,7 @@ async def recap_structure(sid: str, request: Request):
     _guard()
     data = _pasted(await _body(request))
     sess = _load(sid)
-    st, errors = mr.validate_structure(data, sess["duration"], _protected(sess))
+    st, errors = mr.validate_structure(data, sess["duration"], _protected(sess), mode=_mode(sess))
     if st is None:
         return {"ok": False, "errors": errors, "errors_text": mr.format_errors(errors)}
     if not errors:
@@ -437,18 +456,20 @@ async def recap_plan(sid: str, part: int, request: Request):
     sess = _load(sid)
     p = _part(sess, part)
     protected = _protected(sess)
+    mode = _mode(sess)
     plan, errors, warnings = mr.validate_plan(data, p, sess["duration"], protected,
                                               target=float(sess["settings"]["target_seconds"]),
                                               speed=float(sess["settings"]["speed"]),
-                                              style=sess["settings"].get("narration_style", "story"))
+                                              style=sess["settings"].get("narration_style", "story"), mode=mode)
     if plan is None:
         return {"ok": False, "errors": errors, "warnings": [], "errors_text": mr.format_errors(errors),
                 "forceable": False}
     forced = bool(errors) and force
     if forced:
-        # Forcing never overrides the spoiler wall: a chunk inside a protected
-        # range or past 75% is dropped, not rendered. That rule is the module.
-        wall = mr.wall_seconds(sess["duration"])
+        # Forcing never overrides the spoiler wall (teaser mode): a chunk inside
+        # a protected range or past 75% is dropped, not rendered. In story mode
+        # only the user's own exclusions bind.
+        wall = float(sess["duration"]) if mode == "story" else mr.wall_seconds(sess["duration"])
         kept = [c for c in plan.chunks
                 if c.end > c.start and c.end <= wall + 1e-6
                 and not any(r["tier"] != "wall" and c.start < r["end"] and c.end > r["start"] for r in protected)]

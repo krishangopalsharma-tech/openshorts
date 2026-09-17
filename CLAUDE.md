@@ -90,9 +90,18 @@ answers describe the paid product as free.
 ### Movie Recap (`film_prep.py`, `film_render.py`, `movierecap.py`, `film_voice.py`, `film_api.py`)
 
 A self-host-only tab (hidden in cloud mode through `/api/config.filmModules`)
-that cuts a feature film into a three-part appetite-building series: each
-part argues one claim about how the film is built, every payoff is withheld,
-nothing after 75% of the runtime is ever used. Full design in
+that cuts a feature film into a three-part narrated series. Two modes
+(`recap_mode`): **`story`** (the default since 18-sep-2026): the whole film
+in order, a cliffhanger between parts, the ending told in part 3, spoilers
+wanted, because a viewer who loved the telling goes to the film and a
+viewer who was teased scrolls on; **`teaser`**: the original appetite-
+building essay, every payoff withheld, nothing after 75% of the runtime.
+The mode changes Pass A (story map vs spoiler map), Pass B (cliffhangers vs
+withheld promises), Pass C (tell it all vs withhold), the protected ranges
+(only the user's exclusions vs spoiler map + wall) and the lint (no
+resolution-language warnings in story mode; the lecture-word lint stays).
+Library defaults keep `teaser` so the original tests keep their meaning;
+`film_api` defaults sessions to `story`. Full design in
 `docs/film-modules-plan.md`; the rules that cost something to learn:
 
 - **The SRT is the transcript.** A film arrives with its subtitle file, so

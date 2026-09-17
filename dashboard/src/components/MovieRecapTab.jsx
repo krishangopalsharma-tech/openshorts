@@ -109,10 +109,26 @@ export default function MovieRecapTab() {
             narrated by you, rendered here with the original soundtrack muted.
           </p>
         </header>
-        <StepIndicator steps={STEPS} current={step} onStepClick={(i) => { if (session || i === 0) setStep(i); }} />
+        <StepIndicator
+          steps={(session?.settings?.recap_mode || 'story') === 'story' ? STEPS.map((s) => (s === 'Spoiler map' ? 'Story map' : s)) : STEPS}
+          current={step} onStepClick={(i) => { if (session || i === 0) setStep(i); }} />
 
         {step === 0 && (
           <SessionSetup kind="recap" session={session} onSession={onSession} settings={{}}>
+            {session && (
+              <div className="border border-rule rounded-card p-4 space-y-2">
+                <p className="text-xs uppercase tracking-wider text-muted">series type</p>
+                <SegmentedControl size="sm" value={session.settings?.recap_mode || 'story'}
+                  onChange={async (v) => {
+                    try { setSession(await filmJson(`/api/film/session/${session.id}/settings`, { json: { recap_mode: v } })); } catch (e) { setError(e.message); }
+                  }}
+                  options={[
+                    { value: 'story', label: 'full story', hint: 'whole film in three parts, cliffhangers, the ending told' },
+                    { value: 'teaser', label: 'no spoilers', hint: 'appetite-building essay, nothing after 75%' },
+                  ]} />
+                <p className="readout">pick before pass A: it changes what the chat is asked for and what the validator enforces.</p>
+              </div>
+            )}
             {session && (
               <div className="border border-rule rounded-card p-4 space-y-2">
                 <p className="text-xs uppercase tracking-wider text-muted">narration voice</p>
@@ -131,13 +147,15 @@ export default function MovieRecapTab() {
           </SessionSetup>
         )}
 
-        {session && step >= 1 && <ProtectedBar duration={session.duration} ranges={protectedRanges} />}
+        {session && step >= 1 && <ProtectedBar duration={session.duration} ranges={protectedRanges} mode={session.settings?.recap_mode || 'story'} />}
 
         {step === 1 && session && (
           <div className="space-y-4">
             <PromptPastePanel
-              title="Pass A · spoiler map"
-              hint="What must never be shown or described. Over-protecting costs nothing."
+              title={(session.settings?.recap_mode || 'story') === 'story' ? 'Pass A · story map' : 'Pass A · spoiler map'}
+              hint={(session.settings?.recap_mode || 'story') === 'story'
+                ? 'Who, what they want, what stops them, where it turns, how it ends. Spoilers wanted.'
+                : 'What must never be shown or described. Over-protecting costs nothing.'}
               promptName={`${session.title}-pass-a.txt`}
               loadPrompt={() => filmJson(`/api/movierecap/prompt/${session.id}?pass=a`)}
               submit={(text) => filmJson(`/api/movierecap/spoilers/${session.id}`, { json: { text } })}
@@ -265,7 +283,7 @@ export default function MovieRecapTab() {
   );
 }
 
-function ProtectedBar({ duration, ranges }) {
+function ProtectedBar({ duration, ranges, mode = 'story' }) {
   return (
     <div>
       <div className="relative h-5 rounded bg-ok/20 overflow-hidden border border-rule">
@@ -275,7 +293,11 @@ function ProtectedBar({ duration, ranges }) {
             style={{ left: `${(r.start / duration) * 100}%`, width: `${((r.end - r.start) / duration) * 100}%` }} />
         ))}
       </div>
-      <p className="readout mt-1">usable footage in green · protected ranges and the 75% wall in red · {fmtTime(duration)} total</p>
+      <p className="readout mt-1">
+        {mode === 'story'
+          ? `full story: the whole film is usable${ranges.length ? ', your exclusions in red' : ''} · ${fmtTime(duration)} total`
+          : `usable footage in green · protected ranges and the 75% wall in red · ${fmtTime(duration)} total`}
+      </p>
     </div>
   );
 }

@@ -394,6 +394,19 @@ third act.
   ~25 per chunk, every chunk narrated, `shows`, `withholds`,
   `closing_lines`, `spoiler_self_check`. Band digest only.
 
+**Recap mode (18-sep-2026).** The channel does not want the teaser: "I
+don't care about spoiling the movie, I need an amazing story; if people like
+the story they will watch the movie." So `recap_mode` `story` is the API
+default: Pass A returns a **story map** (`StoryMap`: premise, protagonist,
+want, obstacle, hook line, 6-10 turning points, climax, ending, mood arc),
+Pass B three parts covering the film in order with a **cliffhanger** each
+and part 3 reaching the end, Pass C tells it all in the storyteller voice
+(`NARRATION_RULES_FULL`, `CLIP_RULES["story"]`) with part 3's ending rule.
+No wall, no spoiler map; only the user's own exclusions bind. The
+resolution-language lint is off in story mode, the lecture-word lint stays.
+`teaser` keeps everything below as written. Library function defaults stay
+`teaser` so the original tests keep their meaning.
+
 **Narration style (18-sep-2026).** The first real scripts came out as a
 lecture ("watch the lens", "the camera holds this kindness like an exhibit",
 eleven "the film"s in one part): "discuss craft, not events" taken literally.

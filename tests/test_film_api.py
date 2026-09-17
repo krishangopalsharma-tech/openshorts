@@ -49,6 +49,9 @@ def local(tmp_path, monkeypatch):
 
 
 def _session(local, probe=False, **settings):
+    # The fixtures below (SPOILERS, STRUCTURE, _recap_plan) are teaser-shaped;
+    # the API default is "story", so tests name the mode they mean.
+    settings.setdefault("recap_mode", "teaser")
     r = local["client"].post("/api/film/session", json={
         "kind": "recap", "video_path": local["video"], "subtitle_path": local["srt"],
         "settings": settings, "probe_offset": probe})
@@ -173,6 +176,32 @@ def test_recap_flow(local, monkeypatch):
     assert c.post(f"/api/movierecap/render/{sid}", json={"parts": [3]}).status_code == 400
     # A session file is never a deliverable.
     assert c.get(f"/film/{sid}/session.json").status_code == 404
+
+
+def test_story_mode_is_the_default_and_drops_the_wall(local):
+    from test_movierecap import STORY_MAP, STORY_STRUCTURE
+    c = local["client"]
+    r = c.post("/api/film/session", json={"kind": "recap", "video_path": local["video"],
+                                          "subtitle_path": local["srt"], "probe_offset": False})
+    sid = r.json()["id"]
+    assert r.json()["settings"]["recap_mode"] == "story"
+    a = c.get(f"/api/movierecap/prompt/{sid}?pass=a").json()
+    assert a["mode"] == "story" and a["wall"] is None and "Spoilers are wanted" in a["prompt"]
+    r = c.post(f"/api/movierecap/spoilers/{sid}", json=STORY_MAP).json()
+    assert r["ok"] is True and r["protected"] == [] and r["wall"] is None
+    r = c.post(f"/api/movierecap/structure/{sid}", json=STORY_STRUCTURE).json()
+    assert r["ok"] is True
+    cprompt = c.get(f"/api/movierecap/prompt/{sid}?pass=c&part=3").json()
+    assert "tell the ending, all of it" in cprompt["prompt"]
+    # A part 3 plan deep past 75% is accepted; the wall does not exist here.
+    plan = _recap_plan(index=3, start=5500.0, gap=30.0)
+    plan["spoiler_self_check"] = ""
+    r = c.post(f"/api/movierecap/plan/{sid}/3", json=plan).json()
+    assert r["ok"] is True, r["errors_text"]
+    # Switching to teaser afterwards makes the same session refuse it.
+    c.post(f"/api/film/session/{sid}/settings", json={"recap_mode": "teaser"})
+    r = c.post(f"/api/movierecap/plan/{sid}/3", json=plan).json()
+    assert r["ok"] is False and any(e["code"] == "wall" for e in r["errors"])
 
 
 def test_recap_plan_force_never_crosses_the_wall(local):

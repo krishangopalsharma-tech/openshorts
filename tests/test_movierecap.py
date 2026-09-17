@@ -214,6 +214,97 @@ def test_story_style_warns_on_lecture_vocabulary_but_never_fails():
     assert [w for w in w2 if w["code"] == "craft_language" and "chunk" not in w] == []
 
 
+# --- story mode: the whole film, cliffhangers, the ending told --------------
+
+STORY_MAP = {
+    "premise": "A violent junkie walks out of prison and finds God, then a war.",
+    "protagonist": "Sam Childers, fresh out of prison, angry at everyone.",
+    "want": "To matter to someone.",
+    "obstacle": "Himself, then the LRA.",
+    "hook_line": "He traded a shotgun for a Bible, then picked the gun back up.",
+    "turning_points": [
+        {"at": "00:12:00", "what": "He stabs a man in a fight and drives home shaking."},
+        {"at": "00:38:00", "what": "He stands up in church and gives himself away."},
+        {"at": "01:05:00", "what": "He finds the children in the grass."},
+        {"at": "01:40:00", "what": "He loses the boy he promised to save."},
+        {"at": "01:58:00", "what": "He nearly walks away from all of it."},
+    ],
+    "climax_at": "01:58:00",
+    "ending": "He goes back. The orphanage stands. He is still fighting.",
+    "mood_arc": ["bitter", "driving", "sad"],
+}
+STORY_STRUCTURE = {
+    "series_title": "The preacher with a machine gun",
+    "parts": [
+        {"index": 1, "title": "He walked out of prison and straight into a fight", "claim": "From the gate to the first kill.",
+         "evidence_band": {"start": "00:00:00", "end": "00:40:00"}, "open_question": "He is standing in a church with blood on his hands. Now what?", "mood": "bitter"},
+        {"index": 2, "title": "He built a church, then bought a gun", "claim": "From the sermon to the grass.",
+         "evidence_band": {"start": "00:40:00", "end": "01:30:00"}, "open_question": "The boy is gone and Sam is holding the rifle.", "mood": "driving"},
+        {"index": 3, "title": "The night he almost quit", "claim": "From the loss to the end.",
+         "evidence_band": {"start": "01:30:00", "end": "02:00:00"}, "open_question": "What it cost him to go back.", "mood": "sad"},
+    ],
+}
+
+
+def test_story_mode_prompts_ask_for_the_whole_film():
+    a = mr.build_prompt_a(CUES, DURATION, mode="story")
+    assert "Spoilers are wanted" in a and '"turning_points"' in a and '"ending"' in a
+    assert "spoiler-free" not in a
+    sm, errors = mr.validate_spoilers(STORY_MAP, DURATION, mode="story")
+    assert errors == [] and sm.hook_line.startswith("He traded")
+    protected = mr.union_protected(STORY_MAP, DURATION, mode="story")
+    assert protected == []  # no wall, no spoiler map
+    b = mr.build_prompt_b(CUES, DURATION, STORY_MAP, protected, mode="story")
+    assert "part 3 tells the ending" in b and "cliffhanger" in b
+    assert "01:58:00: He nearly walks away" in b and "bitter, driving, sad" in b
+    assert "Nothing from after" not in b
+    # The digest covers the whole film in story mode (cue 300 sits at 6005 s).
+    assert "number 300 here" in b
+    st, errors = mr.validate_structure(STORY_STRUCTURE, DURATION, protected, mode="story")
+    assert errors == []
+    c = mr.build_prompt_c(CUES, DURATION, st.parts[1], protected, mode="story")
+    assert "telling the whole story" in c and "Spoilers are allowed and wanted" in c
+    assert "The last 2-3 lines are the cliffhanger" in c
+    assert "Never from: (none)" in c and "Nothing after 02:00:00" in c
+    assert "No chunk may show an outcome" not in c and "Faces over places" in c
+    c3 = mr.build_prompt_c(CUES, DURATION, st.parts[2], protected, mode="story")
+    assert "tell the ending, all of it" in c3
+
+
+def test_story_mode_structure_rules():
+    bad = {"parts": [
+        dict(STORY_STRUCTURE["parts"][0], title="Part 1 Explained", open_question=""),
+        STORY_STRUCTURE["parts"][1],
+        dict(STORY_STRUCTURE["parts"][2], evidence_band={"start": "01:30:00", "end": "01:40:00"}),
+    ]}
+    st, errors = mr.validate_structure(bad, DURATION, [], mode="story")
+    codes = {e["code"] for e in errors}
+    assert {"title_banned", "missing", "band_end"} <= codes
+    assert not any(e["code"] in ("withheld_dup", "question_plot", "band_wall") for e in errors)
+    # Teaser words like "Ending" are fine in a story title; withheld is optional.
+    ok = {"parts": [dict(p, title=p["title"] + " to the ending") for p in STORY_STRUCTURE["parts"]]}
+    st, errors = mr.validate_structure(ok, DURATION, [], mode="story")
+    assert errors == []
+
+
+def test_story_mode_plan_allows_the_ending_and_spoiler_words():
+    st, _ = mr.validate_structure(STORY_STRUCTURE, DURATION, [], mode="story")
+    data = _plan(index=3, start=5500.0, gap=30.0)   # deep past the 75% wall
+    data["chunks"][2]["narration"] = "Then he finally dies for them, and in the end it turns out " + "x " * 15
+    data["spoiler_self_check"] = "nothing"
+    plan, errors, warnings = mr.validate_plan(data, st.parts[2], DURATION, [], mode="story")
+    assert errors == [], mr.format_errors(errors)
+    assert not [w for w in warnings if w["code"] == "resolution_language"]
+    # Craft lint still applies: story mode is storytelling, not a lecture.
+    data["chunks"][4]["narration"] = "Notice how the camera holds the film's frame " + "x " * 19
+    _, _, warnings = mr.validate_plan(data, st.parts[2], DURATION, [], mode="story")
+    assert any(w["code"] == "craft_language" and w.get("chunk") == 4 for w in warnings)
+    # The user's own exclusions still bind.
+    manual = mr.union_protected({}, DURATION, manual=[{"start": 5540, "end": 5550}], mode="story")
+    _, errors, _ = mr.validate_plan(data, st.parts[2], DURATION, manual, mode="story")
+    assert any(e["code"] == "protected" and e["chunk"] == 1 for e in errors)
+
+
 def test_lint_narration_matches_whole_words_only():
     assert mr.lint_narration("The friendliness of the frame") == []
     assert "in the end" in mr.lint_narration("In the end, nothing.")
