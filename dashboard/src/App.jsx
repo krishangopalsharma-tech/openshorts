@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard, Lock } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard, Lock, Film, BookOpen } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
 import CompilationTab from './components/CompilationTab';
+import MovieShortsTab from './components/MovieShortsTab';
+import MovieRecapTab from './components/MovieRecapTab';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 // import Gallery from './components/Gallery';
@@ -201,7 +203,7 @@ const pollJob = async (jobId) => {
 
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm } = useAuth();
+  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, filmModules } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
   const [showPlanChoice, setShowPlanChoice] = useState(false);
@@ -259,9 +261,25 @@ function App() {
   const [browseBusy, setBrowseBusy] = useState(false);
   // clips.json is small, so its picker reads the CONTENTS instead: no path
   // needed, and it works the same whether the file sits next to the video or
-  // in the downloads folder.
+  // in the downloads folder. The same text box takes a reply pasted straight
+  // out of the chat, which removes the save-it-as-clips.json step entirely —
+  // that step is where the filename and the folder went wrong in practice.
   const [clipsFileName, setClipsFileName] = useState('');
   const [clipsText, setClipsText] = useState('');
+  // The transcribe-only job whose brief is waiting to be pasted into a chat.
+  // Kept in localStorage because that job writes no *_metadata.json and is
+  // therefore never recovered into the backend's job table after a restart:
+  // the brief survives on disk, and this id is the only way back to it.
+  const [transcribeJob, setTranscribeJob] = useState(() => {
+    try { return localStorage.getItem('os_transcribe_job') || ''; } catch { return ''; }
+  });
+  const [brief, setBrief] = useState(null);   // { text, segments, min_clips, … }
+  const [briefBusy, setBriefBusy] = useState(false);
+  const [briefCopied, setBriefCopied] = useState(false);
+  // Controlled rather than a bare `open` prop: a brief arriving opens the
+  // panel, and `onToggle` keeps the user's own collapse from being undone by
+  // the next render.
+  const [localPanelOpen, setLocalPanelOpen] = useState(false);
   const [openJobError, setOpenJobError] = useState(null);
   const [openingJob, setOpeningJob] = useState(false);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
@@ -718,7 +736,69 @@ function App() {
     } catch { setLocalError('Could not read that file.'); }
   };
 
-  const startLocalJob = async (e) => {
+  // The brief a --transcribe-only run wrote. Read from the backend rather
+  // than the /videos mount: that mount's extension allowlist has no .txt in
+  // it, on purpose, so there is a dedicated endpoint for this one file.
+  const loadBrief = useCallback(async (id) => {
+    if (!id) return;
+    setBriefBusy(true);
+    try {
+      const res = await apiFetch(`/api/local/brief/${id}`);
+      const data = await res.json();
+      if (!res.ok) {
+        // A brief whose job dir has aged out is not an error worth shouting
+        // about — just forget it, so the panel offers step 1 again.
+        if (res.status === 404) { setTranscribeJob(''); setBrief(null); }
+        return;
+      }
+      setBrief(data);
+      setLocalPanelOpen(true);   // it is the next thing to act on
+    } catch {
+      setLocalError('Could not reach the backend.');
+    } finally {
+      setBriefBusy(false);
+    }
+  }, []);
+
+  // Reopening the tab mid-flow: the id outlived the page, so bring the brief
+  // back with it instead of making the user transcribe an hour again.
+  useEffect(() => {
+    if (transcribeJob) loadBrief(transcribeJob);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const copyBrief = async () => {
+    if (!brief?.text) return;
+    try {
+      await navigator.clipboard.writeText(brief.text);
+      setBriefCopied(true);
+      setTimeout(() => setBriefCopied(false), 2500);
+    } catch {
+      setLocalError('The browser blocked the clipboard — use Download instead.');
+    }
+  };
+
+  const downloadBrief = () => {
+    if (!brief?.text) return;
+    const url = URL.createObjectURL(new Blob([brief.text], { type: 'text/plain' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = brief.filename || 'paste_into_chat.txt';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const forgetBrief = () => {
+    setBrief(null);
+    setTranscribeJob('');
+    try { localStorage.removeItem('os_transcribe_job'); } catch { /* private mode */ }
+  };
+
+  // Start a local job. `transcribeOnly` runs the slow half and stops at the
+  // brief; otherwise this renders, reusing that job's transcript when there
+  // is one — without `transcript_job` the render would transcribe the same
+  // video a second time, which is the whole cost the chat route is avoiding.
+  const startLocalJob = async (e, { transcribeOnly = false } = {}) => {
     if (e) e.preventDefault();
     const video = localVideoPath.trim().replace(/^"|"$/g, '');
     if (!video || localBusy) return;
@@ -730,13 +810,20 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           video_path: video,
-          clips_json: clipsText || null,
+          transcribe_only: transcribeOnly || undefined,
+          clips_json: transcribeOnly ? undefined : (clipsText || null),
+          transcript_job: transcribeOnly ? undefined : (transcribeJob || undefined),
         }),
       });
       const data = await res.json();
       if (!res.ok) {
         setLocalError(data.detail || 'Could not start the job.');
         return;
+      }
+      if (transcribeOnly) {
+        setBrief(null);
+        setTranscribeJob(data.job_id);
+        try { localStorage.setItem('os_transcribe_job', data.job_id); } catch { /* private mode */ }
       }
       setJobId(data.job_id);
       setResults(null);
@@ -902,8 +989,17 @@ function App() {
           }
 
           if (data.status === 'completed') {
-            setStatus('complete');
             clearInterval(interval);
+            // A transcribe-only job finishes with no clips by design, and the
+            // results view reads "no clips" as a job that produced nothing.
+            // Go back to the panel with the brief in hand instead.
+            if (data.result?.transcribe_only) {
+              setStatus('idle');
+              setResults(null);
+              loadBrief(jobId);
+              return;
+            }
+            setStatus('complete');
             refreshMe();
           } else if (data.status === 'failed') {
             setStatus('error');
@@ -921,7 +1017,7 @@ function App() {
       }, 2000);
     }
     return () => clearInterval(interval);
-  }, [status, jobId, refreshMe]);
+  }, [status, jobId, refreshMe, loadBrief]);
 
 
   // silent: background auto-fetch — never alert(), just log. Managed users need
@@ -1211,6 +1307,11 @@ function App() {
     { id: 'ugc-gallery', ord: '04', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery', primary: true },
     { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
     { id: 'compilation', ord: '06', icon: Clapperboard, label: 'Compilation', short: 'compile' },
+    // Self-host only (they read paths on the server's disk): hidden in cloud mode.
+    ...(filmModules ? [
+      { id: 'movieshorts', ord: '09', icon: Film, label: 'Movie Shorts', short: 'movie' },
+      { id: 'movierecap', ord: '10', icon: BookOpen, label: 'Movie Recap', short: 'recap' },
+    ] : []),
     ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
     { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
   ];
@@ -1790,6 +1891,8 @@ function App() {
           )}
 
           {activeTab === 'compilation' && <CompilationTab />}
+          {activeTab === 'movieshorts' && filmModules && <MovieShortsTab />}
+          {activeTab === 'movierecap' && filmModules && <MovieRecapTab />}
 
           {/* View: AI Agent */}
           {activeTab === 'ai-agent' && (
@@ -1990,62 +2093,144 @@ function App() {
                     route without the command line. Hidden in cloud mode,
                     where the endpoint does not exist. */}
                 {!billingEnabled && (
-                <details className="text-left max-w-xl mx-auto">
+                <details
+                  className="text-left max-w-xl mx-auto"
+                  open={localPanelOpen}
+                  onToggle={(e) => setLocalPanelOpen(e.currentTarget.open)}
+                >
                   <summary className="cursor-pointer text-xs text-muted hover:text-ink2 transition-colors select-none">
-                    Use a file on this computer, or picks from a chat
+                    Use a file on this computer, or pick the clips in a chat
                   </summary>
-                  <form onSubmit={startLocalJob} className="mt-2.5 space-y-2">
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={localVideoPath}
-                        onChange={(e) => { setLocalVideoPath(e.target.value); setLocalError(null); }}
-                        placeholder="video on this computer"
-                        spellCheck={false}
-                        className="input-field flex-1 font-mono text-[12px]"
-                        aria-label="video path"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => { setLocalError(null); loadBrowse(''); }}
-                        className="btn-secondary shrink-0"
-                      >
-                        Browse…
-                      </button>
-                    </div>
-                    <div className="flex gap-2 items-center">
-                      <label className="btn-secondary shrink-0 cursor-pointer">
-                        Choose clips.json…
+                  <form onSubmit={startLocalJob} className="mt-2.5 space-y-4">
+
+                    {/* 1 — the video. A browser file input reports a name and
+                        never a path, so the only way to name a multi-GB file
+                        that must not be uploaded is to walk the server's disk. */}
+                    <div className="space-y-2">
+                      <p className="eyebrow">1 · Choose the video on this computer</p>
+                      <div className="flex gap-2">
                         <input
-                          type="file"
-                          accept=".json,.txt,application/json"
-                          className="hidden"
-                          onChange={(e) => pickClipsFile(e.target.files?.[0])}
+                          type="text"
+                          value={localVideoPath}
+                          onChange={(e) => { setLocalVideoPath(e.target.value); setLocalError(null); }}
+                          placeholder="video on this computer"
+                          spellCheck={false}
+                          className="input-field flex-1 font-mono text-[12px]"
+                          aria-label="video path"
                         />
-                      </label>
-                      <span className="text-[11px] text-muted truncate">
-                        {clipsFileName
-                          ? `${clipsFileName} — picks from your chat`
-                          : 'optional — without it the AI picks the moments'}
-                      </span>
-                      {clipsFileName && (
                         <button
                           type="button"
-                          onClick={() => { setClipsText(''); setClipsFileName(''); }}
-                          className="text-muted hover:text-ink2 shrink-0"
-                          aria-label="clear clips file"
+                          onClick={() => { setLocalError(null); loadBrowse(''); }}
+                          className="btn-quiet shrink-0"
                         >
-                          <X size={14} />
+                          Browse…
                         </button>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={(e) => startLocalJob(e, { transcribeOnly: true })}
+                          disabled={!localVideoPath.trim() || localBusy}
+                          className="btn-primary flex-1 min-w-[180px]"
+                        >
+                          {localBusy ? <Loader2 size={15} className="animate-spin" /> : 'Transcribe for a chat'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => startLocalJob(e)}
+                          disabled={!localVideoPath.trim() || localBusy}
+                          className="btn-ghost"
+                          title="Skip the chat: let Gemini pick the moments"
+                        >
+                          Let the AI pick instead
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 2 — the brief. Served by its own endpoint: the /videos
+                        mount refuses .txt, and widening that allowlist would
+                        expose every text file under output/. */}
+                    <div className={`space-y-2 ${brief ? '' : 'opacity-45'}`}>
+                      <p className="eyebrow">2 · Paste the brief into Claude or ChatGPT</p>
+                      {briefBusy && <p className="text-[11px] text-muted">Reading the transcript…</p>}
+                      {brief ? (
+                        <>
+                          <pre className="max-h-28 overflow-auto rounded-input border border-rule2 bg-paper p-2.5 font-mono text-[11px] leading-relaxed text-muted whitespace-pre-wrap">
+                            {brief.text.slice(0, 700)}
+                            {brief.text.length > 700 ? '\n…' : ''}
+                          </pre>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button type="button" onClick={copyBrief} className="btn-primary">
+                              {briefCopied
+                                ? <><Check size={14} className="inline mr-1" />Copied</>
+                                : <><Copy size={14} className="inline mr-1" />Copy to clipboard</>}
+                            </button>
+                            <button type="button" onClick={downloadBrief} className="btn-ghost">
+                              <Download size={14} className="inline mr-1" />Download .txt
+                            </button>
+                            <button
+                              type="button"
+                              onClick={forgetBrief}
+                              className="text-muted hover:text-ink2 shrink-0"
+                              aria-label="forget this transcript"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-muted">
+                            {brief.segments ? `${brief.segments} segments · ` : ''}
+                            {brief.min_clips
+                              ? `asks for ${brief.min_clips}–${brief.max_clips} clips · `
+                              : ''}
+                            job {transcribeJob.slice(0, 8)}
+                          </p>
+                        </>
+                      ) : !briefBusy && (
+                        <p className="text-[11px] leading-relaxed text-muted">
+                          Appears here once the transcription finishes. About 25 minutes
+                          for a one-hour video — you can close this tab.
+                        </p>
                       )}
                     </div>
-                    <button
-                      type="submit"
-                      disabled={!localVideoPath.trim() || localBusy}
-                      className="w-full btn-primary"
-                    >
-                      {localBusy ? <Loader2 size={15} className="animate-spin" /> : 'Generate from this file'}
-                    </button>
+
+                    {/* 3 — the reply. A paste box rather than a file, because
+                        saving the answer as clips.json in the right folder is
+                        the step that actually goes wrong. */}
+                    <div className="space-y-2">
+                      <p className="eyebrow">3 · Paste the reply back</p>
+                      <textarea
+                        value={clipsText}
+                        onChange={(e) => { setClipsText(e.target.value); setClipsFileName(''); setLocalError(null); }}
+                        placeholder='Paste what the chat replied — [{"start": 412.5, "end": 448.2, "title": "…"}]'
+                        spellCheck={false}
+                        rows={4}
+                        className="input-field w-full font-mono text-[11px] leading-relaxed"
+                        aria-label="clips picked in a chat"
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label className="btn-quiet shrink-0 cursor-pointer">
+                          or load a file…
+                          <input
+                            type="file"
+                            accept=".json,.txt,application/json"
+                            className="hidden"
+                            onChange={(e) => pickClipsFile(e.target.files?.[0])}
+                          />
+                        </label>
+                        <span className="text-[11px] text-muted truncate">
+                          {clipsFileName || (transcribeJob
+                            ? 'reuses the transcript above — no second transcription'
+                            : 'the moments to cut')}
+                        </span>
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={!localVideoPath.trim() || !clipsText.trim() || localBusy}
+                        className="w-full btn-primary"
+                      >
+                        {localBusy ? <Loader2 size={15} className="animate-spin" /> : 'Generate clips'}
+                      </button>
+                    </div>
                   </form>
                   {localError && (
                     <p className="mt-1.5 text-[11px] text-[color:var(--color-accent)]">{localError}</p>
@@ -2137,7 +2322,7 @@ function App() {
                     <button
                       type="submit"
                       disabled={!openJobId.trim() || openingJob}
-                      className="btn-secondary shrink-0"
+                      className="btn-quiet shrink-0"
                     >
                       {openingJob ? <Loader2 size={15} className="animate-spin" /> : 'Open'}
                     </button>

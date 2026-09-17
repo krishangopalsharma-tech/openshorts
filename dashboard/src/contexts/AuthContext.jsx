@@ -139,6 +139,8 @@ export function AuthProvider({ children }) {
   const value = {
     billingEnabled: config.billingEnabled,
     localLlm: config.localLlm || null,
+    // Self-host only: Movie Shorts / Movie Recap read paths on the server's disk.
+    filmModules: !!config.filmModules,
     googleAuthEnabled: config.googleAuthEnabled,
     jobRetentionSeconds: config.jobRetentionSeconds || null,
     loading,

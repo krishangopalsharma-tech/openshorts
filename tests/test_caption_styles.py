@@ -68,7 +68,7 @@ class TestOverrides:
 
     def test_api_projection_carries_ids(self):
         presets = cs.presets_for_api()
-        assert len(presets) == 22      # 19 from ClipForge + 3 added in Phase 5
+        assert len(presets) == 23      # 19 from ClipForge + 3 added in Phase 5 + film_pop
         assert {p["id"] for p in presets} == set(cs.STYLE_PRESETS)
         assert all("label" in p for p in presets)
 

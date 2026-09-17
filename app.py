@@ -1368,10 +1368,10 @@ def _enforce_output_size_cap():
     used = _dir_size(OUTPUT_DIR)
     if used <= cap:
         return
-    thumbs = os.path.basename(THUMBNAILS_DIR)
+    skip = {os.path.basename(THUMBNAILS_DIR), film_api.FILM_SUBDIR}
     candidates = []
     for job_id in os.listdir(OUTPUT_DIR):
-        if job_id == thumbs:
+        if job_id in skip:
             continue
         p = os.path.join(OUTPUT_DIR, job_id)
         if os.path.isdir(p):
@@ -1435,7 +1435,8 @@ async def cleanup_jobs():
             for job_id in os.listdir(OUTPUT_DIR):
                 # Not a job: the thumbnails dir backs a StaticFiles mount, so
                 # deleting it would 500 every /thumbnails request until reboot.
-                if job_id == os.path.basename(THUMBNAILS_DIR):
+                # Film sessions (output/film) are multi-sitting work, not jobs.
+                if job_id in (os.path.basename(THUMBNAILS_DIR), film_api.FILM_SUBDIR):
                     continue
                 job_path = os.path.join(OUTPUT_DIR, job_id)
                 if os.path.isdir(job_path):
@@ -2125,6 +2126,17 @@ THUMBNAILS_DIR = os.path.join(OUTPUT_DIR, "thumbnails")
 os.makedirs(THUMBNAILS_DIR, exist_ok=True)
 app.mount("/thumbnails", StaticFiles(directory=THUMBNAILS_DIR), name="thumbnails")
 
+# Film modules (Movie Shorts / Movie Recap, docs/film-modules-plan.md): sessions
+# and rendered parts live under output/film/, skipped by the job sweep because
+# a film's hook list is built over several sittings. Same media guard as
+# /videos, so only deliverables are reachable; nothing to restore from R2.
+import film_api
+FILM_DIR = os.path.join(OUTPUT_DIR, film_api.FILM_SUBDIR)
+os.makedirs(FILM_DIR, exist_ok=True)
+app.mount("/film", RestoringStaticFiles(
+    directory=FILM_DIR, guard=media_auth.is_servable, restorer=None), name="film")
+app.include_router(film_api.router)
+
 # The bundled caption fonts, so the dashboard can @font-face the exact typeface
 # libass will burn (caption_styles.list_fonts names them by embedded family).
 app.mount("/fonts", StaticFiles(directory=caption_styles.FONTS_DIR), name="fonts")
@@ -2329,6 +2341,21 @@ async def run_job(job_id, job_data):
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(None, upload_job_artifacts, output_dir, job_id)
             
+            # A transcribe-only run cuts nothing on purpose, so the metadata
+            # check below would call the successful outcome a failure. Its
+            # deliverable is the brief, and /api/local/brief serves that.
+            if jobs[job_id].get('transcribe_only'):
+                brief = os.path.join(output_dir, "paste_into_chat.txt")
+                if os.path.isfile(brief):
+                    jobs[job_id]['result'] = {'clips': [], 'transcribe_only': True}
+                    jobs[job_id]['logs'].append(
+                        "📝 Transcript ready — copy the brief into your chat app.")
+                else:
+                    jobs[job_id]['status'] = 'failed'
+                    jobs[job_id]['logs'].append(
+                        "Transcription finished but wrote no brief.")
+                return
+
             # Find result JSON
             json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
             if not json_files:
@@ -2400,6 +2427,8 @@ async def get_config():
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        # Self-host only: the Movie Shorts / Movie Recap tabs read local paths.
+        "filmModules": not BILLING_ENABLED,
     }
 
 async def _probe_youtube_quality(url: str) -> dict:
@@ -2680,7 +2709,10 @@ async def local_browse(path: Optional[str] = None, kind: str = "video"):
     if not os.path.isdir(target):
         raise HTTPException(status_code=400, detail=f"Not a folder: {target}")
 
-    wanted = (".json",) if kind == "clips" else LOCAL_VIDEO_EXTS
+    # "subtitle": the film modules pick an .srt/.vtt next to the film.
+    wanted = ((".json",) if kind == "clips"
+              else (".srt", ".vtt") if kind == "subtitle"
+              else LOCAL_VIDEO_EXTS)
     dirs, files = [], []
     try:
         with os.scandir(target) as it:
@@ -2723,6 +2755,13 @@ async def process_local_endpoint(request: Request):
     a local file, which is the other thing the dashboard could not do —
     uploading a 4 GB episode to a server running on the same disk is a copy
     for no reason.
+
+    Two flags turn the same endpoint into the chat route's two halves:
+    `transcribe_only` stops after paste_into_chat.txt, and `transcript_job`
+    points a later render at the transcript that job already produced. Without
+    the second one, pasting the picks back would transcribe the whole video a
+    SECOND time — 25 minutes on an hour-long episode, for a file already
+    sitting on disk.
     """
     if BILLING_ENABLED:
         raise HTTPException(status_code=404, detail="Not found")
@@ -2733,6 +2772,25 @@ async def process_local_endpoint(request: Request):
     # The browser can read a small file's CONTENTS but can never learn its
     # path, so the picker sends the text of clips.json rather than a location.
     clips_text = body.get("clips_json")
+    transcribe_only = bool(body.get("transcribe_only"))
+    transcript_job = str(body.get("transcript_job") or "").strip()
+
+    if transcribe_only and (clips_path or clips_text):
+        raise HTTPException(
+            status_code=400,
+            detail="transcribe_only writes the transcript and stops; it takes no clips")
+
+    transcript_path = ""
+    if transcript_job:
+        # A job id off the wire is used to build a path, so it is matched
+        # against the uuid shape rather than merely sanitised.
+        if not _JOB_ID_RE.match(transcript_job):
+            raise HTTPException(status_code=400, detail="Not a job id")
+        transcript_path = os.path.join(OUTPUT_DIR, transcript_job, "transcript.json")
+        if not os.path.isfile(transcript_path):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job {transcript_job[:8]} has no transcript to reuse")
 
     if not video_path:
         raise HTTPException(status_code=400, detail="video_path is required")
@@ -2803,6 +2861,10 @@ async def process_local_endpoint(request: Request):
     cmd = [sys.executable, "-u", "main.py", "-i", input_path, "-o", job_output_dir]
     if clips_path:
         cmd.extend(["--clips", clips_path])
+    if transcribe_only:
+        cmd.append("--transcribe-only")
+    if transcript_path:
+        cmd.extend(["--transcript", transcript_path])
 
     # Inherit the real environment. A bare dict looks tidy and breaks the job
     # before main.py runs a line: without USERPROFILE, ultralytics' import-time
@@ -2822,6 +2884,10 @@ async def process_local_endpoint(request: Request):
         'cmd': cmd,
         'env': env,
         'output_dir': job_output_dir,
+        # run_job fails a job that produced no *_metadata.json, which is
+        # exactly what a transcribe-only run produces. This is what tells it
+        # the empty job dir is the expected outcome, not a broken render.
+        'transcribe_only': transcribe_only,
         'attestation': {"acknowledged": True, "ip": "local", "user_agent": "",
                         "timestamp": time.time(), "source": "local_path"},
         'user_id': None,
@@ -2842,8 +2908,62 @@ async def process_local_endpoint(request: Request):
                            job_env={k: env[k] for k in _RESUMABLE_ENV_KEYS
                                     if k in env and os.environ.get(k) != env[k]})
     _enqueue_job(job_id, 2)
-    print(f"[local] job={job_id} video={video_path!r} clips={clips_path or '(AI picker)'}")
-    return {"job_id": job_id, "status": "queued"}
+    picks = ("(transcribe only)" if transcribe_only
+             else clips_path or "(AI picker)")
+    print(f"[local] job={job_id} video={video_path!r} clips={picks}"
+          + (f" transcript={transcript_path!r}" if transcript_path else ""))
+    return {"job_id": job_id, "status": "queued",
+            "transcribe_only": transcribe_only}
+
+
+@app.get("/api/local/brief/{job_id}")
+async def local_brief(job_id: str):
+    """The paste_into_chat.txt a --transcribe-only job wrote, as text.
+
+    The dashboard cannot fetch it from the /videos mount: that mount serves
+    OUTPUT_DIR through `media_auth.is_servable`, whose extension allowlist has
+    no `.txt` in it. Adding one there would expose every text file under
+    output/ to anything that can guess a name, so this reads the ONE file the
+    chat route produces, for one job, instead.
+
+    Read straight from disk rather than from `jobs`, so it still answers after
+    a restart — a transcribe-only job leaves no *_metadata.json and is
+    therefore never recovered into the in-memory job table.
+    """
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _JOB_ID_RE.match(job_id or ""):
+        raise HTTPException(status_code=400, detail="Not a job id")
+
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    brief_path = os.path.join(job_dir, "paste_into_chat.txt")
+    if not os.path.isfile(brief_path):
+        raise HTTPException(status_code=404,
+                            detail="No transcript brief for that job yet")
+    with open(brief_path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    # Enough for the UI to say what it is holding without opening it. Every
+    # field is best-effort: a brief that exists must always be downloadable,
+    # whatever shape the transcript beside it is in.
+    info = {"segments": None, "language": None, "duration_seconds": None,
+            "min_clips": None, "max_clips": None}
+    try:
+        with open(os.path.join(job_dir, "transcript.json"), "r", encoding="utf-8") as f:
+            transcript = json.load(f)
+        segments = transcript.get("segments") or []
+        info["segments"] = len(segments)
+        info["language"] = transcript.get("language")
+        duration = max((float(s.get("end") or 0) for s in segments), default=0.0)
+        info["duration_seconds"] = round(duration, 1) or None
+        import manual_clips
+        info["min_clips"], info["max_clips"] = manual_clips.chat_clip_counts(
+            transcript, duration)
+    except Exception:
+        pass
+
+    return {"job_id": job_id, "filename": "paste_into_chat.txt",
+            "text": text, "bytes": len(text.encode("utf-8")), **info}
 
 
 @app.post("/api/process")

@@ -113,6 +113,13 @@ STYLE_PRESETS = {
     "clean_slide": _P("Clean Slide", font_family="Poppins", animation="slide_up",
                       bold=False, uppercase=False, highlight_color="#FFFFFF",
                       font_size=70, outline=3, shadow=2, max_chars=30),
+    # Movie Shorts (docs/film-modules-plan.md): the film's own dialogue as the
+    # caption, so mixed case and a wider line than the talking-head presets;
+    # amber pop on the spoken word, heavy outline so it survives any grade.
+    "film_pop": _P("Film Pop", font_family="Anton", animation="pop",
+                   uppercase=False, highlight_color="#FFA000", font_size=58,
+                   outline=4, shadow=0, max_lines=2, max_chars=32,
+                   glow_enabled=True, glow_color="#000000", glow_intensity=6),
 }
 
 DEFAULT_PRESET = "bold_white"

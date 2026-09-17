@@ -52,7 +52,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
 | `cinematic.py` | Cinematic look (grade/glow/grain/vignette/gradients/letterbox): one ffmpeg pass, applied per clip after generation (`/api/clip/look`) or at render for API callers |
-| `caption_styles.py` | Caption looks: 22 presets (19 ported from ClipForge), 5 theme bundles, the override schema and the bundled font registry (`fonts/`) |
+| `caption_styles.py` | Caption looks: 23 presets (19 ported from ClipForge, `film_pop` for the film modules), 5 theme bundles, the override schema and the bundled font registry (`fonts/`) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT/ASS generation (legacy karaoke + `generate_ass_styled` for the ClipForge presets), FFmpeg subtitle burning, dubbed video transcription |
@@ -86,6 +86,55 @@ When editing pricing anywhere, edit `seo/data.js` too. Nothing on the site shoul
 say "OpenShorts is free" without naming the Cloud price in the same breath: both
 are true of different editions and quoting only the first one is what makes AI
 answers describe the paid product as free.
+
+### Film modules: Movie Shorts and Movie Recap (`film_prep.py`, `film_render.py`, `movieshorts.py`, `movierecap.py`, `film_api.py`)
+
+Two self-host-only tabs (hidden in cloud mode through `/api/config.filmModules`)
+that cut a feature film into either standalone ~2-minute shorts or a
+three-part appetite-building series. Full design in `docs/film-modules-plan.md`;
+the rules that cost something to learn:
+
+- **The SRT is the transcript.** A film arrives with its subtitle file, so
+  `film_prep.parse_subtitles` → `cues_to_transcript` produces the whisper
+  shape (words spread across each cue) and no ASR runs over two hours. Only a
+  60 s slice around the 25% mark is heard, with a `small` build
+  (`FILM_PROBE_WHISPER_MODEL`), to find the SRT offset by matching word TEXT
+  against the cues: an SRT for another release runs 2-25 s out and every beat
+  inherits the error. The user can override it.
+- **The model plans beats/chunks in a chat window; nothing here calls an LLM.**
+  Prompts are emitted, JSON is pasted back, validators return a structured
+  error list the tab turns into the correction turn. `movieshorts.validate_beats`
+  refuses any caption that does not fuzzy-match a real cue (ratio ≥ 0.8):
+  models invent plausible film dialogue confidently. `movierecap.validate_plan`
+  hard-fails a chunk inside a protected range or past the 75% wall and only
+  WARNS on resolution language.
+- **Speed before reframe, captions divided by the factor afterwards.**
+  `reframe_v2` emits sendcmd crop timelines; a PTS change after it lands every
+  command on the wrong frame. Music bed after concat, never per shot.
+- **Beats live in finished time, cuts in source time.** `beat_grid.schedule`
+  builds each shot as a whole number of beats in finished seconds and
+  multiplies by the speed; it never rounds in source time. At 120 BPM only
+  k=3 fits the 1.2-1.8 s band, so every shot is 1.5 s; 100-140 BPM has two
+  usable k and is where shot length can vary while staying locked.
+  `beat_confidence` is measured on a RIGID grid per 15 s window, not on the
+  DP-tracked beats, which chase noise peaks and report a confident beat in a
+  drone.
+- **Music is a curated library, never generated.** `assets/music/<mood>/` +
+  `python -m music_library scan` → `manifest.json` (BPM, grid, loudness,
+  licence sidecar, `uses`). `pick()` walks mood → adjacent mood → any and
+  never fails a render; the tab shows the search recipe when it fell back.
+  `music.build_audio_graph(profile=...)`: `dialogue` (ratio ≤ 6, release 260)
+  for shorts, `narration` for the recap's kept-dialogue chunks.
+- Sessions live under `output/film/<id>/session.json` and are skipped by
+  BOTH output sweeps (the hourly one and the size cap): a film's hook list is
+  built over several sittings. Rendered parts serve at `/film/<id>/<file>`
+  through `media_auth.is_servable`.
+- Recap voiceover re-timing reuses `compilation.py` (`transcribe_vo`,
+  `align_lines_to_words`, `fit_shots`) on a plan whose times are divided by
+  the speed (`movierecap.compilation_plan`), then `fitted_to_source`
+  multiplies back. Outside ±10% of the target the recording is refused with
+  the numbers rather than time-stretched. The original soundtrack is muted
+  under narration except on `keep_audio` chunks.
 
 ### Cómo se elige el layout
 
@@ -502,6 +551,29 @@ are snapped to word edges (`clip_selection.snap_clip_to_words`) and skip the
 Gemini picker entirely. That is the no-API-key route: a strong model picks the
 moments in a chat window, this repo renders them.
 
+**The same route without a terminal** is the numbered panel under the
+uploader, on `POST /api/process/local` (self-host only, like everything that
+reads local paths). `transcribe_only` appends `--transcribe-only`;
+`transcript_job` points the render half at `<that job>/transcript.json` with
+`--transcript`, in a FRESH job dir. That second flag is the whole saving:
+without it, pasting the picks back transcribes the same hour of video a
+second time, and the route exists to spend the transcription once.
+
+Two things about it are not obvious and both cost a render to find out.
+`run_job` fails any job that produced no `*_metadata.json`, which is exactly
+what a successful transcription produces, so the job carries a
+`transcribe_only` flag that is honoured **before** that check and completes
+with `{"clips": [], "transcribe_only": True}`; the dashboard reads that and
+returns to the panel instead of rendering an empty results screen. And the
+brief gets its own endpoint (`GET /api/local/brief/{job_id}`) rather than
+riding the `/videos` mount, whose `media_auth.SERVABLE_EXTENSIONS` has no
+`.txt` — adding one there would serve every text file under `output/`. It
+reads from disk, not `jobs`, because a transcribe-only job is never recovered
+into the job table after a restart (no metadata to recover from); the
+dashboard keeps its id in `localStorage.os_transcribe_job` for the same
+reason. Job ids off the wire are matched against `_JOB_ID_RE` before they are
+joined into a path.
+
 Every clip records **`picked_by`**: `gemini:<model>` or `local:<model>` stamped
 in `get_viral_clips` (from `llm_backend.active()`, so it names the model that
 actually answered), `claude` in `manual_clips.load_manual_clips`. It cannot be
@@ -699,6 +771,9 @@ request degrades to "no effect", never to a broken filtergraph.
 | Method | Route | Purpose |
 |--------|-------|---------|
 | POST | `/api/source/check` | Has this source been cut before? (title/size/URL, no file) |
+| GET | `/api/local/browse` | Walk the server's own disk to name a local video (self-host only) |
+| POST | `/api/process/local` | Render a local file: `transcribe_only` (stop at the chat brief), `clips_json`/`clips_path` (picks from a chat), `transcript_job` (reuse an earlier transcript). Self-host only |
+| GET | `/api/local/brief/{job_id}` | The `paste_into_chat.txt` a transcribe-only job wrote (self-host only) |
 | POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`; `transcribe_prompt`: names/terms for the decode; `isolate_vocals`: transcribe the voice alone on noisy sources) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |
@@ -899,3 +974,13 @@ change: every deploy is a ~5 min build plus a handover.
 - After every `git push`, wait for the commit's workflow and confirm it is green: `ci-wait` (Victor's Mac) or `gh run watch $(gh run list -c $(git rev-parse HEAD) -L1 --json databaseId -q ".[0].databaseId") --exit-status`.
 - If it is red: fix, push, check again. Never report the task as done with a red CI.
 - Before pushing, run locally what the CI runs (lint + tests of this repo).
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

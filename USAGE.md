@@ -112,28 +112,57 @@ cuts before the punchline, extend to 0:48") and re-save.
 ### The same thing from the dashboard, no command line
 
 On the idle screen, under the uploader: **"Use a file on this computer, or
-picks from a chat"**.
+pick the clips in a chat"**. It is the four steps above as three numbered
+blocks, and it needs no terminal at all.
 
-| control | |
+**1 · Choose the video on this computer.** **Browse…** walks this machine's
+drives and folders; click a video to choose it. Nothing is uploaded — it is
+read where it sits. Then either:
+
+| button | |
 |---|---|
-| **Browse…** | walks this machine's drives and folders; click a video to choose it. Nothing is uploaded — it is read where it sits |
-| **Choose clips.json…** | an ordinary file picker. Optional: without it the AI picks the moments |
+| **Transcribe for a chat** | the slow half. ~25 min on a one-hour video. You can close the tab |
+| **Let the AI pick instead** | skips the chat entirely and runs the Gemini picker on the local file |
 
-The two use different mechanisms on purpose. A browser **never** tells
-JavaScript a file's path (`File.path` is Electron, not the web), so a video
-that must not be uploaded can only be named by walking the SERVER's
-filesystem — hence `GET /api/local/browse`. clips.json is small, so its picker
-reads the file's **contents** in the browser and posts the JSON itself; no
-path involved, and it works wherever the file happens to sit.
+**2 · Paste the brief into Claude or ChatGPT.** When the transcription
+finishes, `paste_into_chat.txt` appears in the panel with **Copy to
+clipboard** and **Download .txt**, plus a line saying what it holds
+("562 segments · asks for 6–12 clips"). No hunting through `output\` in
+Explorer. Paste it into the chat; the reply is the picks.
 
-It checks both paths and parses the picks **before** queueing, so a wrong path
-or a broken JSON says so immediately instead of forty minutes into a render.
-The job then behaves like any other: progress, clip cards, and every per-clip
-tool.
+**3 · Paste the reply back.** A text box, not a file picker — paste what the
+chat said and press **Generate clips**. This is the step that removes saving
+the reply as `clips.json` in exactly the right folder, which is where the CLI
+route goes wrong most often. The file picker is still there underneath
+("or load a file…") if you would rather keep the JSON on disk.
 
-Self-host only. The endpoint reads local filesystem paths, so it does not
-exist when `BILLING_ENABLED` is set — on a hosted instance it would let a
-visitor name a path on the server.
+**The transcript is reused, not redone.** Step 3 sends step 1's job id back,
+and the render runs with `--transcript <that job>/transcript.json`. Without it
+the same hour of video would be transcribed twice.
+
+Three details worth knowing:
+
+- The video path and clips.json use **different mechanisms on purpose**. A
+  browser **never** tells JavaScript a file's path (`File.path` is Electron,
+  not the web), so a video that must not be uploaded can only be named by
+  walking the SERVER's filesystem — hence `GET /api/local/browse`. The picks
+  are small, so they travel as text.
+- The brief has its **own endpoint** (`GET /api/local/brief/{job_id}`). The
+  `/videos` mount that serves clips has an extension allowlist with no `.txt`
+  in it, and widening that would expose every text file under `output/`.
+- The panel remembers the transcribe job id in the browser, so closing the tab
+  between steps 2 and 3 is fine. It has to: a transcribe-only job writes no
+  `_metadata.json`, so the backend never rebuilds it into the job list after a
+  restart. The brief itself is on disk either way.
+
+Both paths are checked and the picks parsed **before** queueing, so a wrong
+path or a broken JSON says so immediately instead of forty minutes into a
+render. The render job then behaves like any other: progress, clip cards, and
+every per-clip tool.
+
+Self-host only. These endpoints read local filesystem paths, so they do not
+exist when `BILLING_ENABLED` is set — on a hosted instance they would let a
+visitor name and enumerate paths on the server.
 
 ### Seeing CLI clips in the dashboard
 

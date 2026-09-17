@@ -193,15 +193,29 @@ def normalize(spec):
     return out
 
 
-def build_audio_graph(spec, duration, voice=True):
+# Sidechain shapes. ``voice`` is the reels mix a talking head wants: the
+# track all but vanishes under speech (ratio up to 20). ``dialogue`` is the
+# movie-shorts bed (docs/film-modules-plan.md): film dialogue keys it, the bed
+# should DIP, not vanish (ratio capped at 6), and release sits at 260 ms —
+# under ~150 the bed pumps between words, over ~500 it never recovers between
+# lines. ``narration`` is the recap voiceover over a kept dialogue bed.
+MIX_PROFILES = {
+    "voice": {"threshold": 0.02, "attack": 15, "release": 300, "max_ratio": 20.0},
+    "dialogue": {"threshold": 0.05, "attack": 8, "release": 260, "max_ratio": 6.0},
+    "narration": {"threshold": 0.03, "attack": 5, "release": 300, "max_ratio": 12.0},
+}
+
+
+def build_audio_graph(spec, duration, voice=True, profile="voice"):
     """The -filter_complex for input 0 = clip, input 1 = the looped track.
 
     ``duck`` scales the sidechain ratio: 0 leaves the music steady (ratio 1),
-    100 pulls it down hard (ratio 20) whenever the voice is above threshold.
-    ``normalize=0`` keeps the voice at unity instead of amix halving both.
-    Produces ``[aout]``.
+    100 pulls it down to the profile's ``max_ratio`` whenever the voice is
+    above threshold. ``normalize=0`` keeps the voice at unity instead of amix
+    halving both. Produces ``[aout]``.
     """
-    ratio = 1.0 + (spec["duck"] / 100.0) * 19.0
+    p = MIX_PROFILES.get(profile) or MIX_PROFILES["voice"]
+    ratio = 1.0 + (spec["duck"] / 100.0) * (p["max_ratio"] - 1.0)
     fade = spec["fade_out"]
     fade_chain = (f",afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}"
                   if fade > 0 and duration > fade else "")
@@ -210,20 +224,25 @@ def build_audio_graph(spec, duration, voice=True):
         return f"{music};[__m]atrim=0:{duration:.3f}{fade_chain}[aout]"
     return (
         f"[0:a]asplit=2[__v1][__v2];{music};"
-        f"[__m][__v2]sidechaincompress=threshold=0.02:ratio={ratio:.2f}:attack=15:release=300[__md];"
+        f"[__m][__v2]sidechaincompress=threshold={p['threshold']}:ratio={ratio:.2f}"
+        f":attack={p['attack']}:release={p['release']}[__md];"
         f"[__md]atrim=0:{duration:.3f}{fade_chain}[__mf];"
         f"[__v1][__mf]amix=inputs=2:duration=first:normalize=0[aout]"
     )
 
 
-def apply_music(video_path, spec, output_path, music_dir=None):
+def apply_music(video_path, spec, output_path, music_dir=None, profile="voice",
+                track_path=None):
     """Mix ``spec['track']`` under ``video_path`` into ``output_path``. Video
     is stream-copied. Returns True on success, False (nothing written) on
-    any failure, the same fail-open contract as the other layers."""
-    spec = normalize(spec)
+    any failure, the same fail-open contract as the other layers.
+
+    ``track_path`` bypasses the library lookup (the film modules pick from
+    their own mood-sorted manifest); ``profile`` picks the sidechain shape."""
+    spec = normalize(spec if track_path is None else {**(spec or {}), "track": os.path.basename(track_path)})
     if not spec:
         return False
-    track = resolve_track(spec["track"], music_dir)
+    track = track_path if track_path and os.path.exists(track_path) else resolve_track(spec["track"], music_dir)
     if not track:
         print(f"   ⚠️ Music track not found: {spec['track']}")
         return False
@@ -231,7 +250,7 @@ def apply_music(video_path, spec, output_path, music_dir=None):
     if not duration:
         return False
     voice = has_audio_stream(video_path)
-    graph = build_audio_graph(spec, duration, voice=voice)
+    graph = build_audio_graph(spec, duration, voice=voice, profile=profile)
     seek = ["-ss", f"{spec['start']:.2f}"] if spec["start"] > 0 else []
     tmp = output_path + ".tmp.mp4"
     cmd = ["ffmpeg", "-y", "-loglevel", "error",

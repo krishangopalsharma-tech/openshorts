@@ -22,6 +22,12 @@ COLOR_GRADES = {
     "vintage": "eq=contrast=0.92:saturation=0.75:brightness=0.02,colorbalance=rm=0.06:gm=0.03:bm=-0.04",
     "vibrant": "eq=contrast=1.12:saturation=1.35",
     "bw": "hue=s=0",
+    # Film-module grades (docs/film-modules-plan.md): the two looks the
+    # reference movie-shorts channel alternates between. Named presets rather
+    # than model-generated chains because consistency across ~86 shots matters
+    # more than cleverness.
+    "washed": "eq=saturation=0.78:contrast=1.04:brightness=0.03",
+    "cold": "eq=saturation=0.95:gamma_b=1.08:gamma_r=0.95",
 }
 
 DEFAULTS = dict(
