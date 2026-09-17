@@ -29,7 +29,10 @@ from ffmpeg_utils import (METADATA_SCRUB, QUALITY_FAST, audio_encode_args,
 
 # EDL limits. Deliberately generous — the editor is for humans fixing cuts,
 # not for stitching feature films.
-MAX_SEGMENTS = 12
+# 40, not 12: a film montage (film_montage) keeps one segment per run of
+# subtitle lines, 15-30 of them in a two-minute short, and the clip editor's
+# rerender of that clip must accept the same EDL it was born with.
+MAX_SEGMENTS = 40
 MIN_SEGMENT_SECONDS = 0.5
 MAX_TOTAL_SECONDS = 180.0
 

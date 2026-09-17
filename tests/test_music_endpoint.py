@@ -78,7 +78,7 @@ def job(tmp_path, monkeypatch):
 def fake_mix(monkeypatch):
     calls = []
 
-    def fake(video_path, spec, output_path, music_dir=None):
+    def fake(video_path, spec, output_path, music_dir=None, profile="voice"):
         calls.append((os.path.basename(video_path), dict(spec), os.path.basename(output_path)))
         with open(output_path, "wb") as f:
             f.write(b"mixed")

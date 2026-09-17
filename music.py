@@ -190,6 +190,12 @@ def normalize(spec):
     except (TypeError, ValueError):
         fade = DEFAULTS["fade_out"]
     out["fade_out"] = round(min(5.0, max(0.0, fade)), 2)
+    # Optional sidechain shape (MIX_PROFILES). Absent = "voice", the reels
+    # mix; a film montage stores "dialogue" so the bed dips under the film's
+    # lines instead of vanishing.
+    profile = str(spec.get("profile") or "").strip()
+    if profile in MIX_PROFILES and profile != "voice":
+        out["profile"] = profile
     return out
 
 

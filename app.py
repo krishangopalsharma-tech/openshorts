@@ -809,7 +809,8 @@ def _apply_music_layer(output_dir, clean_name, spec):
         return None
     src = os.path.join(output_dir, clean_name)
     out_name = music.derived_name(clean_name)
-    if not music.apply_music(src, spec, os.path.join(output_dir, out_name)):
+    if not music.apply_music(src, spec, os.path.join(output_dir, out_name),
+                             profile=spec.get("profile", "voice")):
         return None
     try:
         ranges = layout_ranges.read(src)
@@ -3533,11 +3534,19 @@ def _locate_source(job_id: str):
         meta_files = glob.glob(os.path.join(OUTPUT_DIR, job_id, "*_metadata.json"))
         if meta_files:
             with open(meta_files[0], 'r') as f:
-                name = json.load(f).get('source_video')
+                meta = json.load(f)
+            name = meta.get('source_video')
             if name:
                 candidate = os.path.join(OUTPUT_DIR, job_id, os.path.basename(name))
                 if os.path.exists(candidate):
                     return candidate
+            # A film montage (film_api / film_montage) is cut from a file that
+            # stays where the user keeps it: a 2 GB film is never copied into
+            # uploads/. Self-host only: in cloud mode nothing may point the
+            # editor at an arbitrary server path.
+            source_path = meta.get('source_path')
+            if source_path and not BILLING_ENABLED and os.path.isfile(source_path):
+                return source_path
     except Exception:
         pass
     return None

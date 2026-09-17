@@ -72,7 +72,7 @@ def fake_passes(monkeypatch):
         open(output_path or video_path, "wb").write(b"g")
         return True
 
-    def mix(video_path, spec, output_path, music_dir=None):
+    def mix(video_path, spec, output_path, music_dir=None, profile="voice"):
         calls.append(("music", os.path.basename(video_path)))
         open(output_path, "wb").write(b"m")
         return True

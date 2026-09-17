@@ -684,9 +684,9 @@ function App() {
 
   // Load a job by its id: check it exists and actually produced clips before
   // switching the view, so a typo says so instead of showing an empty screen.
-  const openJobById = async (e) => {
+  const openJobById = async (e, forcedId) => {
     if (e) e.preventDefault();
-    const id = openJobId.trim();
+    const id = (forcedId || openJobId).trim();
     if (!id || openingJob) return;
     setOpeningJob(true);
     setOpenJobError(null);
@@ -1333,7 +1333,7 @@ function App() {
     { id: 'compilation', ord: '06', icon: Clapperboard, label: 'Compilation', short: 'compile' },
     // Self-host only (it reads paths on the server's disk): hidden in cloud mode.
     ...(filmModules ? [
-      { id: 'movierecap', ord: '09', icon: BookOpen, label: 'Movie Recap', short: 'recap' },
+      { id: 'movierecap', ord: '09', icon: BookOpen, label: 'Movie Recap & Shorts', short: 'film' },
     ] : []),
     ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
     { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
@@ -1914,7 +1914,9 @@ function App() {
           )}
 
           {activeTab === 'compilation' && <CompilationTab />}
-          {activeTab === 'movierecap' && filmModules && <MovieRecapTab />}
+          {activeTab === 'movierecap' && filmModules && (
+            <MovieRecapTab onOpenJob={(id) => { setActiveTab('dashboard'); openJobById(null, id); }} />
+          )}
 
           {/* View: AI Agent */}
           {activeTab === 'ai-agent' && (

@@ -15,8 +15,11 @@ Render work runs in a thread per request and reports through the session
 file (``renders[key]``: status, logs, output), so a poll landing on either
 side of a restart reads the same thing.
 
-The Movie Shorts routes lived here until 17-sep-2026; see
-docs/film-modules-plan.md for why they went.
+The crop-ladder Movie Shorts routes lived here until 17-sep-2026; see
+docs/film-modules-plan.md for why they went. ``/api/movieshorts/*`` (18-sep)
+is the second design: a montage planned in the chat (film_montage) and
+rendered as an ORDINARY clip job through recut.perform_recut, so every
+clip-card tool works on it.
 """
 
 import json
@@ -32,6 +35,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+import film_montage as fm
 import film_prep as fp
 import film_render
 import film_voice
@@ -55,6 +59,11 @@ RECAP_DEFAULTS = {
     # What the series is for: "story" tells the whole film with cliffhangers
     # and the ending (spoilers wanted); "teaser" is the spoiler-free design.
     "recap_mode": "story",
+    # Movie Shorts (film_montage): how many the chat proposes, the frame, the
+    # music bed (a library file, or None = picked by the short's mood), its
+    # resting level and duck, the channel watermark and the caption preset.
+    "shorts_count": 3, "shorts_ratio": "9:16", "music_track": None,
+    "music_db": -16.0, "music_duck": 70.0, "watermark_text": "", "caption_preset": "film_pop",
 }
 
 
@@ -230,6 +239,7 @@ async def create_session(req: SessionRequest):
         "offset": 0.0, "offset_probe": None, "settings": settings, "renders": {},
         "recap": {"spoilers": None, "manual_excluded": [], "protected": None,
                   "structure": None, "plans": {}, "budget": None},
+        "shorts": {"plan": None, "previews": []},
     }
     _save(sess)
     if req.probe_offset:
@@ -268,6 +278,7 @@ async def list_sessions():
                     "duration": s.get("duration"), "created": s.get("created"),
                     "updated": s.get("updated"),
                     "parts_planned": len((s.get("recap") or {}).get("plans") or {}),
+                    "shorts_planned": len((s.get("shorts") or {}).get("previews") or []),
                     "renders": len(s.get("renders") or {})})
     out.sort(key=lambda s: s.get("updated") or 0, reverse=True)
     return {"sessions": out}
@@ -311,8 +322,17 @@ async def set_settings(sid: str, request: Request):
     _guard()
     body = await _body(request)
     clean = {k: v for k, v in body.items() if k in RECAP_DEFAULTS}
-    if "ratio" in clean and clean["ratio"] not in _RATIO_TO_FORMAT:
-        raise HTTPException(status_code=400, detail="ratio must be 9:16 or 1:1")
+    for key in ("ratio", "shorts_ratio"):
+        if key in clean and clean[key] not in _RATIO_TO_FORMAT:
+            raise HTTPException(status_code=400, detail=f"{key} must be 9:16 or 1:1")
+    if "music_track" in clean and clean["music_track"]:
+        import music as _music
+        if not _music.resolve_track(clean["music_track"]):
+            raise HTTPException(status_code=400, detail=f"music track not found: {clean['music_track']}")
+    if "caption_preset" in clean:
+        import caption_styles
+        if clean["caption_preset"] not in caption_styles.STYLE_PRESETS:
+            raise HTTPException(status_code=400, detail=f"unknown caption preset {clean['caption_preset']}")
     return _public(_update(sid, lambda s: s["settings"].update(clean)))
 
 
@@ -850,6 +870,203 @@ def _relayer_part(sid, part):
     name = os.path.basename(current)
     _set_render(sid, f"recap-{part}", file=name, output=f"/film/{sid}/{name}")
     return name
+
+
+# --- movie shorts (montage through the clip maker) --------------------------------
+
+def _shorts(sess):
+    return sess.setdefault("shorts", {"plan": None, "previews": []})
+
+
+def _short_key(index):
+    return f"shorts-{int(index)}"
+
+
+_SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
+
+
+def _slug(text, fallback="short"):
+    s = _SLUG_RE.sub("_", str(text or "")).strip("_")
+    return (s[:48] or fallback)
+
+
+@router.get("/api/movieshorts/prompt/{sid}")
+async def shorts_prompt(sid: str, request: Request):
+    _guard()
+    sess = _load(sid)
+    count = int((sess.get("settings") or {}).get("shorts_count") or 3)
+    text = fm.build_prompt(_cues(sess), sess["duration"], sess.get("title"), count=count)
+    if request.query_params.get("format") == "text":
+        return PlainTextResponse(text)
+    return {"prompt": text, "words": len(text.split()), "count": count}
+
+
+@router.post("/api/movieshorts/plan/{sid}")
+async def shorts_plan(sid: str, request: Request):
+    """Validate the chat's shorts; store the plan and each short's EDL.
+    Rule errors can be forced (shorts that produced no footage are dropped);
+    schema errors cannot."""
+    _guard()
+    body = await _body(request)
+    force = _force(body)
+    data = _pasted(body)
+    sess = _load(sid)
+    plan, errors, warnings, previews = fm.validate_shorts(data, _cues(sess), sess["duration"])
+    if plan is None:
+        return {"ok": False, "errors": errors, "warnings": [], "errors_text": fm.format_errors(errors),
+                "forceable": False, "previews": []}
+    forced = bool(errors) and force
+    if forced:
+        keep = [p for p in previews if p["segments"]]
+        if not keep:
+            raise HTTPException(status_code=400, detail="no short has any usable footage")
+        previews = keep
+    if not errors or forced:
+        def fn(s):
+            entry = plan.model_dump()
+            if forced:
+                entry["forced"] = True
+                entry["ignored_errors"] = errors
+            _shorts(s)["plan"] = entry
+            _shorts(s)["previews"] = previews
+        _update(sid, fn)
+    return {"ok": not errors or forced, "forced": forced, "errors": errors, "warnings": warnings,
+            "errors_text": fm.format_errors(errors), "warnings_text": fm.format_errors(warnings),
+            "forceable": True, "previews": previews}
+
+
+@router.post("/api/movieshorts/segments/{sid}/{index}")
+async def shorts_segments(sid: str, index: int, request: Request):
+    """Hand-trimmed EDL for one short (the scene table's edits): replaces the
+    computed segments, in the given order."""
+    _guard()
+    import recut
+    body = await _body(request)
+    sess = _load(sid)
+    previews = _shorts(sess).get("previews") or []
+    if index < 0 or index >= len(previews):
+        raise HTTPException(status_code=404, detail="no such short")
+    try:
+        segments = recut.normalize_segments(body.get("segments"), sess["duration"])
+    except recut.RecutError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    def fn(s):
+        p = _shorts(s)["previews"][index]
+        p["segments"] = segments
+        p["seconds"] = fm.total_seconds(segments)
+        p["cuts"] = len(segments)
+        p["edited"] = True
+    sess = _update(sid, fn)
+    return {"preview": _shorts(sess)["previews"][index]}
+
+
+def _render_short_job(sid, index):
+    """Cut one short from the film as an ordinary clip job: metadata in
+    ``output/<job>/``, the montage through recut.perform_recut with the clip
+    maker's own layer hooks (music, overlays, captions), then the job is
+    registered so the clip card's tools (subtitle modal, look, music,
+    overlays, trim) work on it unchanged."""
+    key = _short_key(index)
+    try:
+        import layout_ranges
+        import music as _music
+        import recut
+        app = _app()
+        sess = _load(sid)
+        st = sess["settings"]
+        previews = _shorts(sess).get("previews") or []
+        if index < 0 or index >= len(previews):
+            raise film_render.RenderError(f"short {index + 1} has no plan")
+        preview = previews[index]
+        short = fm.ShortsPlan.model_validate(_shorts(sess)["plan"]).shorts[preview["index"]]
+        segments = recut.normalize_segments(preview["segments"], sess["duration"])
+        fmt = _RATIO_TO_FORMAT.get(st.get("shorts_ratio"), "vertical")
+
+        job_id = str(uuid.uuid4())
+        job_dir = os.path.join(app.OUTPUT_DIR, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        base = f"{_slug(short.title)}_{sid[:6]}"
+        clean_name = f"{base}_clip_1.mp4"
+        _log(sid, key, f"🎬 {len(segments)} cuts, {fm.total_seconds(segments):.0f} s → job {job_id[:8]}")
+
+        transcript = fp.cues_to_transcript(_cues(sess))
+        v_transcript = recut.virtual_transcript(transcript, segments)
+        track = st.get("music_track") or (fm.pick_track(short.mood, _music.list_tracks()) or {}).get("file")
+        music_spec = _music.normalize({"track": track, "volume_db": st.get("music_db", -16.0),
+                                       "duck": st.get("music_duck", 70.0), "profile": "dialogue"}) if track else None
+        clip = {
+            "start": min(s["start"] for s in segments), "end": max(s["end"] for s in segments),
+            "video_title_for_youtube_short": short.title[:100], "viral_hook_text": short.hook or short.title,
+            "video_description_for_tiktok": short.ending or short.title,
+            "video_description_for_instagram": short.ending or short.title,
+            "video_tags": "", "predicted_score": 0, "picked_by": "claude", "reason": short.ending,
+            "recipe": {"v": 1, "segments": segments,
+                       "canonical_range": {"start": min(s["start"] for s in segments),
+                                           "end": max(s["end"] for s in segments)}},
+            "output_format": fmt, "music": music_spec, "overlays": fm.watermark(st.get("watermark_text")),
+            "caption_style": fm.caption_style(st.get("caption_preset") or "film_pop"),
+            "film_session": sid, "montage": {"mood": short.mood, "scenes": preview.get("scenes") or []},
+        }
+        data = {"shorts": [clip], "transcript": transcript, "source_video": os.path.basename(sess["video_path"]),
+                "source_path": sess["video_path"], "output_format": fmt, "film_session": sid,
+                "title": short.title}
+        meta_path = os.path.join(job_dir, f"{base}_metadata.json")
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+
+        effects, captioner = app._clip_layer_hooks(job_dir, clip)
+        _log(sid, key, "✂️  cutting, reframing, then music, watermark, captions")
+        served, clean_recut = recut.perform_recut(
+            input_path=sess["video_path"], segments=segments, output_dir=job_dir, clean_name=clean_name,
+            reframe=True, output_format=fmt, captions_transcript=v_transcript,
+            captioner=captioner, effects=effects)
+        clip["video_url"] = f"/videos/{job_id}/{served}"
+        try:
+            clip["layout_ranges"] = layout_ranges.read(os.path.join(job_dir, clean_recut))
+        except Exception:  # noqa: BLE001
+            clip["layout_ranges"] = []
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        app.jobs[job_id] = {
+            "status": "completed", "output_dir": job_dir, "user_id": None,
+            "logs": [f"🎞️ Movie short from film session {sid}: {short.title}"],
+            "result": {"clips": [clip], "cost_analysis": None},
+        }
+        _set_render(sid, key, status="completed", output=clip["video_url"], file=served, job_id=job_id,
+                    seconds=fm.total_seconds(segments), cuts=len(segments), finished=time.time())
+    except Exception as exc:  # noqa: BLE001
+        _log(sid, key, f"failed: {exc}")
+        _set_render(sid, key, status="failed", error=str(exc)[:500], finished=time.time())
+
+
+@router.post("/api/movieshorts/render/{sid}")
+async def shorts_render(sid: str, request: Request):
+    """Render one short (``{"index": n}``) or every planned one."""
+    _guard()
+    body = await _body(request)
+    sess = _load(sid)
+    previews = _shorts(sess).get("previews") or []
+    if not previews:
+        raise HTTPException(status_code=400, detail="paste an accepted shorts plan first")
+    if body.get("index") is not None:
+        try:
+            wanted = [int(body["index"])]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="index must be a number")
+    else:
+        wanted = list(range(len(previews)))
+    started = []
+    for index in wanted:
+        if index < 0 or index >= len(previews):
+            raise HTTPException(status_code=404, detail=f"no short {index + 1}")
+        key = _short_key(index)
+        if (sess.get("renders") or {}).get(key, {}).get("status") == "running":
+            continue
+        _set_render(sid, key, status="running", logs=[], started=time.time(), output=None, error=None, job_id=None)
+        _start_thread(_render_short_job, sid, index)
+        started.append(key)
+    return {"renders": started}
 
 
 @router.get("/api/movierecap/part/{sid}/{part}/transcript")

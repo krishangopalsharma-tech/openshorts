@@ -454,3 +454,130 @@ def test_recap_narrate_generates_fits_and_renders(local, monkeypatch):
     assert sess["settings"]["voice"] == "am_michael" and sess["settings"]["tts_speed"] == 1.05
     monkeypatch.setattr(film_voice, "health", lambda client=None: {"online": False, "start_command": "cmd"})
     assert c.post(f"/api/movierecap/narrate/{sid}/1", json={}).status_code == 503
+
+
+# --- movie shorts (montage through the clip maker) ---------------------------
+
+def _shorts_plan():
+    # CUES are 3 s long, 20 s apart: every line is its own 3.6 s cut, so five
+    # lines per scene and three scenes is 54 s, inside the 45-180 s range.
+    def scene(lo, hold=0.0):
+        return {"lines": list(range(lo, lo + 5)), "hold_after": hold, "note": f"lines {lo}+"}
+    return {"shorts": [
+        {"title": "How a top spy babysat 3 kids", "hook": "He fought dictators. Then breakfast.",
+         "mood": "funny", "ending": "the ally pulls a gun",
+         "scenes": [scene(20), scene(0, 1.5), scene(40)]},
+        {"title": "The worst first date in cinema", "hook": "Would you stay?", "mood": "tense",
+         "ending": "she walks out", "scenes": [scene(60), scene(80), scene(100)]},
+    ]}
+
+
+def test_shorts_prompt_lists_lines_with_ids(local):
+    c = local["client"]
+    sid = _session(local, shorts_count=4)["id"]
+    p = c.get(f"/api/movieshorts/prompt/{sid}").json()
+    assert p["count"] == 4 and "4 short vertical videos" in p["prompt"]
+    assert "#0 00:05 Where are we now 0" in p["prompt"]
+    assert "#358 " in p["prompt"]
+    assert c.get(f"/api/movieshorts/prompt/{sid}?format=text").headers["content-type"].startswith("text/plain")
+
+
+def test_shorts_plan_validates_stores_previews_and_can_be_forced(local):
+    c = local["client"]
+    sid = _session(local)["id"]
+    assert c.post(f"/api/movieshorts/render/{sid}", json={}).status_code == 400   # nothing planned
+
+    bad = _shorts_plan()
+    bad["shorts"][1]["scenes"][0]["lines"] = [20, 21, 22, 23, 24]            # reused from short 1
+    r = c.post(f"/api/movieshorts/plan/{sid}", json={"text": "```json\n" + json.dumps(bad) + "\n```"}).json()
+    assert r["ok"] is False and r["forceable"] is True
+    assert any(e["code"] == "reused_line" and e["short"] == 1 for e in r["errors"])
+    assert "short 2 scene 1" in r["errors_text"]
+    assert c.get(f"/api/film/session/{sid}").json()["shorts"]["previews"] == []
+
+    r = c.post(f"/api/movieshorts/plan/{sid}", json={"text": json.dumps(bad), "force": True}).json()
+    assert r["ok"] is True and r["forced"] is True and len(r["previews"]) == 2
+    sess = c.get(f"/api/film/session/{sid}").json()
+    assert sess["shorts"]["plan"]["forced"] is True
+
+    r = c.post(f"/api/movieshorts/plan/{sid}", json=_shorts_plan()).json()
+    assert r["ok"] is True and r["errors"] == [] and r["forced"] is False
+    p = r["previews"][0]
+    assert p["cuts"] == 15 and p["seconds"] == 55.5                      # 15 x 3.6 + 1.5 hold
+    assert [sc["index"] for sc in p["scenes"]] == [0, 1, 2]
+    assert p["segments"][0]["start"] == 404.75                            # scene order, not film order
+    assert p["scenes"][1]["hold_after"] == 1.5 and "Where are we now 0" in p["scenes"][1]["text"]
+    assert c.get("/api/film/sessions").json()["sessions"][0]["shorts_planned"] == 2
+
+    # a hand trim replaces the EDL
+    r = c.post(f"/api/movieshorts/segments/{sid}/0", json={"segments": [{"start": 10, "end": 20}, {"start": 30, "end": 35}]}).json()
+    assert r["preview"]["cuts"] == 2 and r["preview"]["seconds"] == 15.0 and r["preview"]["edited"] is True
+    assert c.post(f"/api/movieshorts/segments/{sid}/0", json={"segments": [{"start": 5, "end": 5.1}]}).status_code == 400
+    assert c.post(f"/api/movieshorts/segments/{sid}/7", json={"segments": [{"start": 1, "end": 2}]}).status_code == 404
+
+
+def test_shorts_render_registers_an_ordinary_clip_job(local, monkeypatch, tmp_path):
+    import recut
+    c = local["client"]
+    sid = _session(local, shorts_ratio="1:1", watermark_text="made by sona", music_db=-12)["id"]
+    assert c.post(f"/api/movieshorts/plan/{sid}", json=_shorts_plan()).json()["ok"]
+
+    lib = tmp_path / "music"
+    lib.mkdir()
+    (lib / "verclub-upbeat.mp3").write_bytes(b"\x00" * 16)
+    (lib / "empire-of-shadows-cinematic.mp3").write_bytes(b"\x00" * 16)
+    import music as _music
+    monkeypatch.setattr(_music, "MUSIC_DIR", str(lib))
+    monkeypatch.setattr(_music, "probe_duration", lambda p, timeout=30: 90.0)
+
+    seen = {}
+
+    def fake_recut(*, input_path, segments, output_dir, clean_name, **kw):
+        seen.update(input_path=input_path, n=len(segments), fmt=kw.get("output_format"),
+                    words=sum(len(s["words"]) for s in kw["captions_transcript"]["segments"]),
+                    hooks=(kw.get("effects") is not None, kw.get("captioner") is not None))
+        name = f"recut_1_abc_{clean_name}"
+        open(os.path.join(output_dir, name), "wb").write(b"\x02" * 8)
+        return f"subtitled_2_{name}", name
+    monkeypatch.setattr(recut, "perform_recut", fake_recut)
+
+    r = c.post(f"/api/movieshorts/render/{sid}", json={"index": 1}).json()
+    assert r["renders"] == ["shorts-1"]
+    st = c.get(f"/api/film/status/{sid}").json()["renders"]["shorts-1"]
+    assert st["status"] == "completed", st
+    job_id = st["job_id"]
+    assert st["output"] == f"/videos/{job_id}/subtitled_2_recut_1_abc_The_worst_first_date_in_cinema_{sid[:6]}_clip_1.mp4"
+    assert st["cuts"] == 15 and st["seconds"] == 54.0
+    assert seen["input_path"] == local["video"] and seen["n"] == 15 and seen["fmt"] == "square"
+    assert seen["words"] > 0 and seen["hooks"] == (True, True)
+
+    # An ordinary job: status answers, the clip carries the montage's specs,
+    # the editor can find the film as its source.
+    job = c.get(f"/api/status/{job_id}").json()
+    assert job["status"] == "completed"
+    clip = job["result"]["clips"][0]
+    assert clip["video_url"] == st["output"] and clip["picked_by"] == "claude"
+    assert len(clip["recipe"]["segments"]) == 15 and clip["output_format"] == "square"
+    assert clip["music"] == {"track": "empire-of-shadows-cinematic.mp3", "volume_db": -12.0, "duck": 70.0,
+                             "start": 0.0, "fade_out": 1.0, "profile": "dialogue"}
+    assert clip["overlays"][0]["text"] == "made by sona"
+    assert clip["caption_style"]["overrides"]["position"] == "center"
+    assert clip["film_session"] == sid and clip["montage"]["mood"] == "tense"
+    meta = json.load(open(next((local["out"] / job_id).glob("*_metadata.json"))))
+    assert meta["source_path"] == local["video"] and meta["film_session"] == sid
+    assert app_module._locate_source(job_id) == local["video"]
+
+    # every short at once skips the one already running/done only when running
+    r = c.post(f"/api/movieshorts/render/{sid}", json={}).json()
+    assert r["renders"] == ["shorts-0", "shorts-1"]
+    assert c.post(f"/api/movieshorts/render/{sid}", json={"index": 9}).status_code == 404
+
+
+def test_shorts_settings_are_validated(local):
+    c = local["client"]
+    sid = _session(local)["id"]
+    assert c.post(f"/api/film/session/{sid}/settings", json={"shorts_ratio": "4:5"}).status_code == 400
+    assert c.post(f"/api/film/session/{sid}/settings", json={"music_track": "nope.mp3"}).status_code == 400
+    assert c.post(f"/api/film/session/{sid}/settings", json={"caption_preset": "nope"}).status_code == 400
+    got = c.post(f"/api/film/session/{sid}/settings", json={"shorts_count": 4, "watermark_text": "x", "music_track": None}).json()
+    assert got["settings"]["shorts_count"] == 4 and got["settings"]["music_track"] is None

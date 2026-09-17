@@ -43,6 +43,18 @@ per-shot punch-in, selective blur. Six things, all bounded.
 
 ---
 
+## Status (18-sep-2026)
+
+**Movie Shorts is back as a montage through the clip maker (§7).** Built
+from a measured reference (a 2-minute Sona Darus short on *The Spy Next
+Door*): `film_montage.py` (line index, prompt, validator, cue → EDL),
+`/api/movieshorts/*` in `film_api`, a "shorts" product switch in the
+recap tab (`film/ShortsFlow.jsx`). A rendered short is an ORDINARY clip
+job under `output/<job>/`, cut by `recut.perform_recut` with the clip
+maker's own layer hooks, so the clip editor's tools work on it unchanged.
+Not yet run on a real film; the reference's look (per-line colour
+captions, punchy grade, white flashes, letter fly-in) is §7's phase 2.
+
 ## Status (17-sep-2026, evening)
 
 **Movie Shorts was removed the same day it was first rendered.** The real
@@ -681,6 +693,124 @@ scratch anyway.
 4. Real part 1; tune lead/tail, default speed and the words-per-chunk rule
    from the report. Then decide whether `/dev/captioned_speech` word
    timestamps are worth wiring for recap captions.
+
+## 7. Movie Shorts, second design: a montage through the clip maker (built 18-sep-2026)
+
+### 7.1 Reference, measured
+
+`🥷 How a Top Spy Babysat 3 Kids!😂 | The Spy Next Door (2010)` (Sona Darus,
+120 s, 1080x1200, 30 fps), read with 60 frames, ffmpeg scene detection at
+0.30, `silencedetect`, `ebur128`, and every spoken line matched back to the
+film's SRT:
+
+| measured | value |
+|---|---|
+| shots | 76; median 1.3 s, p10 0.7 s, p90 2.7 s, longest 5.6 s |
+| film scenes used | 7, in a NEW order: 44:40 → 42:00 → 12:02 → 44:46 → 43:50 → 44:12 → 1:04:28 → 58:54 |
+| continuous SOURCE runs | 5-8 s of dialogue kept intact, trimmed between lines, never inside them (hide-and-seek 43:50.9-43:58.2 = 7.3 s; Ringo 12:02.5-12:10.0 = 7.5 s) |
+| footage kept | ~100 s of 94 min |
+| silences over 0.4 s at −35 dB | 0: the bed never stops |
+| loudness | −9.2 LUFS integrated, LRA 9.6 (YouTube normalises to −14 anyway) |
+| music-only stretches | 0-6 s cold open (no caption), 58-76 s gag run |
+
+Captions: one uppercase line at frame centre, colour rotating PER LINE
+(blue, orange gradient, purple, cyan, green, pink, yellow, red, white),
+spoken word brighter, glow, letters flying in on some lines, three type
+styles. Picture: 2.39:1 reframed on faces to 9:10, digital 2-3x punch-ins
+to extreme close-up, warm/teal grade with contrast and saturation up,
+white flash on scene change, "MADE BY <channel>" bottom centre.
+
+Story spine: the title states a PREMISE ("how a top spy babysat 3 kids"),
+each scene proves it with one gag, the last line is a twist (Colton pulls
+a gun; "Good work."). The viewer who laughed wants the film.
+
+The two numbers that matter are not the 76 shots. Content ID measures the
+continuous source stretch, and the film's own cuts inside it do not break
+the match; this editor's unit is the 5-8 s dialogue run, about 15 per
+short. A cut that removes no frames buys nothing, so `film_montage` does
+not split a long run, it REPORTS it (`long_run`) and the chat drops a
+line. Music replaces the film's own audio under every run.
+
+### 7.2 Why the clip maker, not a pipeline
+
+`recut.perform_recut(segments=...)` already renders an ordered list of
+source ranges (any order, repeats allowed) with TRACK reframe, then
+`app._clip_layer_hooks` puts the clip's look, music duck, overlays and
+captions on top and carries them through every later trim. That IS the
+montage. The crop-ladder design (§2) fought the film's own cuts with
+beat-locked per-shot crops and lost; this keeps the film's cuts and
+reframes once. Only `recut.MAX_SEGMENTS` moved (12 → 40) and
+`_locate_source` learnt a `source_path` in metadata (self-host only) so
+the editor can re-cut from a film that was never copied into `uploads/`.
+
+### 7.3 `film_montage.py`
+
+- `line_index(cues)`: every cue with its file position as id (a corrected
+  offset keeps the ids). `lines_text` prints `#id MM:SS text` under block
+  headers, unmerged: the chat names exact lines.
+- `build_prompt(cues, duration, title, count)`: 2-5 shorts, 3-12 scenes
+  each, 45-180 s of kept footage, a premise title (no "part N",
+  "explained", "recap"), scenes in telling order from anywhere, no line
+  reused across scenes or shorts, the last scene ends on the line that
+  lands, `hold_after` (≤ 6 s) when the gag is in the picture after the
+  last line, `mood` from `MOODS` (picks the bed), a 3-8 word `hook`.
+- `Scene(lines, hold_after, note)`, `Short(title, hook, mood, ending,
+  scenes)`, `ShortsPlan(shorts)`.
+- `scene_segments`: lines sorted by time, joined into runs while the gap
+  is ≤ 0.6 s, each run −0.25 s lead / +0.35 s tail, `hold_after` on the
+  last run, clamped to the film, touching runs merged. Silence trimming
+  is what an EDL built from cues does by construction.
+- `validate_shorts` → `(plan, errors, warnings, previews)`: schema
+  (unforceable), `scene_count`, `title`, `unknown_line`, `reused_line`,
+  `total`, `empty`; warnings `long_line` (> 9 words wraps) and `long_run`
+  (> 8 s continuous). `previews` carry each short's segments, per-scene
+  table and total so the API and the UI agree.
+- `pick_track(mood, tracks)` by filename keywords; `caption_style()` (one
+  centred uppercase line of `film_pop`); `watermark(text)` (an overlays
+  text item at y = 0.93).
+
+### 7.4 Routes (`film_api`, self-host only)
+
+`GET /api/movieshorts/prompt/{sid}`; `POST /api/movieshorts/plan/{sid}`
+(text or JSON, `force` keeps a plan past rule errors, shorts with no
+footage dropped); `POST /api/movieshorts/segments/{sid}/{i}` (a hand
+trim replaces the EDL); `POST /api/movieshorts/render/{sid}` (`index` or
+all). Settings on the session: `shorts_count`, `shorts_ratio` (9:16 /
+1:1), `music_track` (None = by mood), `music_db`, `music_duck`,
+`watermark_text`, `caption_preset`.
+
+`_render_short_job` writes `output/<job>/<slug>_metadata.json` in the
+main.py shape (`shorts: [clip]`, the film-time transcript from the cues,
+`source_video`, `source_path`, `film_session`), where the clip carries
+`recipe.segments`, `music` (profile `dialogue`, so the bed dips instead
+of vanishing), `overlays`, `caption_style`, `montage.scenes`. Then
+`recut.perform_recut` from the film with `reframe=True`, the virtual
+transcript for captions and the layer hooks; the served file goes into
+`video_url`, the job into `app.jobs` as completed. The clean
+`<base>_clip_1.mp4` is deliberately NOT written: the editor's fast path
+recuts a contiguous canonical file by rebasing times, which is wrong for
+a montage, so its absence sends every later edit through the source path.
+
+### 7.5 Dashboard
+
+The recap tab gained a product switch (recap series / shorts). `ShortsFlow`:
+settings card, the paste panel, one card per short (title, hook, mood,
+ending, seconds, cuts, a scene table with film range / kept / hold, the
+`long_run` warning), render per short or all, the finished video and
+"open in clip editor" (App's `openJobById`, so the short lands in the
+results view with every clip tool).
+
+### 7.6 Phase 2 (the look), not built
+
+1. Caption preset family `kinetic`: `line_palette` override cycling per
+   event, glow, `highlight` + `pop`, centre; three type styles.
+2. Exact word timings: whisper `small` on the montage's ~100 s of
+   dialogue, aligned to the SRT text with `compilation.align_lines_to_words`.
+3. `punchy` grade in `cinematic.py`; a white flash on the first frames of
+   each scene's first cut (`fade=in:0:4:color=white`), not on every cut.
+4. `punch_in.py` on caption line starts; optional 2-3x zooms.
+5. Later: `letter_scatter` (per-glyph ASS events from PIL advances), a
+   music-only cold open the chat names, series linking, 4:5 output.
 
 ## 4. Publishing (both modules)
 

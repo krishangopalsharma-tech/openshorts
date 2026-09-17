@@ -139,6 +139,26 @@ Library defaults keep `teaser` so the original tests keep their meaning;
   captions. Shorts from a film go through the clip maker instead; the SRT
   ingest, the chat planning pattern and `music.MIX_PROFILES` survived. It is
   in git history (`0c58b66`) if the fast-cut look is ever wanted again.
+- **Movie Shorts, second design (18-sep-2026): a montage through the clip
+  maker** (`film_montage.py`, `/api/movieshorts/*`, the "shorts" switch in
+  the recap tab). Built to a measured reference (docs §7.1): seven scenes
+  from a 94-min film in a NEW order, one gag each, the last line a twist,
+  the bed never stops. The chat is handed the SRT lines WITH IDS and answers
+  with 2-5 shorts as ordered lists of line ids; `scene_segments` turns each
+  run of lines into one cut (−0.25 s / +0.35 s, gaps ≤ 0.6 s joined,
+  `hold_after` for a gag the SRT cannot see), so silences vanish by
+  construction. A short renders as an ORDINARY clip job: metadata in
+  `output/<job>/`, `recut.perform_recut(segments)` from the film with
+  `reframe=True` and `_clip_layer_hooks` (music profile `dialogue`,
+  watermark overlay, one centred `film_pop` line), then `app.jobs[job]` so
+  every clip-card tool works on it. Two things that look like omissions and
+  are not: the clean `<base>_clip_1.mp4` is never written (the editor's fast
+  path rebases times onto a contiguous canonical file, wrong for a montage,
+  so its absence forces the source path), and a run over 8 s is REPORTED
+  (`long_run`) rather than split, because a cut that removes no frames
+  leaves the source stretch continuous for fingerprinting. `MAX_SEGMENTS`
+  is 40 for the same reason; `_locate_source` honours `source_path` in
+  metadata (self-host only) so the film is never copied into `uploads/`.
 - Sessions live under `output/film/<id>/session.json` and are skipped by
   BOTH output sweeps (the hourly one and the size cap): a recap is built over
   several sittings. Rendered parts serve at `/film/<id>/<file>` through

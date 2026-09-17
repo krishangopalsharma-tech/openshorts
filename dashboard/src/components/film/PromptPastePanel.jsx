@@ -130,6 +130,8 @@ export default function PromptPastePanel({ title, hint, loadPrompt, submit, onVa
                 {e.beat !== undefined && <span className="font-mono text-xs mr-1">beat {e.beat + 1}</span>}
                 {e.part !== undefined && <span className="font-mono text-xs mr-1">part {e.part}</span>}
                 {e.chunk !== undefined && <span className="font-mono text-xs mr-1">chunk {e.chunk + 1}</span>}
+                {e.short !== undefined && <span className="font-mono text-xs mr-1">short {e.short + 1}</span>}
+                {e.scene !== undefined && <span className="font-mono text-xs mr-1">scene {e.scene + 1}</span>}
                 {e.message}
               </span>
             </li>
@@ -143,6 +145,8 @@ export default function PromptPastePanel({ title, hint, loadPrompt, submit, onVa
               <AlertTriangle size={14} className="mt-0.5 shrink-0" />
               <span>
                 {w.chunk !== undefined && <span className="font-mono text-xs mr-1">chunk {w.chunk + 1}</span>}
+                {w.short !== undefined && <span className="font-mono text-xs mr-1">short {w.short + 1}</span>}
+                {w.scene !== undefined && <span className="font-mono text-xs mr-1">scene {w.scene + 1}</span>}
                 {w.message} <span className="text-muted">· review, not auto-failed</span>
               </span>
             </li>

@@ -6,14 +6,19 @@ import SubtitleModal from './SubtitleModal';
 import OverlayEditor from './OverlayEditor';
 import SessionSetup, { Stat } from './film/SessionSetup';
 import PromptPastePanel from './film/PromptPastePanel';
+import ShortsFlow from './film/ShortsFlow';
 import { filmJson, fmtTime, useRenderPoll, copyText, downloadText } from './film/filmApi';
 import { getApiUrl } from '../config';
 
 const STEPS = ['Film + SRT', 'Spoiler map', 'Structure', 'Part plans', 'Render', 'Voiceover'];
 
-export default function MovieRecapTab() {
+export default function MovieRecapTab({ onOpenJob }) {
   const [session, setSession] = useState(null);
   const [step, setStep] = useState(0);
+  // What the session is for right now: the three-part narrated recap, or
+  // 2-5 montage shorts through the clip maker. Same film, same SRT, same
+  // offset; only the planning prompt and the render differ.
+  const [product, setProduct] = useState('recap');
   const [renders, setRenders] = useState({});
   const [budget, setBudget] = useState(null);
   const [error, setError] = useState('');
@@ -102,13 +107,25 @@ export default function MovieRecapTab() {
     <div className="h-full overflow-y-auto custom-scrollbar p-4 sm:p-6 md:p-10 animate-fade">
       <div className="max-w-5xl mx-auto space-y-6">
         <header>
-          <h1 className="text-xl font-semibold text-ink flex items-center gap-2"><BookOpen size={20} className="text-brass" /> Movie Recap</h1>
+          <h1 className="text-xl font-semibold text-ink flex items-center gap-2"><BookOpen size={20} className="text-brass" /> Movie Recap &amp; Shorts</h1>
           <p className="text-sm text-muted mt-1 max-w-2xl">
-            Three parts that make the viewer want to watch the film <em>more</em>. Each argues one claim about how the film
-            is built; every payoff is withheld and nothing after 75% of the runtime is ever used. Planned in a chat window,
-            narrated by you, rendered here with the original soundtrack muted.
+            {product === 'shorts'
+              ? 'Two-minute montages: 4-9 scenes from anywhere in the film in the order that tells the best mini-story, the film\'s own lines as captions, a music bed that never stops, the last line a twist. Planned in a chat window, rendered as ordinary clips.'
+              : 'A three-part narrated retelling. Planned in a chat window, voiced by Kokoro or by you, rendered here with the original soundtrack muted under the narration.'}
           </p>
         </header>
+        {session && (
+          <div className="border border-rule rounded-card p-3">
+            <SegmentedControl size="sm" value={product} onChange={setProduct}
+              options={[
+                { value: 'recap', label: 'recap series', hint: 'three narrated parts' },
+                { value: 'shorts', label: 'shorts', hint: '2-5 montages through the clip maker' },
+              ]} />
+          </div>
+        )}
+        {product === 'shorts' && session ? (
+          <ShortsFlow session={session} onSession={onSession} renders={renders} setRenders={setRenders} onOpenJob={onOpenJob} />
+        ) : (<>
         <StepIndicator
           steps={(session?.settings?.recap_mode || 'story') === 'story' ? STEPS.map((s) => (s === 'Spoiler map' ? 'Story map' : s)) : STEPS}
           current={step} onStepClick={(i) => { if (session || i === 0) setStep(i); }} />
@@ -276,6 +293,7 @@ export default function MovieRecapTab() {
             <p className="text-xs text-muted flex items-center gap-1"><ExternalLink size={12} /> upload each part unlisted, run YouTube Studio&apos;s copyright check, then decide. name the film, year and director and link a legitimate way to watch it.</p>
           </div>
         )}
+        </>)}
 
         {error && <p className="text-bad text-sm flex items-center gap-2"><AlertCircle size={14} /> {error}</p>}
       </div>
