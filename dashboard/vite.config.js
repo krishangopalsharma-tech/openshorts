@@ -23,6 +23,8 @@ export default defineConfig({
       '/api': { target: backend, changeOrigin: true },
       '/videos': { target: backend, changeOrigin: true },
       '/thumbnails': { target: backend, changeOrigin: true },
+      // Film modules: rendered shorts / recap parts (output/film/<session>/).
+      '/film': { target: backend, changeOrigin: true },
       '/gallery': { target: backend, changeOrigin: true },
       // Asset mounts the app links to directly (app.py mounts all three):
       // the logo library the overlay editor previews, the music previews, and

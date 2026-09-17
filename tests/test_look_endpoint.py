@@ -130,7 +130,9 @@ def fake_captions(monkeypatch):
 
     monkeypatch.setattr(app_module, "_burn_styled_captions", styled)
 
-    import main as main_module
+    # main.py pulls the ML/scene stack (scenedetect, ultralytics...) at import;
+    # the thin CI env does not have it, so these two tests skip there.
+    main_module = pytest.importorskip("main")
 
     def stock(video_path, transcript, clip_start, clip_end, split_ranges=None):
         calls.append(("stock", os.path.basename(video_path), None))

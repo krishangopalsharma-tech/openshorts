@@ -135,8 +135,10 @@ class TestLongInputsAreWindowed:
 
     def _run(self, monkeypatch, seconds):
         import numpy as np
-        import torch
-        import torchaudio
+        # The thin CI env has no torch (see .github/workflows/ci.yml): these
+        # tests exercise the windowing against real tensors, so they skip there.
+        torch = pytest.importorskip("torch")
+        torchaudio = pytest.importorskip("torchaudio")
         calls = []
 
         def fake_apply_model(model, mix, device=None, **kw):
