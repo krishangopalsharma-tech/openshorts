@@ -1,28 +1,30 @@
-"""Render assembly for the film modules: a shot (or chunk) plan -> one finished
-short. Shared by Movie Shorts and Movie Recap; only the plan differs.
+"""Render assembly for Movie Recap: a chunk plan -> one finished part.
 
 Order, and why each step sits where it does (docs/film-modules-plan.md §1.3):
 
-1. cut every shot from the source with its own crop and grade (re-encode,
-   uniform params, ``-ss`` before ``-i`` so an 86-shot plan does not decode a
-   two-hour file 86 times from the head)
+1. cut every chunk from the source (re-encode, uniform params, ``-ss`` before
+   ``-i`` so an 18-chunk plan does not decode a two-hour file 18 times from
+   the head; every part scaled to one frame size so the concat is clean)
 2. concat with ``-c copy``
 3. speed 1.25x — BEFORE the reframe, because reframe_v2 emits sendcmd crop
    timelines and a PTS change afterwards lands every command on the wrong
    frame
 4. reframe to the output format (main.render_clip, injectable)
-5. captions from the film's own cues, remapped onto the cut and divided by
-   the speed factor (or they drift: fine at 20 s, wrong at 120 s)
-6. music bed over the WHOLE short — never per shot, or the track restarts on
-   every cut
-7. final loudness pass, LRA 7 (this format is flat and loud), and the fps
+5. audio: the silent preview drops the soundtrack (``mute``); the narrated
+   part lays the voiceover over a muted bed, kept only on ``keep_audio``
+   chunks, and normalises once
+6. fps
 
 Every external step is a hook with a default, so tests drive the whole
-assembly with fakes and never touch ffmpeg, whisper or the GPU.
+assembly with fakes and never touch ffmpeg or the GPU.
+
+The Movie Shorts render (per-shot crop ladder, beat-locked cutting, music
+bed) lived here until 17-sep-2026 and was removed after the first real render:
+the crop changes read as vibration after the reframe. Movie shorts will go
+through the clip maker instead.
 """
 
 import os
-import shutil
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -33,8 +35,7 @@ from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
 FILM_LOUDNORM = "loudnorm=I=-14:TP=-2.0:LRA=7"
 DEFAULT_FPS = 60
 OUTPUT_FORMATS = ("vertical", "square")
-# Turing consumer cards allow 2-3 concurrent NVENC sessions; the rest of the
-# ~86 tiny encodes go to CPU. Both knobs are env because driver behaviour varies.
+# Turing consumer cards allow 2-3 concurrent NVENC sessions.
 NVENC_PARALLEL = int(os.environ.get("NVENC_PARALLEL", "2"))
 CPU_PARALLEL = int(os.environ.get("CPU_PARALLEL", "4"))
 FFMPEG_TIMEOUT = 1800
@@ -64,82 +65,41 @@ def _run(cmd):
         raise RenderError(f"ffmpeg failed ({cmd[1:6]}...): {tail}")
 
 
-def grade_chain(name):
-    """The eq/colorbalance chain for a named grade, or None for neutral."""
-    if not name or name in ("none", "neutral"):
-        return None
-    from cinematic import COLOR_GRADES
-    return COLOR_GRADES.get(name)
-
-
-def shot_filter(shot, grade=None, blur=None, out_size=None):
-    """``-vf`` for one shot: static punch-in crop, optional region blur, grade,
-    and a scale back to ``out_size`` (w, h). The scale is not cosmetic: every
-    crop scale yields a different frame size, and the ``-c copy`` concat joins
-    mismatched parts into a stream the next pass cannot decode."""
+def shot_filter(shot, out_size=None):
+    """``-vf`` for one chunk: an optional reasoned ``hflip`` (movierecap
+    validates the reason and refuses patterns; never set automatically) and a
+    scale to the common ``out_size`` so every part matches for the concat."""
     parts = []
-    crop = fp.crop_filter(shot.get("scale", 1.0), shot.get("anchor", (0.5, 0.5)))
-    if crop:
-        parts.append(crop)
-    if out_size and (crop or shot.get("blur") or blur):
+    if shot.get("hflip"):
+        parts.append("hflip")
+    if out_size:
         w, h = int(out_size[0]) - int(out_size[0]) % 2, int(out_size[1]) - int(out_size[1]) % 2
         parts.append(f"scale={w}:{h}:flags=lanczos")
-    if shot.get("hflip"):
-        # A manual, reasoned editorial flip (movierecap validates the reason
-        # and refuses patterns); never set automatically.
-        parts.append("hflip")
-    blur = blur or shot.get("blur")
-    if blur:
-        # Blur a rectangle (fractions of the cropped frame) for advertiser
-        # safety: split, crop the region, gblur it, overlay it back.
-        x, y, w, h = (max(0.0, min(1.0, float(blur[k]))) for k in ("x", "y", "w", "h"))
-        parts.append(
-            f"split[__b0][__b1];[__b1]crop=iw*{w:.3f}:ih*{h:.3f}:iw*{x:.3f}:ih*{y:.3f},"
-            f"gblur=sigma=24[__bb];[__b0][__bb]overlay=W*{x:.3f}:H*{y:.3f}")
-    chain = grade_chain(grade)
-    if chain:
-        parts.append(chain)
     return ",".join(parts) if parts else None
 
 
-def shot_cut_command(input_path, shot, out_path, *, grade=None, encoder=None, out_size=None):
-    """ffmpeg argv cutting one shot with its crop and grade. ``encoder`` is
-    "nvenc" / "cpu" / None (None = ffmpeg_utils decides). ``out_size`` is the
-    common (w, h) every cropped part is scaled back to."""
-    vf = shot_filter(shot, grade, out_size=out_size)
-    if encoder == "cpu":
-        enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
-    elif encoder == "nvenc":
-        enc = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-cq", "21"]
-    else:
-        enc = video_encode_args(QUALITY_FAST)
+def shot_cut_command(input_path, shot, out_path, *, out_size=None):
+    """ffmpeg argv cutting one chunk with uniform encode parameters."""
+    vf = shot_filter(shot, out_size=out_size)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
            "-ss", f"{float(shot['start']):.3f}", "-to", f"{float(shot['end']):.3f}",
            "-i", input_path]
     if vf:
-        # A filter with labels needs -filter_complex; a plain chain is -vf.
-        if "[" in vf:
-            cmd += ["-filter_complex", vf]
-        else:
-            cmd += ["-vf", vf]
-    cmd += [*enc, "-pix_fmt", "yuv420p",
+        cmd += ["-vf", vf]
+    cmd += [*video_encode_args(QUALITY_FAST), "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-ar", "48000", "-ac", "2",
             *METADATA_SCRUB, "-movflags", "+faststart", out_path]
     return cmd
 
 
-def cut_shots(input_path, shots, workdir, *, grade=None, runner=None,
-              nvenc_parallel=NVENC_PARALLEL, cpu_parallel=CPU_PARALLEL, out_size=None):
-    """Encode every shot, a few in parallel, ALL with the same encoder.
+def cut_shots(input_path, shots, workdir, *, runner=None, nvenc_parallel=NVENC_PARALLEL,
+              cpu_parallel=CPU_PARALLEL, out_size=None):
+    """Encode every chunk, a few in parallel, ALL with the same encoder.
 
-    Splitting the lanes between NVENC and libx264 was tried first (the plan's
-    idea for an 8 GB Turing card) and produced parts whose streams differ in
-    SPS/profile; the ``-c copy`` concat then joins them without complaint and
-    the next ffmpeg pass fails on the result with an empty stderr. Uniform
-    parameters are what make the concat demuxer safe (recut.cut_commands says
-    the same). Parallelism is capped at ``nvenc_parallel`` on the GPU (Turing
-    allows 2-3 sessions) and ``cpu_parallel`` on libx264. Returns the part
-    paths in shot order.
+    Splitting the lanes between NVENC and libx264 was tried first and produced
+    parts whose streams differ in SPS/profile; the ``-c copy`` concat joins them
+    without complaint and the next ffmpeg pass fails on the result with an
+    empty stderr. Uniform parameters are what make the concat demuxer safe.
     """
     run = runner or _run
     token = uuid.uuid4().hex[:8]
@@ -151,8 +111,7 @@ def cut_shots(input_path, shots, workdir, *, grade=None, runner=None,
     lanes = max(1, nvenc_parallel if use_gpu else cpu_parallel)
 
     def job(i):
-        run(shot_cut_command(input_path, shots[i], parts[i], grade=grade, encoder=None,
-                             out_size=out_size))
+        run(shot_cut_command(input_path, shots[i], parts[i], out_size=out_size))
 
     with ThreadPoolExecutor(max_workers=lanes) as pool:
         list(pool.map(job, range(len(shots))))
@@ -176,55 +135,26 @@ def concat_parts(parts, out_path, workdir, runner=None):
     return out_path
 
 
-def finalize_command(input_path, out_path, fps=DEFAULT_FPS, loudnorm=FILM_LOUDNORM):
-    """Last pass: frame rate and the one loudness normalisation."""
+def finalize_command(input_path, out_path, fps=DEFAULT_FPS, loudnorm=FILM_LOUDNORM, mute=False):
+    """Last pass: frame rate and the one loudness normalisation. ``mute``
+    drops the audio stream: the recap's silent preview must not carry the
+    film's soundtrack (it did, in the first test)."""
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", input_path]
     if fps:
         cmd += ["-vf", f"fps={int(fps)}", *video_encode_args(QUALITY_FAST)]
     else:
         cmd += ["-c:v", "copy"]
-    cmd += ["-af", loudnorm, "-c:a", "aac", "-b:a", "160k",
-            *METADATA_SCRUB, "-movflags", "+faststart", out_path]
+    if mute:
+        cmd += ["-an"]
+    else:
+        cmd += ["-af", loudnorm, "-c:a", "aac", "-b:a", "160k"]
+    cmd += [*METADATA_SCRUB, "-movflags", "+faststart", out_path]
     return cmd
-
-
-def captions_for_cut(cues, shots, speed):
-    """The film's own dialogue on the FINISHED timeline: cues -> transcript,
-    remapped through the shot list (recut.virtual_transcript), divided by the
-    speed factor."""
-    from recut import virtual_transcript
-    transcript = fp.cues_to_transcript(cues)
-    segments = [{"start": s["start"], "end": s["end"]} for s in shots]
-    remapped = virtual_transcript(transcript, segments)
-    return fp.scale_transcript(remapped, speed)
 
 
 def _default_reframe(work_path, out_path, output_format):
     from main import render_clip
     return render_clip(work_path, out_path, output_format)
-
-
-def _default_captioner(video_path, transcript, out_path, preset, video_w, video_h):
-    import subtitles
-    ass_path = out_path + ".ass"
-    dur = fp.transcript_duration(transcript) + 2.0
-    if not subtitles.generate_ass_styled(transcript, 0.0, dur, ass_path, preset=preset,
-                                         video_w=video_w, video_h=video_h):
-        return False
-    try:
-        subtitles.burn_subtitles(video_path, ass_path, out_path)
-    finally:
-        try:
-            os.remove(ass_path)
-        except OSError:
-            pass
-    return os.path.exists(out_path)
-
-
-def _default_music(video_path, track_path, out_path, spec):
-    import music
-    return music.apply_music(video_path, spec, out_path, profile="dialogue",
-                             track_path=track_path)
 
 
 def _probe_size(path):
@@ -235,86 +165,66 @@ def _probe_size(path):
             stderr=subprocess.STDOUT, timeout=60).decode().strip().split("x")
         return int(out[0]), int(out[1])
     except Exception:
-        return (1080, 1920)
+        return (1920, 1080)
 
 
-def render_short(video_path, shots, out_path, workdir, *, speed=fp.DEFAULT_SPEED,
-                 output_format="vertical", grade=None, fps=DEFAULT_FPS,
-                 cues=None, caption_preset="film_pop", music_track=None,
-                 music_spec=None, runner=None, reframe=None, captioner=None,
-                 mixer=None, probe_size=None, keep_parts=False, log=None):
-    """The whole assembly. Returns a dict describing what was produced."""
+def _cleanup(paths):
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def render_silent(video_path, shots, out_path, workdir, *, speed=fp.DEFAULT_SPEED,
+                  output_format="vertical", fps=DEFAULT_FPS, runner=None, reframe=None,
+                  probe_size=None, keep_parts=False, log=None, mute=True):
+    """The silent preview of a part: chunks cut, joined, sped, reframed, no
+    soundtrack. Returns a dict describing what was produced."""
     if output_format not in OUTPUT_FORMATS:
         raise RenderError(f"output_format must be one of {OUTPUT_FORMATS}")
     if not shots:
-        raise RenderError("no shots to render")
+        raise RenderError("no chunks to render")
     log = log or _safe_print
     run = runner or _run
     reframe = reframe or _default_reframe
-    captioner = captioner or _default_captioner
-    mixer = mixer or _default_music
     probe_size = probe_size or _probe_size
     os.makedirs(workdir, exist_ok=True)
     token = uuid.uuid4().hex[:6]
     joined = os.path.join(workdir, f"temp_film_join_{token}.mp4")
     sped = os.path.join(workdir, f"temp_film_speed_{token}.mp4")
     framed = os.path.join(workdir, f"temp_film_framed_{token}.mp4")
-    captioned = os.path.join(workdir, f"temp_film_cap_{token}.mp4")
-    mixed = os.path.join(workdir, f"temp_film_mix_{token}.mp4")
-    temps = [joined, sped, framed, captioned, mixed]
-    report = {"shots": len(shots), "speed": speed, "output_format": output_format,
-              "grade": grade or "none", "captions": False, "music": None}
     parts = []
     try:
         src_size = probe_size(video_path)
-        log(f"🎞️  Cutting {len(shots)} shots ({src_size[0]}x{src_size[1]})")
-        parts = cut_shots(video_path, shots, workdir, grade=grade, runner=run, out_size=src_size)
+        log(f"🎞️  Cutting {len(shots)} chunks ({src_size[0]}x{src_size[1]})")
+        parts = cut_shots(video_path, shots, workdir, runner=run, out_size=src_size)
         concat_parts(parts, joined, workdir, runner=run)
-
         log(f"⏩ Speed {speed}x")
         run(fp.speed_command(joined, sped, speed))
-
         log(f"📐 Reframe -> {output_format}")
         if not reframe(sped, framed, output_format):
             raise RenderError("reframe failed")
-        current = framed
-
-        if cues:
-            transcript = captions_for_cut(cues, shots, speed)
-            if transcript["segments"]:
-                w, h = probe_size(current)
-                log(f"💬 Captions ({caption_preset})")
-                if captioner(current, transcript, captioned, caption_preset, w, h):
-                    current = captioned
-                    report["captions"] = True
-
-        if music_track:
-            log(f"🎵 Music bed {os.path.basename(music_track)}")
-            spec = {"volume_db": -18.0, "duck": 100.0, "fade_out": 1.0, **(music_spec or {})}
-            if mixer(current, music_track, mixed, spec):
-                current = mixed
-                report["music"] = os.path.basename(music_track)
-
-        log("🔊 Loudness + fps")
-        run(finalize_command(current, out_path, fps=fps))
-        report["output"] = out_path
-        return report
+        log("🔇 Mute + fps" if mute else "🔊 Loudness + fps")
+        run(finalize_command(framed, out_path, fps=fps, mute=mute))
+        return {"shots": len(shots), "speed": speed, "output_format": output_format,
+                "muted": bool(mute), "output": out_path}
     finally:
         if not keep_parts:
-            for p in parts + temps:
-                if os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+            _cleanup(parts + [joined, sped, framed])
+
+
+# Kept for callers that still say "short"; same function.
+render_short = render_silent
 
 
 def narration_mix_command(video_path, vo_chunks, out_path, *, keep_ranges=(),
                           bed_level=0.18, duration=None, loudnorm=FILM_LOUDNORM):
-    """Recap audio: the recorded narration chunks placed at their measured
-    ``voice_start`` over a picture whose own soundtrack is MUTED, except in
-    ``keep_ranges`` (finished seconds) where the film's dialogue is the
-    evidence; there the bed sits at ``bed_level`` and ducks under the voice
+    """Recap audio: the narration chunks placed at their ``voice_start`` over
+    a picture whose own soundtrack is MUTED, except in ``keep_ranges``
+    (finished seconds) where the film's dialogue is the evidence; there the
+    bed sits at ``bed_level`` and ducks under the voice
     (music.MIX_PROFILES['narration']). Video is stream-copied."""
     from music import MIX_PROFILES
     p = MIX_PROFILES["narration"]
@@ -353,16 +263,18 @@ def narration_mix_command(video_path, vo_chunks, out_path, *, keep_ranges=(),
 
 def render_narrated(video_path, segments, out_path, workdir, *, speed=fp.DEFAULT_SPEED,
                     output_format="vertical", fps=DEFAULT_FPS, runner=None, reframe=None,
-                    keep_parts=False, log=None):
+                    probe_size=None, keep_parts=False, log=None):
     """A recap part: fitted source ``segments`` (from
-    movierecap.fitted_to_source) cut, joined, sped, reframed, then the
-    narration laid over a muted bed. Segments carry ``voice_start`` /
-    ``chunk`` (VO wav) / ``keep_audio`` / ``shot_start`` / ``shot_length``."""
+    movierecap.fitted_to_source or film_voice.narrate_plan) cut, joined,
+    sped, reframed, then the narration laid over a muted bed. Segments carry
+    ``voice_start`` / ``chunk`` (VO wav) / ``keep_audio`` / ``shot_start`` /
+    ``shot_length``."""
     if not segments:
         raise RenderError("no segments to render")
     log = log or _safe_print
     run = runner or _run
     reframe = reframe or _default_reframe
+    probe_size = probe_size or _probe_size
     os.makedirs(workdir, exist_ok=True)
     token = uuid.uuid4().hex[:6]
     joined = os.path.join(workdir, f"temp_film_join_{token}.mp4")
@@ -371,10 +283,9 @@ def render_narrated(video_path, segments, out_path, workdir, *, speed=fp.DEFAULT
     mixed = os.path.join(workdir, f"temp_film_mix_{token}.mp4")
     parts = []
     try:
-        shots = [{"start": s["start"], "end": s["end"], "scale": 1.0,
-                  "hflip": bool(s.get("flip"))} for s in segments]
+        shots = [{"start": s["start"], "end": s["end"], "hflip": bool(s.get("flip"))} for s in segments]
         log(f"🎞️  Cutting {len(shots)} chunks")
-        parts = cut_shots(video_path, shots, workdir, runner=run, out_size=_probe_size(video_path))
+        parts = cut_shots(video_path, shots, workdir, runner=run, out_size=probe_size(video_path))
         concat_parts(parts, joined, workdir, runner=run)
         log(f"⏩ Speed {speed}x")
         run(fp.speed_command(joined, sped, speed))
@@ -394,69 +305,4 @@ def render_narrated(video_path, segments, out_path, workdir, *, speed=fp.DEFAULT
                 "bed_kept": len(keep), "duration": round(total, 2)}
     finally:
         if not keep_parts:
-            for p in parts + [joined, sped, framed, mixed]:
-                if os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
-
-
-def scene_cuts_provider(video_path, workdir, runner=None):
-    """``(start, end) -> [cut times]`` using scene_detection on a stream-copied
-    slice of the beat. Used by expand_plan so real cuts become shot
-    boundaries; any failure returns no cuts and the beat is jittered instead."""
-    run = runner or _run
-
-    def cuts(start, end):
-        slice_path = os.path.join(workdir, f"temp_film_scene_{uuid.uuid4().hex[:6]}.mp4")
-        try:
-            run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                 "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", video_path,
-                 "-c", "copy", "-an", slice_path])
-            from scene_detection import detect_scenes
-            scenes, _fps = detect_scenes(slice_path)
-            out = []
-            for a, _b in scenes[1:]:
-                out.append(start + float(a.get_seconds()))
-            return out
-        except Exception as exc:  # noqa: BLE001 - optional refinement
-            print(f"   ⚠️ scene cuts skipped for {start:.1f}-{end:.1f}: {exc}")
-            return []
-        finally:
-            if os.path.exists(slice_path):
-                try:
-                    os.remove(slice_path)
-                except OSError:
-                    pass
-    return cuts
-
-
-def measure_cut_rhythm(video_path, threshold=0.3):
-    """Detected cut times of a finished short (ffmpeg scene score). The
-    acceptance check from the plan: mean gap should land in 1.3-1.7 s, or the
-    crop ladder is not varying enough for a viewer to register the cuts."""
-    cmd = ["ffmpeg", "-hide_banner", "-i", video_path,
-           "-vf", f"select='gt(scene,{threshold})',metadata=print:file=-",
-           "-an", "-f", "null", "-"]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=600)
-    times = []
-    for line in res.stdout.decode("utf-8", "replace").splitlines():
-        if "pts_time:" in line:
-            try:
-                times.append(float(line.split("pts_time:")[1].split()[0]))
-            except (IndexError, ValueError):
-                continue
-    gaps = [b - a for a, b in zip(times, times[1:])]
-    return {"cuts": len(times), "mean_gap": (sum(gaps) / len(gaps)) if gaps else None,
-            "times": times}
-
-
-def cleanup_workdir(workdir):
-    for name in os.listdir(workdir) if os.path.isdir(workdir) else []:
-        if name.startswith("temp_film_"):
-            try:
-                os.remove(os.path.join(workdir, name))
-            except OSError:
-                pass
-    shutil.rmtree(workdir, ignore_errors=True) if os.path.basename(workdir).startswith("film_work_") else None
+            _cleanup(parts + [joined, sped, framed, mixed])

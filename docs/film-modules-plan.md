@@ -43,10 +43,30 @@ per-shot punch-in, selective blur. Six things, all bounded.
 
 ---
 
-## Status (17-sep-2026)
+## Status (17-sep-2026, evening)
 
-Built in this tree, tests green (`tests/test_film_*.py`, `test_movieshorts.py`,
-`test_movierecap.py`, `test_beat_grid.py`, `test_music_library.py`):
+**Movie Shorts was removed the same day it was first rendered.** The real
+render of "The preacher hunts rebels with a rifle" (47 shots, 1.21 s mean
+cut, 2.39:1 source) came out as a vibrating picture with glitching captions:
+the crop ladder changes scale every ~1.4 s inside one continuous take and
+after the reframe that reads as shaking, and the per-word pop rides subtitle
+cues whose word timings are only evenly spread. Decision: shorts from a film
+go through the existing clip maker (real reframe, ASR-timed captions). Gone:
+`movieshorts.py`, `beat_grid.py`, `music_library.py`, `MovieShortsTab.jsx`,
+the shot expansion in `film_prep`, the shorts routes in `film_api`, their
+tests. Kept: SRT ingest and offset probe, the chat-planning pattern,
+`film_render` (recap only), `music.MIX_PROFILES`, the `film_pop` preset and
+the `washed`/`cold` grades. Sections 2.x below are history, left as written;
+`0c58b66` has the code.
+
+**Generated voiceover (Kokoro, §3.8) is built and measured.** Machine Gun
+Preacher part 1, `am_michael`: at 1.0x, 411 words → 173 s (all 18 lines
+fitted via head/tail room, none sped up); at 1.1x → 165.9 s narrated part in
+141 s of render; VRAM flat at 3.75 GB through synthesis (CPU server). Default
+`tts_speed` is 1.1. Trap found: Kokoro-FastAPI writes a streaming WAV header
+(data length 0xFFFFFFFF), so durations are measured from bytes on disk.
+
+Built in this tree, tests green (`tests/test_film_*.py`, `test_movierecap.py`):
 
 | Session | State |
 |---|---|
@@ -442,6 +462,174 @@ paste → validator errors + lint hits + live budget → render three silent
 parts → per part VO upload → mix → pre-publish checklist → `/api/social/post`.
 
 ---
+
+## 3.8 Generated voiceover with Kokoro (planned 17-sep-2026, not built)
+
+The recording step is the one part of the recap loop that still needs a
+person and a second tool. The Pass C plan already holds the whole script
+(`chunks[].narration`, `closing_lines`), so the narration is synthesised
+from the session itself, per chunk, and fitted to the cut. Kokoro-82M is the
+engine: open weights, 68 voices across 9 languages including Hindi, and it
+runs on this machine's **CPU** fast enough that the GPU never sees it.
+
+### Measured on the render box (17-sep-2026, `F:\kokoro\kokoro-env`, kokoro 0.9.4)
+
+| | GPU (RTX 2070 SUPER) | CPU (Ryzen 7) |
+|---|---|---|
+| model load | 14.7 s | 10.7 s |
+| VRAM | 318 MB after load, **1.36 GB reserved at peak** while synthesising | 0 |
+| one 25-word chunk (9.8 s of speech) | 3.0 s | 3.5 s |
+| a whole 150 s part (168 words) | 1.0 s | 15.9 s |
+| pace at `speed=1.0` | 171–190 wpm | same |
+
+The card idles at 3.9 GB of 8 GB used by the desktop before any job starts.
+The pipeline's own GPU residents on a job are TransNetV2 (scene cuts), YOLO +
+MediaPipe (reframe), NVENC sessions (2–3 max on Turing), whisper (in the
+job process, or in the API for `/api/subtitle` and the Studio, released
+after each call since upstream `60fa37a`), and Demucs when
+`TRANSCRIBE_VOCALS=1`. Upstream's note on `release_models` records what
+happens when something else sits on the card: NVENC cannot open a session
+(exit 187) and TransNetV2 hits CUDA OOM. Kokoro on the GPU would add 1.4 GB
+resident and a 15 s load to save **15 seconds per part**. It is not worth
+one failed render. **Decision: Kokoro runs on the CPU, always.** No
+`KOKORO_DEVICE=cuda` option is offered until a real need appears; the
+measurement above is the argument against it.
+
+### Licence, and why it is a separate process
+
+Kokoro-82M weights, the `kokoro` package and remsky's Kokoro-FastAPI wrapper
+are all **Apache 2.0**: commercial use is fine. The one GPL component is
+**espeak-ng** (GPLv3), which misaki loads as the phonemiser fallback for
+out-of-dictionary English words and as the primary G2P for several other
+languages (`start-gpu.ps1` points `PHONEMIZER_ESPEAK_LIBRARY` at
+`C:\Program Files\eSpeak NG\libespeak-ng.dll`). Same rule as `lameenc` in
+`vocal_isolation`: it never enters this process. OpenShorts talks to a
+Kokoro **server** over HTTP; nothing here imports `kokoro`, `misaki` or
+`phonemizer`, and the repo's dependency set stays MIT/Apache.
+
+### Process model
+
+Kokoro-FastAPI, started by hand from `F:\kokoro\Kokoro-FastAPI` with a copy
+of `start-cpu.ps1` (it pins `USE_GPU=false`, port 8880). Persistent server
+rather than a subprocess per job because the model load is 11 s and the
+voice **preview** button has to answer in a second; the cost is ~1.5 GB of
+RAM resident, on a 32 GB box. What OpenShorts does with it:
+
+- `KOKORO_URL` (default `http://127.0.0.1:8880`), `KOKORO_TIMEOUT` (120 s).
+- Health: `GET /v1/audio/voices` at first use and on demand; cached 60 s.
+  Offline is a state the dashboard shows with the exact command to run,
+  never an error that fails a render: "upload voiceover" stays available.
+- Concurrency: **one synthesis at a time** across the API
+  (`threading.Semaphore(1)` in `film_voice`). Kokoro-FastAPI is fast on
+  the CPU but two parts synthesising together would each take twice as
+  long and nothing is gained; the queue also keeps the fit report's timings
+  reproducible.
+- CPU contention is the only resource question left. A synthesis is a
+  burst of 16 s of all-core work. It is started **before** the render
+  thread begins cutting (the cut phase runs 2–4 ffmpeg encodes in parallel
+  and would slow both), so the sequence per part is strictly: synthesise →
+  fit → cut → concat → speed → reframe (GPU) → mix → finalize. Kokoro is
+  never running while ffmpeg or the reframe are.
+
+Verified endpoints (Kokoro-FastAPI `api/src/routers`):
+
+- `POST /v1/audio/speech` (OpenAI-compatible): `input`, `voice`, `speed`
+  (0.25–4.0), `response_format=wav`, 24 kHz mono. Language follows the voice
+  prefix (`a` US English, `b` UK, `h` Hindi, `e` Spanish, `f` French, `i`
+  Italian, `p` Portuguese, `j` Japanese, `z` Chinese).
+- `POST /dev/captioned_speech`: same plus word timestamps, if per-word
+  caption sync is ever wanted for the recap.
+- `GET /v1/audio/voices`; `POST /v1/audio/voices/combine` for weighted
+  mixes (a "custom narrator" later, not now).
+
+### `film_voice.py`
+
+httpx only. Four functions and a fit algorithm:
+
+- `health()` → `{"online", "url", "voices": n}`; `voices()` → grouped by
+  language and gender from the prefix, cached.
+- `synthesize(text, voice, speed, out_wav)` → path + measured duration
+  (ffprobe or `wave`), under the semaphore. Retries once on a connection
+  error, then reports offline.
+- `narrate_plan(plan, part, protected, duration, voice, speed, workdir)` →
+  the `movierecap.fitted_to_source` shape (`chunk.path`, `voice_start`,
+  `shot_start`, `shot_length`, `keep_audio`) plus a per-chunk report.
+  Deterministic, **no whisper**, so the GPU is not touched for alignment:
+  1. `slot = (end - start) / speed_video` finished seconds; lead 0.15 s and
+     tail 0.25 s (the padding `compilation.py` already uses) leave
+     `available = slot - 0.40`.
+  2. Line fits → placed at `shot_start + lead`. Action `fit`.
+  3. Too long → grow the chunk with its head/tail room, bounded by the
+     neighbours and by protected ranges (`movierecap.compilation_plan`
+     computes exactly this in finished units; reuse it). Action `room`.
+  4. Still too long → re-synthesise at `min(1.25, vo / available)`. Action
+     `speed`.
+  5. Still too long → `overrun`: the line is placed anyway, the chunk keeps
+     its footage, and the report says by how much. The video is never
+     time-stretched; the fix is a shorter sentence in the JSON.
+  Pace check up front: at 171–190 wpm a 25-word chunk is 8–9 s against an
+  8.3 s slot, so most lines land in step 2 or 3 at `tts_speed` 1.0–1.1.
+  If the first real report shows the majority in step 4, the Pass C prompt
+  drops to ~22 words per chunk; the speed knob does not go up.
+- The same output feeds `film_render.render_narrated` unchanged, so the
+  generated and the uploaded voiceover share one render path and one bug
+  surface.
+
+### API
+
+| Method | Route |
+|---|---|
+| GET | `/api/film/voices` — Kokoro health + grouped voice list + the start command when offline |
+| POST | `/api/movierecap/narrate/{sid}/{part}/preview` — `{voice, speed}`; synthesises the part's first line to `/film/<sid>/preview_<voice>.wav` |
+| POST | `/api/movierecap/narrate/{sid}/{part}` — `{voice, speed}`; thread: synthesise every line (CPU) → fit → `render_narrated` (GPU) → `renders["recap-N"]` with `voice`, `tts_speed`, the fit report and the script that was read |
+
+`voice` and `tts_speed` join the recap settings (defaults `am_michael`,
+1.0), remembered per session. A render already running for that part
+answers 409, as the upload route does. The narrated wavs stay in the
+session dir (`vo_partN_<voice>/`), so re-rendering after a caption or
+format change does not re-synthesise.
+
+### Dashboard (`MovieRecapTab`, steps 5/6, per part)
+
+Voice picker grouped by language, defaulting to the session language;
+**preview** plays line 1 inline; speed 0.9–1.2; **generate voiceover**
+button → progress → the narrated part appears where the uploaded one
+would; the fit table (chunk, slot, voice seconds, action, overrun seconds)
+under it, overruns in red with the offending sentence so the user can
+shorten it and re-run only that part. "upload voiceover" stays as the
+manual path. When Kokoro is offline the button is disabled and the panel
+shows the start command.
+
+### Silent render must actually be silent
+
+Found in the first recap test: the silent parts carry the film's
+soundtrack, because `film_render.render_short` keeps source audio through
+the cuts and the recap job passed no bed. Fix: a `mute` flag on
+`render_short` that drops the audio stream at the final pass (`-an`), used
+by the recap's silent render; the narrated render rebuilds its audio from
+scratch anyway.
+
+### Tests (no Kokoro, no GPU in CI)
+
+- `tests/test_film_voice.py`: fake HTTP server via `httpx.MockTransport`
+  returning wavs of chosen lengths; fit algorithm hits each of the five
+  actions; protected ranges bound the room; the semaphore serialises two
+  concurrent calls; offline health is a state, not an exception.
+- `tests/test_film_api.py`: narrate endpoint with `film_voice` faked,
+  409 on a running render, preview URL shape.
+- Acceptance on the box: part 1 of Machine Gun Preacher with `am_michael`,
+  watch `nvidia-smi` during synthesis (expect no new process), read the fit
+  report, listen.
+
+### Order
+
+1. `mute` flag; `film_voice.health/voices/synthesize`; `/api/film/voices`.
+2. `narrate_plan` with tests against the mock; the narrate and preview
+   endpoints; the fit report.
+3. Dashboard picker, preview, generate button, fit table, offline state.
+4. Real part 1; tune lead/tail, default speed and the words-per-chunk rule
+   from the report. Then decide whether `/dev/captioned_speech` word
+   timestamps are worth wiring for recap captions.
 
 ## 4. Publishing (both modules)
 

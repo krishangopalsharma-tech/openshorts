@@ -212,6 +212,28 @@ SUBTITLE DIGEST FOR THIS BAND:
 """
 
 
+class PlanError(ValueError):
+    """The pasted text is not usable JSON. Message is safe for the UI."""
+
+
+def parse_json(text):
+    """Pull the JSON object out of a chat answer: code fences, preamble and a
+    trailing sentence are all tolerated. Raises PlanError."""
+    import json
+    if isinstance(text, dict):
+        return text
+    raw = str(text or "").strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        raise PlanError("no JSON object found in the pasted text")
+    try:
+        return json.loads(raw[start:end + 1])
+    except json.JSONDecodeError as exc:
+        raise PlanError(f"invalid JSON: {exc.msg} at line {exc.lineno}") from exc
+
+
 def wall_seconds(duration, fraction=WALL_FRACTION):
     return round(float(duration) * fraction, 1)
 

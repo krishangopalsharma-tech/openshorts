@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard, Lock, Film, BookOpen } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard, Lock, BookOpen } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
 import CompilationTab from './components/CompilationTab';
-import MovieShortsTab from './components/MovieShortsTab';
 import MovieRecapTab from './components/MovieRecapTab';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
@@ -1332,10 +1331,9 @@ function App() {
     { id: 'ugc-gallery', ord: '04', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery', primary: true },
     { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
     { id: 'compilation', ord: '06', icon: Clapperboard, label: 'Compilation', short: 'compile' },
-    // Self-host only (they read paths on the server's disk): hidden in cloud mode.
+    // Self-host only (it reads paths on the server's disk): hidden in cloud mode.
     ...(filmModules ? [
-      { id: 'movieshorts', ord: '09', icon: Film, label: 'Movie Shorts', short: 'movie' },
-      { id: 'movierecap', ord: '10', icon: BookOpen, label: 'Movie Recap', short: 'recap' },
+      { id: 'movierecap', ord: '09', icon: BookOpen, label: 'Movie Recap', short: 'recap' },
     ] : []),
     ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
     { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
@@ -1916,7 +1914,6 @@ function App() {
           )}
 
           {activeTab === 'compilation' && <CompilationTab />}
-          {activeTab === 'movieshorts' && filmModules && <MovieShortsTab />}
           {activeTab === 'movierecap' && filmModules && <MovieRecapTab />}
 
           {/* View: AI Agent */}

@@ -87,54 +87,63 @@ say "OpenShorts is free" without naming the Cloud price in the same breath: both
 are true of different editions and quoting only the first one is what makes AI
 answers describe the paid product as free.
 
-### Film modules: Movie Shorts and Movie Recap (`film_prep.py`, `film_render.py`, `movieshorts.py`, `movierecap.py`, `film_api.py`)
+### Movie Recap (`film_prep.py`, `film_render.py`, `movierecap.py`, `film_voice.py`, `film_api.py`)
 
-Two self-host-only tabs (hidden in cloud mode through `/api/config.filmModules`)
-that cut a feature film into either standalone ~2-minute shorts or a
-three-part appetite-building series. Full design in `docs/film-modules-plan.md`;
-the rules that cost something to learn:
+A self-host-only tab (hidden in cloud mode through `/api/config.filmModules`)
+that cuts a feature film into a three-part appetite-building series: each
+part argues one claim about how the film is built, every payoff is withheld,
+nothing after 75% of the runtime is ever used. Full design in
+`docs/film-modules-plan.md`; the rules that cost something to learn:
 
 - **The SRT is the transcript.** A film arrives with its subtitle file, so
   `film_prep.parse_subtitles` → `cues_to_transcript` produces the whisper
   shape (words spread across each cue) and no ASR runs over two hours. Only a
   60 s slice around the 25% mark is heard, with a `small` build
   (`FILM_PROBE_WHISPER_MODEL`), to find the SRT offset by matching word TEXT
-  against the cues: an SRT for another release runs 2-25 s out and every beat
-  inherits the error. The user can override it.
-- **The model plans beats/chunks in a chat window; nothing here calls an LLM.**
-  Prompts are emitted, JSON is pasted back, validators return a structured
-  error list the tab turns into the correction turn. `movieshorts.validate_beats`
-  refuses any caption that does not fuzzy-match a real cue (ratio ≥ 0.8):
-  models invent plausible film dialogue confidently. `movierecap.validate_plan`
-  hard-fails a chunk inside a protected range or past the 75% wall and only
-  WARNS on resolution language.
-- **Speed before reframe, captions divided by the factor afterwards.**
-  `reframe_v2` emits sendcmd crop timelines; a PTS change after it lands every
-  command on the wrong frame. Music bed after concat, never per shot.
-- **Beats live in finished time, cuts in source time.** `beat_grid.schedule`
-  builds each shot as a whole number of beats in finished seconds and
-  multiplies by the speed; it never rounds in source time. At 120 BPM only
-  k=3 fits the 1.2-1.8 s band, so every shot is 1.5 s; 100-140 BPM has two
-  usable k and is where shot length can vary while staying locked.
-  `beat_confidence` is measured on a RIGID grid per 15 s window, not on the
-  DP-tracked beats, which chase noise peaks and report a confident beat in a
-  drone.
-- **Music is a curated library, never generated.** `assets/music/<mood>/` +
-  `python -m music_library scan` → `manifest.json` (BPM, grid, loudness,
-  licence sidecar, `uses`). `pick()` walks mood → adjacent mood → any and
-  never fails a render; the tab shows the search recipe when it fell back.
-  `music.build_audio_graph(profile=...)`: `dialogue` (ratio ≤ 6, release 260)
-  for shorts, `narration` for the recap's kept-dialogue chunks.
+  against the cues: an SRT for another release runs 2-25 s out and every
+  chunk inherits the error. The user can override it.
+- **The model plans chunks in a chat window; nothing here calls an LLM.**
+  Three prompts are emitted (spoiler map, structure, per-part chunks), JSON
+  is pasted back, `movierecap.validate_*` return a structured error list the
+  tab turns into the correction turn. `validate_plan` hard-fails a chunk
+  inside a protected range or past the 75% wall and only WARNS on resolution
+  language. "accept anyway" keeps a plan past rule errors but never past the
+  wall: protected chunks are dropped, not rendered.
+- **Speed before reframe.** `reframe_v2` emits sendcmd crop timelines; a PTS
+  change after it lands every command on the wrong frame. Every cut part is
+  scaled to one frame size and encoded with ONE encoder, or the `-c copy`
+  concat joins a stream the next pass cannot read.
+- **Movie Shorts was built and removed on 17-sep-2026.** A per-shot crop
+  ladder with beat-locked cutting and a music bed (the reference channel's
+  look) rendered a real 2.39:1 film as a vibrating picture with glitching
+  captions. Shorts from a film go through the clip maker instead; the SRT
+  ingest, the chat planning pattern and `music.MIX_PROFILES` survived. It is
+  in git history (`0c58b66`) if the fast-cut look is ever wanted again.
 - Sessions live under `output/film/<id>/session.json` and are skipped by
-  BOTH output sweeps (the hourly one and the size cap): a film's hook list is
-  built over several sittings. Rendered parts serve at `/film/<id>/<file>`
-  through `media_auth.is_servable`.
+  BOTH output sweeps (the hourly one and the size cap): a recap is built over
+  several sittings. Rendered parts serve at `/film/<id>/<file>` through
+  `media_auth.is_servable`; the Vite dev server proxies `/film`.
 - Recap voiceover re-timing reuses `compilation.py` (`transcribe_vo`,
   `align_lines_to_words`, `fit_shots`) on a plan whose times are divided by
   the speed (`movierecap.compilation_plan`), then `fitted_to_source`
   multiplies back. Outside ±10% of the target the recording is refused with
   the numbers rather than time-stretched. The original soundtrack is muted
   under narration except on `keep_audio` chunks.
+- **Generated voiceover (`film_voice.py`) runs on the CPU, in a separate
+  process.** Kokoro-82M through a Kokoro-FastAPI server (`KOKORO_URL`,
+  default `:8880`, started by hand from `F:\kokoro\Kokoro-FastAPI\start-cpu.ps1`).
+  Measured 17-sep-2026: a 150 s part synthesises in 16 s on the Ryzen 7 with
+  zero VRAM; on the GPU it would hold 1.4 GB reserved and load for 15 s to
+  save 15 s, on a card that idles at 3.9 of 8 GB before TransNetV2, YOLO,
+  NVENC and whisper get on it. No GPU option is offered. Separate process
+  also keeps espeak-ng (GPL, misaki's phonemiser fallback) out of this
+  repo, same rule as `lameenc`. Synthesis is serialised (`_GATE`) and
+  finishes before the render starts cutting. Lines are fitted without
+  whisper: slot = footage / 1.25 minus lead/tail; too long → head/tail room
+  bounded by protected ranges → re-read up to 1.25x → `overrun` reported,
+  never a stretched picture. Two traps: Kokoro-FastAPI writes a streaming
+  WAV header (data length 0xFFFFFFFF) so durations come from bytes on disk,
+  and an httpx client injected by a test must not be closed by the module.
 
 ### Cómo se elige el layout
 
