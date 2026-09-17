@@ -144,6 +144,21 @@ nothing after 75% of the runtime is ever used. Full design in
   never a stretched picture. Two traps: Kokoro-FastAPI writes a streaming
   WAV header (data length 0xFFFFFFFF) so durations come from bytes on disk,
   and an httpx client injected by a test must not be closed by the module.
+  **OpenShorts starts the server itself** (`film_voice.ensure_server`): when
+  no server answers, `KOKORO_HOME/.venv` is launched as the same subprocess
+  `start-cpu.ps1` would (uvicorn, CPU, log at `output/film/kokoro.log`),
+  lazily on the first voices/narrate/preview call or from the tab's "start
+  Kokoro" button (`POST /api/film/voices/start`), and stopped in the app's
+  lifespan shutdown; a server started by hand is never touched. Measured
+  17.4 s from cold to first answer.
+- **Captions and logos on a narrated part are the clip editor's own tools.**
+  `SubtitleModal` (with `transcriptPath`) and `OverlayEditor` open on the
+  part and post to `/api/movierecap/part/{sid}/{part}/captions|overlays`;
+  `film_api._relayer_part` re-derives overlays UNDER captions over the
+  narrated base render (`renders[...].base_file`), never in place, same
+  layer rule as clips. The caption words come from the narration lines
+  placed on the finished timeline (`narration_cues`, spread evenly per line
+  like SRT cues), or from the modal's edited words verbatim.
 
 ### Cómo se elige el layout
 

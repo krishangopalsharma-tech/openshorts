@@ -143,6 +143,78 @@ def test_synthesize_is_serialised():
     assert peak[0] == 1
 
 
+# --- server lifecycle -------------------------------------------------------
+
+def _down_client():
+    def down(request):
+        raise httpx.ConnectError("refused")
+    return httpx.Client(base_url="http://kokoro.test", transport=httpx.MockTransport(down))
+
+
+def test_server_command_needs_a_checkout_with_a_venv(tmp_path, monkeypatch):
+    monkeypatch.setattr(fv, "KOKORO_HOME", str(tmp_path))
+    assert fv.server_command() is None
+    (tmp_path / ".venv" / "Scripts").mkdir(parents=True)
+    (tmp_path / ".venv" / "Scripts" / "python.exe").write_bytes(b"")
+    (tmp_path / "api" / "src").mkdir(parents=True)
+    (tmp_path / "api" / "src" / "main.py").write_text("app = None")
+    monkeypatch.setattr(fv, "KOKORO_URL", "http://127.0.0.1:8880")
+    spec = fv.server_command()
+    assert spec["argv"][1:4] == ["-m", "uvicorn", "api.src.main:app"] and spec["argv"][-1] == "8880"
+    assert spec["env"]["USE_GPU"] == "false" and spec["env"]["PROJECT_ROOT"] == str(tmp_path)
+    assert spec["cwd"] == str(tmp_path)
+
+
+def test_ensure_server_returns_immediately_when_online():
+    k = FakeKokoro()
+    status = fv.ensure_server(client=k.client(), spawner=lambda *a: pytest.fail("must not spawn"))
+    assert status["online"] is True and status["started"] is False
+
+
+def test_ensure_server_spawns_and_waits(tmp_path, monkeypatch):
+    monkeypatch.setattr(fv, "KOKORO_HOME", str(tmp_path))
+    (tmp_path / ".venv" / "Scripts").mkdir(parents=True)
+    (tmp_path / ".venv" / "Scripts" / "python.exe").write_bytes(b"")
+    (tmp_path / "api" / "src").mkdir(parents=True)
+    (tmp_path / "api" / "src" / "main.py").write_text("app = None")
+    monkeypatch.setattr(fv, "_proc", None)
+    k = FakeKokoro()
+    state = {"up": False, "polls": 0}
+
+    class Proc:
+        returncode = None
+        def poll(self):
+            return None
+        def terminate(self):
+            state["terminated"] = True
+        def wait(self, timeout=None):
+            return 0
+
+    def spawner(argv, env, cwd, out):
+        state["argv"] = argv
+        return Proc()
+
+    def handle(request):
+        state["polls"] += 1
+        if state["polls"] >= 3:
+            state["up"] = True
+        if not state["up"]:
+            raise httpx.ConnectError("not yet")
+        return k.handle(request)
+    client = httpx.Client(base_url="http://kokoro.test", transport=httpx.MockTransport(handle))
+    status = fv.ensure_server(timeout=30, log_dir=str(tmp_path), spawner=spawner, sleep=lambda s: None, client=client)
+    assert status["online"] is True and status["started"] is True
+    assert "uvicorn" in state["argv"]
+    fv.stop_server()
+    assert state.get("terminated") is True and fv._proc is None
+
+
+def test_ensure_server_reports_a_missing_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(fv, "KOKORO_HOME", str(tmp_path / "nowhere"))
+    status = fv.ensure_server(client=_down_client(), spawner=lambda *a: pytest.fail("must not spawn"))
+    assert status["online"] is False and status["started"] is False and "KOKORO_HOME" in status["reason"]
+
+
 def _part_and_protected():
     protected = mr.union_protected(SPOILERS, DURATION)
     st, errors = mr.validate_structure(STRUCTURE, DURATION, protected)

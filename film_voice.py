@@ -112,6 +112,106 @@ def health(client=None):
                 "start_command": START_COMMAND}
 
 
+# --- server lifecycle -------------------------------------------------------
+#
+# OpenShorts can start the Kokoro-FastAPI server itself when KOKORO_HOME
+# points at a checkout with its own .venv (the one start-cpu.ps1 builds). It
+# is still a separate process on the CPU: same env as start-cpu.ps1 minus the
+# `uv pip install` step, stdout to output/film/kokoro.log, stopped with the
+# API. Lazy: nothing starts until a voice is asked for.
+
+KOKORO_AUTOSTART = os.environ.get("KOKORO_AUTOSTART", "1") != "0"
+KOKORO_ESPEAK = os.environ.get("PHONEMIZER_ESPEAK_LIBRARY",
+                               r"C:\Program Files\eSpeak NG\libespeak-ng.dll")
+START_TIMEOUT = float(os.environ.get("KOKORO_START_TIMEOUT", "90"))
+_proc = None
+_proc_lock = threading.Lock()
+
+
+def _server_python(home=None):
+    home = home or KOKORO_HOME
+    for rel in (("Scripts", "python.exe"), ("bin", "python")):
+        p = os.path.join(home, ".venv", *rel)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def server_command(home=None):
+    """argv + env for the CPU server, or None when the checkout is not there."""
+    home = home or KOKORO_HOME
+    py = _server_python(home)
+    if not py or not os.path.isfile(os.path.join(home, "api", "src", "main.py")):
+        return None
+    from urllib.parse import urlparse
+    u = urlparse(KOKORO_URL)
+    env = dict(os.environ)
+    env.update({
+        "PYTHONUTF8": "1", "USE_GPU": "false", "PROJECT_ROOT": home,
+        "PYTHONPATH": os.pathsep.join([home, os.path.join(home, "api")]),
+        "MODEL_DIR": "src/models", "VOICES_DIR": "src/voices/v1_0",
+        "WEB_PLAYER_PATH": os.path.join(home, "web"),
+    })
+    if os.path.isfile(KOKORO_ESPEAK):
+        env["PHONEMIZER_ESPEAK_LIBRARY"] = KOKORO_ESPEAK
+    argv = [py, "-m", "uvicorn", "api.src.main:app", "--host", u.hostname or "127.0.0.1",
+            "--port", str(u.port or 8880)]
+    return {"argv": argv, "env": env, "cwd": home}
+
+
+def ensure_server(timeout=START_TIMEOUT, log_dir=None, spawner=None, sleep=time.sleep, client=None):
+    """Make sure a Kokoro server answers: return ``health()`` if it already
+    does, else start one from KOKORO_HOME and wait up to ``timeout`` s.
+    Never raises; the returned status says what happened (``started``,
+    ``reason``)."""
+    global _proc
+    status = health(client=client)
+    if status["online"]:
+        return {**status, "started": False}
+    if not KOKORO_AUTOSTART:
+        return {**status, "started": False, "reason": "KOKORO_AUTOSTART=0"}
+    spec = server_command()
+    if spec is None:
+        return {**status, "started": False,
+                "reason": f"no Kokoro checkout with a .venv at KOKORO_HOME={KOKORO_HOME}"}
+    with _proc_lock:
+        if _proc is None or _proc.poll() is not None:
+            import subprocess
+            log_dir = log_dir or os.path.join("output", "film")
+            os.makedirs(log_dir, exist_ok=True)
+            log = open(os.path.join(log_dir, "kokoro.log"), "ab")
+            spawn = spawner or (lambda argv, env, cwd, out: subprocess.Popen(
+                argv, env=env, cwd=cwd, stdout=out, stderr=subprocess.STDOUT))
+            _proc = spawn(spec["argv"], spec["env"], spec["cwd"], log)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        sleep(2.0)
+        if _proc is not None and _proc.poll() is not None:
+            return {**health(client=client), "started": False,
+                    "reason": f"Kokoro exited with code {_proc.returncode}; see output/film/kokoro.log"}
+        status = health(client=client)
+        if status["online"]:
+            return {**status, "started": True}
+    return {**status, "started": False, "reason": f"Kokoro did not answer within {timeout:.0f} s"}
+
+
+def stop_server():
+    """Stop the server this process started (a server started by hand is
+    left alone). Called from the app's shutdown."""
+    global _proc
+    with _proc_lock:
+        p, _proc = _proc, None
+    if p is not None and p.poll() is None:
+        try:
+            p.terminate()
+            p.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def wav_duration(path):
     """Seconds of audio in a wav, from the BYTES ON DISK, not the header.
     Kokoro-FastAPI writes a streaming header whose data length is a

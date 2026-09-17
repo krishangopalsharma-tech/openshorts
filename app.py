@@ -2144,7 +2144,13 @@ async def lifespan(app: FastAPI):
         # until someone tops the balance up.
         asyncio.create_task(_alerts.proxy_watch_loop())
     yield
-    # Cleanup (optional: cancel worker)
+    # Cleanup: the Kokoro TTS server this process may have started for the
+    # Movie Recap voiceover dies with the API (one started by hand is left alone).
+    try:
+        import film_voice
+        film_voice.stop_server()
+    except Exception:  # noqa: BLE001
+        pass
 
 app = FastAPI(lifespan=lifespan)
 

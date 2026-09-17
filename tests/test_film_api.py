@@ -281,6 +281,117 @@ def test_recap_narrate_preview(local, monkeypatch):
     assert r.status_code == 503 and "start-cpu" in r.json()["detail"]
 
 
+def test_film_voices_start_endpoint(local, monkeypatch):
+    import film_voice
+    monkeypatch.setattr(film_voice, "ensure_server", lambda: {
+        "online": True, "url": "x", "voices": 1, "device": "cpu", "start_command": "", "started": True})
+    monkeypatch.setattr(film_voice, "voices", lambda client=None, force=False: [film_voice.describe_voice("am_michael")])
+    r = local["client"].post("/api/film/voices/start").json()
+    assert r["online"] is True and r["started"] is True and "English (US)" in r["groups"]
+    monkeypatch.setattr(film_voice, "ensure_server", lambda: {
+        "online": False, "started": False, "reason": "no checkout", "start_command": "cmd"})
+    r = local["client"].post("/api/film/voices/start").json()
+    assert r["online"] is False and r["reason"] == "no checkout" and r["groups"] == {}
+
+
+def _narrated_part(local, monkeypatch):
+    """A completed generated-voiceover render for part 1, with a real base file."""
+    import film_voice
+    c = local["client"]
+    sid = _recap_with_plan(local)
+    monkeypatch.setattr(film_voice, "health", lambda client=None: {"online": True, "start_command": ""})
+
+    def fake_narrate(plan, part, protected, duration, voice, speed, workdir, **kw):
+        segs, t = [], 0.0
+        for ch in plan.chunks:
+            segs.append({"start": ch.start, "end": ch.end, "shot_start": t, "shot_length": 8.32, "voice_start": t + 0.15,
+                         "silent": False, "keep_audio": False, "flip": False, "chunk": {"path": "l.wav", "duration": 7.0}})
+            t += 8.32
+        return {"segments": segs, "report": [], "total_finished": t, "voice": voice, "speed": speed,
+                "overruns": 0, "words": 480}
+    monkeypatch.setattr(film_voice, "narrate_plan", fake_narrate)
+
+    def fake_render(video, segments, out_path, work, **kw):
+        open(out_path, "wb").write(b"\x03" * 8)
+        return {"output": out_path, "chunks": len(segments), "duration": 149.76}
+    monkeypatch.setattr(film_api.film_render, "render_narrated", fake_render)
+    assert c.post(f"/api/movierecap/narrate/{sid}/1", json={}).status_code == 200
+    st = c.get(f"/api/film/status/{sid}").json()["renders"]["recap-1"]
+    assert st["status"] == "completed" and st["base_file"] == st["file"]
+    return sid, st
+
+
+def test_recap_part_transcript_comes_from_the_narration(local, monkeypatch):
+    c = local["client"]
+    sid, st = _narrated_part(local, monkeypatch)
+    assert len(st["narration_cues"]) == 18
+    assert st["narration_cues"][0] == {"start": 0.15, "end": 7.15, "text": " ".join(["watch"] * 27)}
+    t = c.get(f"/api/movierecap/part/{sid}/1/transcript").json()
+    assert t["durationSec"] == 149.76 and t["language"] == "en"
+    assert t["captions"][0]["text"] == "watch" and t["captions"][0]["startMs"] == 150
+    # Words are spread across each line: the 27th word ends where the line ends.
+    assert t["captions"][26]["endMs"] == 7150
+    assert c.get(f"/api/movierecap/part/{sid}/2/transcript").status_code == 400
+
+
+def test_recap_part_captions_and_overlays_relayer(local, monkeypatch):
+    import overlays as _ov
+    c = local["client"]
+    sid, st = _narrated_part(local, monkeypatch)
+    base = local["out"] / "film" / sid / st["base_file"]
+    calls = []
+
+    def fake_apply_overlays(video, items, out_path, overlays_dir=None):
+        calls.append(("overlays", os.path.basename(video), len(items), os.path.basename(out_path)))
+        open(out_path, "wb").write(b"ov")
+        return True
+    monkeypatch.setattr(_ov, "apply_overlays", fake_apply_overlays)
+
+    def fake_burn(video, transcript, start, end, style, split_ranges=None):
+        calls.append(("captions", os.path.basename(video), style["preset"],
+                      sum(len(s["words"]) for s in transcript["segments"]), end))
+        out = os.path.join(os.path.dirname(video), f"subtitled_9_{os.path.basename(video)}")
+        open(out, "wb").write(b"cap")
+        return out
+    monkeypatch.setattr(app_module, "_burn_styled_captions", fake_burn)
+
+    # Captions first: burned straight onto the base.
+    r = c.post(f"/api/movierecap/part/{sid}/1/captions", json={"preset": "bold_white", "overrides": {"offset_y": 10, "bogus": 1}})
+    assert r.status_code == 200, r.text
+    assert r.json()["file"].startswith("subtitled_9_") and r.json()["caption_style"]["overrides"] == {"offset_y": 10.0}
+    assert calls[-1][0] == "captions" and calls[-1][1] == st["base_file"] and calls[-1][3] == 27 * 18
+    # Unknown preset refused.
+    assert c.post(f"/api/movierecap/part/{sid}/1/captions", json={"preset": "nope"}).status_code == 400
+
+    # Then overlays: re-derived from the base, captions go back ON TOP of the
+    # overlay pass, and the earlier subtitled file is gone.
+    items = [{"type": "text", "text": "TG FILMS", "x": 0.5, "y": 0.9, "w": 0.4}]
+    r = c.post(f"/api/movierecap/part/{sid}/1/overlays", json={"overlays": items})
+    assert r.status_code == 200, r.text
+    kinds = [k[0] for k in calls[-2:]]
+    assert kinds == ["overlays", "captions"]
+    assert calls[-2][1] == st["base_file"] and calls[-2][3].startswith("ov_")
+    assert calls[-1][1].startswith("ov_")
+    served = r.json()["file"]
+    assert served.startswith("subtitled_9_ov_")
+    files = os.listdir(local["out"] / "film" / sid)
+    assert served in files and base.exists()
+    assert sum(1 for f in files if f.startswith("subtitled_")) == 1
+    st = c.get(f"/api/film/status/{sid}").json()["renders"]["recap-1"]
+    assert st["file"] == served and len(st["overlays"]) == 1 and st["caption_style"]["preset"] == "bold_white"
+
+    # Removing captions leaves the overlay layer as the served file.
+    r = c.post(f"/api/movierecap/part/{sid}/1/captions", json={"preset": None}).json()
+    assert r["file"].startswith("ov_") and r["caption_style"] is None
+    # Removing overlays too returns to the bare narrated render.
+    r = c.post(f"/api/movierecap/part/{sid}/1/overlays", json={"overlays": []}).json()
+    assert r["file"] == st["base_file"]
+    # Edited caption words are burned verbatim.
+    r = c.post(f"/api/movierecap/part/{sid}/1/captions", json={
+        "preset": "bold_white", "words": [{"text": "Hello", "startMs": 100, "endMs": 600}, {"text": "there", "startMs": 700, "endMs": 1200}]})
+    assert r.status_code == 200 and calls[-1][3] == 2 and calls[-1][4] == pytest.approx(2.2)
+
+
 def test_recap_narrate_generates_fits_and_renders(local, monkeypatch):
     import film_voice
     c = local["client"]

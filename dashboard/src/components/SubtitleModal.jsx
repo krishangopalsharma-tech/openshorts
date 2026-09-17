@@ -276,7 +276,9 @@ function Swatches({ label, value, swatches, onChange }) {
 // ---------------------------------------------------------------------------
 // The modal
 // ---------------------------------------------------------------------------
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
+// `transcriptPath` lets a non-clip video (a Movie Recap part) supply its own
+// word list; without it the clip route /api/clip/{job}/{clip}/transcript is used.
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress, transcriptPath }) {
     const [saved] = useState(loadSaved);
     const [styles, setStyles] = useState(stylesCache);
     const [presetId, setPresetId] = useState(saved.presetId);
@@ -318,10 +320,10 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
 
     // Word-level captions for this clip
     useEffect(() => {
-        if (!isOpen || !jobId || clipIndex === undefined) return;
+        if (!isOpen || (!transcriptPath && (!jobId || clipIndex === undefined))) return;
         let cancelled = false;
         setCaptionsLoading(true);
-        apiFetch(`/api/clip/${jobId}/${clipIndex}/transcript`)
+        apiFetch(transcriptPath || `/api/clip/${jobId}/${clipIndex}/transcript`)
             .then((res) => (res.ok ? res.json() : null))
             .then((data) => {
                 if (cancelled) return;
@@ -343,7 +345,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
             })
             .finally(() => { if (!cancelled) setCaptionsLoading(false); });
         return () => { cancelled = true; };
-    }, [isOpen, jobId, clipIndex]);
+    }, [isOpen, jobId, clipIndex, transcriptPath]);
 
     // Remember the look for the next clip
     useEffect(() => {

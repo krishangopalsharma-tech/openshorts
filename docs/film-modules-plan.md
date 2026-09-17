@@ -600,6 +600,33 @@ shorten it and re-run only that part. "upload voiceover" stays as the
 manual path. When Kokoro is offline the button is disabled and the panel
 shows the start command.
 
+### Server lifecycle (built 18-sep-2026)
+
+`film_voice.ensure_server()`: if no server answers, `KOKORO_HOME/.venv`'s
+python launches `uvicorn api.src.main:app` with the same env as
+`start-cpu.ps1` (`USE_GPU=false`, `PHONEMIZER_ESPEAK_LIBRARY` when the DLL
+exists, log at `output/film/kokoro.log`) and the call waits up to
+`KOKORO_START_TIMEOUT` (90 s) for `/v1/audio/voices`. Lazy: the first
+voices/narrate/preview call or the tab's **start Kokoro** button
+(`POST /api/film/voices/start`) triggers it; `KOKORO_AUTOSTART=0` disables
+it. `stop_server()` runs in the app's lifespan shutdown and only stops a
+process this API started. Measured cold start to first answer: 17.4 s.
+
+### Captions and logos on a part (built 18-sep-2026)
+
+The clip editor's `SubtitleModal` and `OverlayEditor` open on a narrated
+part unchanged except for one prop (`transcriptPath`). They post to
+`/api/movierecap/part/{sid}/{part}/captions` (`preset` + `overrides`,
+optional edited `words`, `preset: null` removes) and `.../overlays`
+(`overlays.normalize` items, `[]` removes). `_relayer_part` strips back to
+the narrated base (`renders[...].base_file`), composites overlays, then
+burns captions on top through `app._burn_styled_captions`, and drops the
+previous derivatives. Caption words are the narration lines placed on the
+finished timeline (`narration_cues`: start = `voice_start`, end = start +
+the wav's duration), spread per line the way SRT cues are; per-word
+timestamps from `/dev/captioned_speech` are the upgrade if the pop looks
+uneven.
+
 ### Silent render must actually be silent
 
 Found in the first recap test: the silent parts carry the film's

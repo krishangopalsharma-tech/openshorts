@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { BookOpen, Loader2, AlertCircle, Download, Mic, Sparkles, ShieldCheck, ShieldAlert, ExternalLink, FileText, Copy, Check, Volume2, RefreshCw } from 'lucide-react';
 import StepIndicator from './ui/StepIndicator';
+import SubtitleModal from './SubtitleModal';
+import OverlayEditor from './OverlayEditor';
 import SessionSetup, { Stat } from './film/SessionSetup';
 import PromptPastePanel from './film/PromptPastePanel';
 import { filmJson, fmtTime, useRenderPoll, copyText, downloadText } from './film/filmApi';
@@ -22,6 +24,12 @@ export default function MovieRecapTab() {
     try { setKokoro(await filmJson('/api/film/voices')); } catch { setKokoro({ online: false, groups: {} }); }
   }, []);
   useEffect(() => { if (step >= 4 && !kokoro) loadKokoro(); }, [step, kokoro, loadKokoro]);
+  // Start the Kokoro server from KOKORO_HOME (CPU); waits up to ~90 s.
+  const startKokoro = useCallback(async () => {
+    const r = await filmJson('/api/film/voices/start', { method: 'POST' });
+    setKokoro(r);
+    if (!r.online) throw new Error(r.reason || 'Kokoro did not start');
+  }, []);
 
   const onSession = useCallback((s) => {
     setSession(s);
@@ -199,6 +207,7 @@ export default function MovieRecapTab() {
                     <div className="space-y-3">
                       <VoicePanel
                         sessionId={session.id} part={p.index} render={voiced} kokoro={kokoro} onRefresh={loadKokoro}
+                        onStartServer={startKokoro}
                         settings={session.settings || {}}
                         onStarted={(r) => setRenders((prev) => ({ ...prev, [`recap-${p.index}`]: { status: 'running', logs: [], ...r } }))}
                         onError={setError}
@@ -220,6 +229,11 @@ export default function MovieRecapTab() {
                         </p>
                       )}
                       <RenderBlock label="narrated part" render={voiced} />
+                      {voiced?.status === 'completed' && voiced.base_file && (
+                        <PartTools sessionId={session.id} part={p.index} render={voiced}
+                          onUpdated={(patch) => setRenders((prev) => ({ ...prev, [`recap-${p.index}`]: { ...prev[`recap-${p.index}`], ...patch } }))}
+                          onError={setError} />
+                      )}
                       {voiced?.fit && <FitTable fit={voiced.fit} overruns={voiced.overruns} words={voiced.words} />}
                     </div>
                   </div>
@@ -372,11 +386,16 @@ function ScriptPanel({ part, plan, speed, title }) {
 // Generated voiceover: pick a Kokoro voice, hear the part's first line, set
 // the reading speed, generate. Synthesis runs on the CPU in the backend
 // before the render touches ffmpeg or the GPU (docs/film-modules-plan.md §3.8).
-function VoicePanel({ sessionId, part, render, kokoro, onRefresh, settings, onStarted, onError }) {
+function VoicePanel({ sessionId, part, render, kokoro, onRefresh, onStartServer, settings, onStarted, onError }) {
   const [voice, setVoice] = useState(settings.voice || kokoro?.default || 'am_michael');
   const [speed, setSpeed] = useState(Number(settings.tts_speed) || 1.0);
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState('');
+
+  const onStart = async () => {
+    setBusy('start');
+    try { await onStartServer(); } catch (e) { onError(e.message); } finally { setBusy(''); }
+  };
   useEffect(() => { if (kokoro?.default && !settings.voice) setVoice(kokoro.default); }, [kokoro, settings.voice]);
 
   const running = render?.status === 'running';
@@ -407,8 +426,16 @@ function VoicePanel({ sessionId, part, render, kokoro, onRefresh, settings, onSt
         <button type="button" onClick={onRefresh} className="text-xs text-muted hover:text-ink flex items-center gap-1" title="check the Kokoro server again"><RefreshCw size={12} /> {kokoro ? (online ? `online · ${kokoro.voices} voices · cpu` : 'offline') : 'checking…'}</button>
       </div>
       {kokoro && !online && (
-        <div className="text-xs text-warn space-y-1">
-          <p>Kokoro server is not running. Start it in PowerShell, then check again:</p>
+        <div className="text-xs text-warn space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>Kokoro server is not running.</span>
+            <button type="button" onClick={onStart} disabled={busy === 'start'}
+              className="px-3 py-1 rounded-lg bg-ink text-paper text-xs font-medium disabled:opacity-40 flex items-center gap-2">
+              {busy === 'start' ? <Loader2 size={12} className="animate-spin" /> : <Volume2 size={12} />} start Kokoro (cpu)
+            </button>
+            {kokoro.reason && <span className="text-muted">{kokoro.reason}</span>}
+          </div>
+          <p className="text-muted">or by hand in PowerShell, then check again:</p>
           <pre className="font-mono text-[11px] bg-paper3 rounded p-2 text-ink">{kokoro.start_command}</pre>
         </div>
       )}
@@ -471,6 +498,75 @@ function FitTable({ fit, overruns, words }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+
+// The same caption and logo tools a clip card has, on a narrated part. Both
+// modals are the clip editor's own; they post to the part endpoints, which
+// re-derive overlays under captions over the narrated base render.
+function PartTools({ sessionId, part, render, onUpdated, onError }) {
+  const [openCaptions, setOpenCaptions] = useState(false);
+  const [openOverlays, setOpenOverlays] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const videoUrl = render?.output ? `${getApiUrl(render.output)}?t=${render.finished || ''}` : '';
+
+  const post = async (path, body) => {
+    setBusy(true);
+    try {
+      const r = await filmJson(path, { json: body });
+      onUpdated({ file: r.file, output: r.output, caption_style: r.caption_style ?? render.caption_style, overlays: r.overlays ?? render.overlays });
+      return true;
+    } catch (e) {
+      onError(e.message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const captions = async (options) => {
+    if (await post(`/api/movierecap/part/${sessionId}/${part}/captions`,
+      { preset: options.preset, overrides: options.overrides || {}, words: options.captions || null })) setOpenCaptions(false);
+  };
+  const removeCaptions = async () => {
+    if (await post(`/api/movierecap/part/${sessionId}/${part}/captions`, { preset: null })) setOpenCaptions(false);
+  };
+  const overlays = async (items) => {
+    if (await post(`/api/movierecap/part/${sessionId}/${part}/overlays`, { overlays: items })) setOpenOverlays(false);
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button type="button" onClick={() => setOpenCaptions(true)} disabled={busy}
+        className="px-3 py-1.5 rounded-lg border border-rule text-sm text-ink2 hover:border-brass disabled:opacity-40 flex items-center gap-2">
+        <FileText size={14} /> captions{render.caption_style ? ` · ${render.caption_style.preset}` : ''}
+      </button>
+      <button type="button" onClick={() => setOpenOverlays(true)} disabled={busy}
+        className="px-3 py-1.5 rounded-lg border border-rule text-sm text-ink2 hover:border-brass disabled:opacity-40 flex items-center gap-2">
+        <Sparkles size={14} /> logo &amp; text{render.overlays?.length ? ` · ${render.overlays.length}` : ''}
+      </button>
+      {busy && <Loader2 size={14} className="animate-spin text-brass" />}
+      <SubtitleModal
+        isOpen={openCaptions}
+        onClose={() => setOpenCaptions(false)}
+        onGenerate={captions}
+        onRemove={render.caption_style ? removeCaptions : undefined}
+        isProcessing={busy}
+        videoUrl={videoUrl}
+        jobId={null}
+        clipIndex={part}
+        transcriptPath={`/api/movierecap/part/${sessionId}/${part}/transcript`}
+      />
+      <OverlayEditor
+        isOpen={openOverlays}
+        onClose={() => setOpenOverlays(false)}
+        clip={{ overlays: render.overlays || [], output_format: 'vertical' }}
+        onApply={overlays}
+        isProcessing={busy}
+        videoUrl={videoUrl}
+      />
     </div>
   );
 }

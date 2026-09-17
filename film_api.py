@@ -556,11 +556,29 @@ def _render_recap_vo_job(sid, part, vo_path):
             fps=int(st.get("fps") or 60), log=lambda line: _log(sid, key, line))
         shutil.rmtree(work, ignore_errors=True)
         _set_render(sid, key, status="completed", output=f"/film/{sid}/{out_name}", file=out_name,
+                    base_file=out_name, overlays=[], caption_style=None,
+                    narration_cues=_narration_cues(plan, segments),
                     report=report, finished=time.time(),
                     segments=[{k: v for k, v in s.items() if k != "chunk"} for s in segments])
     except Exception as exc:  # noqa: BLE001
         _log(sid, key, f"failed: {exc}")
         _set_render(sid, key, status="failed", error=str(exc)[:500], finished=time.time())
+
+
+def _narration_cues(plan, segments):
+    """The spoken lines on the FINISHED timeline, as cues: what the caption
+    layer renders. One cue per narrated chunk, from its placement."""
+    cues = []
+    for chunk, seg in zip(plan.chunks, segments):
+        text = " ".join(chunk.narration.split())
+        if not text or seg.get("voice_start") is None:
+            continue
+        dur = float((seg.get("chunk") or {}).get("duration") or 0.0)
+        if dur <= 0:
+            dur = max(0.5, float(seg.get("shot_length", 0.0)) - 0.4)
+        cues.append({"start": round(float(seg["voice_start"]), 3),
+                     "end": round(float(seg["voice_start"]) + dur, 3), "text": text})
+    return cues
 
 
 @router.post("/api/movierecap/voiceover/{sid}/{part}")
@@ -673,6 +691,8 @@ def _render_recap_tts_job(sid, part, voice, speed):
         shutil.rmtree(work, ignore_errors=True)
         out_name = os.path.basename(report["output"])
         _set_render(sid, key, status="completed", output=f"/film/{sid}/{out_name}", file=out_name,
+                    base_file=out_name, overlays=[], caption_style=None,
+                    narration_cues=_narration_cues(plan, narrated["segments"]),
                     report=report, finished=time.time(), generated=True,
                     segments=[{k: v for k, v in s.items() if k != "chunk"} for s in narrated["segments"]])
     except film_voice.VoiceOffline as exc:
@@ -709,3 +729,157 @@ async def recap_narrate(sid: str, part: int, request: Request):
     _update(sid, fn)
     _start_thread(_render_recap_tts_job, sid, int(part), voice, speed)
     return {"render": key, "status": "running", "voice": voice, "speed": speed}
+
+
+@router.post("/api/film/voices/start")
+async def film_voices_start():
+    """Start the Kokoro server from KOKORO_HOME (CPU) and wait for it. The
+    same happens by itself on the first narrate/preview when it is down."""
+    _guard()
+    import asyncio
+    loop = asyncio.get_running_loop()
+    status = await loop.run_in_executor(None, film_voice.ensure_server)
+    groups = {}
+    if status.get("online"):
+        for v in film_voice.voices():
+            groups.setdefault(v["language"], []).append(v)
+    return {**status, "groups": groups, "default": film_voice.DEFAULT_VOICE,
+            "speed_range": list(film_voice.SPEED_RANGE)}
+
+
+# --- captions and overlays on a narrated part --------------------------------
+#
+# Same tools as a clip (SubtitleModal -> caption_styles, OverlayEditor ->
+# overlays.py), same layer order (overlays under, captions on top), same
+# fail-open contract. The narrated render is the base and is never touched;
+# every change strips back to it and re-derives, so a caption restyle never
+# re-composites logos twice.
+
+def _part_render(sess, part):
+    r = (sess.get("renders") or {}).get(f"recap-{part}")
+    if not r or r.get("status") != "completed" or not r.get("base_file"):
+        raise HTTPException(status_code=400, detail=f"part {part} has no narrated render yet")
+    return r
+
+
+def _part_transcript(render):
+    cues = render.get("narration_cues") or []
+    return fp.cues_to_transcript(cues), (cues[-1]["end"] + 1.0 if cues else 0.0)
+
+
+def _words_transcript(words):
+    """Edited caption words from the modal (clip-relative ms) -> transcript."""
+    edited = []
+    for w in words or []:
+        try:
+            text, s, e = str(w["text"]).strip(), float(w["startMs"]) / 1000.0, float(w["endMs"]) / 1000.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if text and e > s >= 0:
+            edited.append({"word": " " + text, "start": s, "end": e})
+    if not edited:
+        return None, 0.0
+    edited.sort(key=lambda w: w["start"])
+    return ({"language": "en", "segments": [{"start": edited[0]["start"], "end": edited[-1]["end"],
+                                             "text": " ".join(w["word"] for w in edited), "words": edited}]},
+            edited[-1]["end"] + 1.0)
+
+
+def _relayer_part(sid, part):
+    """Re-derive overlays then captions over the narrated base; returns the
+    served filename. Old derivatives of this part are removed."""
+    import overlays as _ov
+    sess = _load(sid)
+    r = _part_render(sess, part)
+    out_dir = _session_dir(sid)
+    base = os.path.join(out_dir, r["base_file"])
+    if not os.path.exists(base):
+        raise HTTPException(status_code=409, detail="the narrated render is gone; generate it again")
+    stale = [f for f in os.listdir(out_dir)
+             if f.endswith(r["base_file"]) and f != r["base_file"] and (f.startswith("ov_") or f.startswith("subtitled_"))]
+    current = base
+    items = _ov.normalize(r.get("overlays") or [])
+    if items:
+        ov_path = os.path.join(out_dir, f"ov_{uuid.uuid4().hex[:6]}_{r['base_file']}")
+        if _ov.apply_overlays(current, items, ov_path):
+            current = ov_path
+    style = r.get("caption_style")
+    if style:
+        if style.get("words"):
+            transcript, end = _words_transcript(style["words"])
+        else:
+            transcript, end = _part_transcript(r)
+        if transcript and transcript.get("segments"):
+            burned = _app()._burn_styled_captions(current, transcript, 0.0, end,
+                                                   {"preset": style.get("preset"), "overrides": style.get("overrides") or {}},
+                                                   split_ranges=[])
+            if burned:
+                current = burned
+    for f in stale:
+        if os.path.join(out_dir, f) != current:
+            try:
+                os.remove(os.path.join(out_dir, f))
+            except OSError:
+                pass
+    name = os.path.basename(current)
+    _set_render(sid, f"recap-{part}", file=name, output=f"/film/{sid}/{name}")
+    return name
+
+
+@router.get("/api/movierecap/part/{sid}/{part}/transcript")
+async def recap_part_transcript(sid: str, part: int):
+    """The narration as caption words, in the shape SubtitleModal reads for
+    a clip (``captions`` with ms, ``durationSec``)."""
+    _guard()
+    r = _part_render(_load(sid), part)
+    transcript, _end = _part_transcript(r)
+    captions = [{"text": w["word"].strip(), "startMs": int(w["start"] * 1000), "endMs": int(w["end"] * 1000)}
+                for seg in transcript["segments"] for w in seg["words"]]
+    duration = float((r.get("report") or {}).get("duration") or (captions[-1]["endMs"] / 1000.0 if captions else 0.0))
+    return {"captions": captions, "durationSec": duration, "language": "en"}
+
+
+@router.post("/api/movierecap/part/{sid}/{part}/captions")
+async def recap_part_captions(sid: str, part: int, request: Request):
+    """Burn a caption look onto the narrated part (``preset`` + ``overrides``,
+    optional edited ``words``); ``{"preset": null}`` removes the layer."""
+    _guard()
+    body = await _body(request)
+    sess = _load(sid)
+    _part_render(sess, part)
+    import caption_styles
+    preset = body.get("preset")
+    style = None
+    if preset:
+        if preset not in caption_styles.STYLE_PRESETS:
+            raise HTTPException(status_code=400, detail=f"unknown caption preset {preset}")
+        words = body.get("words")
+        if words is not None and (not isinstance(words, list) or len(words) > 2000):
+            raise HTTPException(status_code=400, detail="words must be a list of at most 2000 items")
+        style = {"preset": preset, "overrides": caption_styles.normalize_overrides(body.get("overrides") or {}),
+                 "words": words}
+    _update(sid, lambda s: s["renders"][f"recap-{part}"].update(caption_style=style))
+    import asyncio
+    loop = asyncio.get_running_loop()
+    name = await loop.run_in_executor(None, _relayer_part, sid, part)
+    return {"file": name, "output": f"/film/{sid}/{name}", "caption_style": style}
+
+
+@router.post("/api/movierecap/part/{sid}/{part}/overlays")
+async def recap_part_overlays(sid: str, part: int, request: Request):
+    """Logos and text blocks on the narrated part, in fractions of the frame
+    (overlays.normalize schema); ``[]`` removes the layer."""
+    _guard()
+    body = await _body(request)
+    sess = _load(sid)
+    _part_render(sess, part)
+    import overlays as _ov
+    items = _ov.normalize(body.get("overlays") or [])
+    for item in items:
+        if item["type"] == "image" and not _ov.resolve_asset(item["asset"]):
+            raise HTTPException(status_code=400, detail=f"unknown overlay asset {item['asset']}")
+    _update(sid, lambda s: s["renders"][f"recap-{part}"].update(overlays=items))
+    import asyncio
+    loop = asyncio.get_running_loop()
+    name = await loop.run_in_executor(None, _relayer_part, sid, part)
+    return {"file": name, "output": f"/film/{sid}/{name}", "overlays": items}
