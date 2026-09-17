@@ -878,6 +878,33 @@ def _shorts(sess):
     return sess.setdefault("shorts", {"plan": None, "previews": []})
 
 
+# Two shorts render at a time. Measured 18-sep-2026 on the RTX 2070: "render
+# all" on four ~110 s shorts ran four reframes at once and finished all four
+# in 2 min 20 s with the card at 5.2 of 8 GB, so parallel is fine on an idle
+# box; two is the ceiling so a clip job running beside them cannot push the
+# card into the "Generic error in an external library" exit-187 failure
+# CLAUDE.md describes. The gate is per process; the session log says "queued".
+_SHORTS_GATE = threading.BoundedSemaphore(2)
+
+
+def _short_runner(sid, key, total):
+    """An ffmpeg runner for recut.run_cut_concat that reports progress into
+    the session log: one line per cut, then the hand-over to the reframe
+    (which has no hook and is the slow stage)."""
+    import recut
+    state = {"n": 0}
+
+    def run(command):
+        if "concat" in command:
+            _log(sid, key, f"🧩 joining {total} cuts → reframing (face tracking on the whole short; a few minutes, no log until it ends)")
+        else:
+            state["n"] += 1
+            if state["n"] == 1 or state["n"] % 5 == 0 or state["n"] == total:
+                _log(sid, key, f"✂️  cut {state['n']}/{total}")
+        return recut._run_ffmpeg(command)
+    return run
+
+
 def _short_key(index):
     return f"shorts-{int(index)}"
 
@@ -1016,11 +1043,19 @@ def _render_short_job(sid, index):
             json.dump(data, fh, indent=2)
 
         effects, captioner = app._clip_layer_hooks(job_dir, clip)
-        _log(sid, key, "✂️  cutting, reframing, then music, watermark, captions")
-        served, clean_recut = recut.perform_recut(
-            input_path=sess["video_path"], segments=segments, output_dir=job_dir, clean_name=clean_name,
-            reframe=True, output_format=fmt, captions_transcript=v_transcript,
-            captioner=captioner, effects=effects)
+        if not _SHORTS_GATE.acquire(blocking=False):
+            _log(sid, key, "⏳ queued: two shorts are already rendering")
+            _SHORTS_GATE.acquire()
+        try:
+            t0 = time.time()
+            _log(sid, key, "✂️  cutting, then reframe, music, watermark, captions")
+            served, clean_recut = recut.perform_recut(
+                input_path=sess["video_path"], segments=segments, output_dir=job_dir, clean_name=clean_name,
+                reframe=True, output_format=fmt, captions_transcript=v_transcript,
+                captioner=captioner, effects=effects, runner=_short_runner(sid, key, len(segments)))
+            _log(sid, key, f"✅ done in {time.time() - t0:.0f} s")
+        finally:
+            _SHORTS_GATE.release()
         clip["video_url"] = f"/videos/{job_id}/{served}"
         try:
             clip["layout_ranges"] = layout_ranges.read(os.path.join(job_dir, clean_recut))

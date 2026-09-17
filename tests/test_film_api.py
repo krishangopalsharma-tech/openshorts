@@ -581,3 +581,20 @@ def test_shorts_settings_are_validated(local):
     assert c.post(f"/api/film/session/{sid}/settings", json={"caption_preset": "nope"}).status_code == 400
     got = c.post(f"/api/film/session/{sid}/settings", json={"shorts_count": 4, "watermark_text": "x", "music_track": None}).json()
     assert got["settings"]["shorts_count"] == 4 and got["settings"]["music_track"] is None
+
+
+def test_short_runner_logs_cuts_and_the_reframe_handover(local, monkeypatch):
+    import recut
+    c = local["client"]
+    sid = _session(local)["id"]
+    ran = []
+    monkeypatch.setattr(recut, "_run_ffmpeg", lambda cmd: ran.append(cmd))
+    run = film_api._short_runner(sid, "shorts-0", 12)
+    for i in range(12):
+        run(["ffmpeg", "-ss", str(i), "part.mp4"])
+    run(["ffmpeg", "-f", "concat", "-i", "list.txt", "out.mp4"])
+    assert len(ran) == 13
+    logs = c.get(f"/api/film/status/{sid}").json()["renders"]["shorts-0"]["logs"]
+    cuts = [l for l in logs if "cut " in l]
+    assert [l.split("cut ")[1] for l in cuts] == ["1/12", "5/12", "10/12", "12/12"]
+    assert any("joining 12 cuts" in l for l in logs)

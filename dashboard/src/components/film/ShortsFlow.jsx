@@ -189,7 +189,12 @@ function ShortCard({ index, preview, render, onRender, onOpenJob }) {
 
       {render && (
         <div className="space-y-2">
-          {render.status === 'running' && <p className="text-sm flex items-center gap-2"><Loader2 size={14} className="animate-spin text-brass" /> rendering… (cut, reframe, music, watermark, captions)</p>}
+          {render.status === 'running' && (
+            <p className="text-sm flex items-center gap-2">
+              <Loader2 size={14} className="animate-spin text-brass" /> rendering{render.started ? ` · ${fmtTime(Date.now() / 1000 - render.started)}` : ''}
+              <span className="text-muted">· two at a time; the reframe of a two-minute short takes a minute or two and logs nothing while it runs</span>
+            </p>
+          )}
           {render.status === 'failed' && <p className="text-sm text-bad flex items-center gap-2"><AlertCircle size={14} /> {render.error}</p>}
           {render.logs?.length > 0 && render.status !== 'completed' && (
             <pre className="text-[11px] font-mono text-muted bg-paper3 rounded p-2 max-h-24 overflow-y-auto">{render.logs.slice(-6).join('\n')}</pre>
