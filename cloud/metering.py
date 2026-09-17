@@ -162,6 +162,12 @@ def probe_url_minutes(url: str, allow_paid: bool = True) -> float:
     # the live one so the probe sees the file and not an HTML page.
     import file_hosts
     url = file_hosts.resolve(url)
+    # Free and first: a search / playlist / channel page is walked entry by
+    # entry by yt-dlp and never yields a duration (yt_clients.youtube_non_video_reason).
+    from yt_clients import NotASingleVideo, youtube_non_video_reason
+    reason = youtube_non_video_reason(url)
+    if reason:
+        raise NotASingleVideo(f"This link is {reason}.")
 
     bgutil_http = os.environ.get("BGUTIL_BASE_URL", "").strip()
     bgutil_script = os.environ.get("BGUTIL_SCRIPT_PATH", "").strip()
@@ -248,6 +254,13 @@ def _probe_with_proxies(url, proxies, strategies, static_errors, paid, ck_path):
     last_err = None
     for proxy in proxies:
         is_paid = bool(paid) and proxy == paid
+        # Every attempt's error on this route, not just the last one. The
+        # anonymous retry (see probe_url_minutes) on a static IP routinely
+        # ends in "Sign in to confirm you're not a bot"; if the attempt with
+        # the cookies had already said "confirm your age" / "Private video",
+        # that is the verdict, and the bot-check must not turn it into an IP
+        # problem worth the paid proxy (17-sep-2026, 3QFAEqE9-Kk, twice).
+        route_errors = []
         if is_paid:
             # Only spend the per-GB proxy when a free route failed for a
             # reason another IP can fix. Content errors and "no duration"
@@ -256,7 +269,16 @@ def _probe_with_proxies(url, proxies, strategies, static_errors, paid, ck_path):
                                             for e in static_errors.values()):
                 break
         for step, (extractor_args, use_cookies) in enumerate(strategies):
+            # noplaylist: a URL pasted from a playing playlist or a mix
+            # (`watch?v=X&list=...`) is that ONE video. Without this yt-dlp
+            # walks the whole list and fails on its first private / age-gated
+            # / bot-checked entry, a video the user never asked for; the probe
+            # then escalated to the per-GB proxy, which walked the same list
+            # and failed the same way, and the user got a 400 for a valid
+            # link. 26 of the 37 paid probes between 7 and 17-sep-2026 were
+            # exactly this (proxy_usage: `list=` and `results?search_query`).
             opts = {"skip_download": True, "quiet": True, "no_warnings": True,
+                    "noplaylist": True,
                     "logger": _QuietLogger(), "extractor_args": extractor_args}
             if ck_path and use_cookies:
                 opts["cookiefile"] = ck_path
@@ -280,9 +302,11 @@ def _probe_with_proxies(url, proxies, strategies, static_errors, paid, ck_path):
                     break
             except Exception as e:
                 last_err = e
+                route_errors.append(str(e)[:300])
         else:
             if not is_paid:
-                static_errors[_route_name(proxy, proxies)] = str(last_err)[:300]
+                static_errors[_route_name(proxy, proxies)] = (
+                    " || ".join(route_errors) if route_errors else str(last_err)[:300])
             continue
         break
     if paid and any(p == paid for p in proxies) and static_errors and \

@@ -62,3 +62,5 @@ plan/CLIP_PICKER_PROMPT.md
 plan/behind_subject.py
 plan/behind_subject_test.png
 plan/behind_example.ass
+# Instrucciones locales con datos de infra (repo público)
+CLAUDE.local.md

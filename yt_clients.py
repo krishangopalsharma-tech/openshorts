@@ -24,6 +24,51 @@ first is "unsupported", the second is skipped whenever cookies are present.
 HD_CLIENTS = ["default", "mweb"]
 
 
+class NotASingleVideo(ValueError):
+    """The URL is a YouTube page that is not one video (search, playlist,
+    channel). Raised before yt-dlp ever sees it, by the probe and the
+    download alike."""
+
+
+def youtube_non_video_reason(url):
+    """Why this YouTube URL is not a single video, or None if it is one.
+
+    A search page or a bare playlist is walked entry by entry by yt-dlp even
+    with ``noplaylist`` (that option only strips the ``list=`` off a
+    ``watch`` link). Measured in the prod container on 17-sep-2026: a
+    ``results?search_query=`` URL held the probe's executor thread for
+    2220 s and still failed on an entry that "premieres in 4 days", after
+    the same URL had paid the per-GB proxy three times in a day. So the
+    check is by path, up front and free: nothing that is not one video is
+    worth a single request.
+    """
+    from urllib.parse import urlparse, parse_qs
+    try:
+        parts = urlparse(url or "")
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if host == "youtu.be":
+        return None if parts.path.strip("/") else "youtu.be link without a video id"
+    if not (host == "youtube.com" or host.endswith(".youtube.com")):
+        return None
+    path = parts.path.rstrip("/") or "/"
+    if path == "/watch":
+        return None if parse_qs(parts.query).get("v") else "a watch page without a video id"
+    first = path.split("/")[1] if path != "/" else ""
+    if first in ("shorts", "live", "embed", "v", "e"):
+        return None
+    if first == "results":
+        return "a search results page, not a video"
+    if first == "playlist":
+        return "a playlist, not a video; open one video in it and paste that link"
+    if first.startswith("@") or first in ("channel", "c", "user"):
+        return "a channel page, not a video"
+    if first in ("feed", "", "gaming", "music"):
+        return "a YouTube page with no video in it"
+    return None
+
+
 def pot_provider_args(bgutil_http, bgutil_script):
     """Extractor args selecting the PO token provider (bgutil http or script)."""
     if bgutil_http:

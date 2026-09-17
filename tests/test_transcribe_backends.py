@@ -293,3 +293,74 @@ def test_turbo_gets_neither_prompt_nor_hotwords(monkeypatch):
     monkeypatch.setattr(tb, "run_whisper_transcription", fake_run)
     tb._transcribe_with_whisper("video.mp4")
     assert "initial_prompt" not in seen and "hotwords" not in seen
+# --- release_models: the API process must not keep the models resident ------
+
+class _FakeCT2:
+    def __init__(self):
+        self.unloaded = False
+
+    def unload_model(self, to_cpu=False):
+        self.unloaded = True
+
+
+class _FakeWhisper:
+    def __init__(self):
+        self.model = _FakeCT2()
+
+
+def test_release_models_drops_both_singletons_and_unloads_whisper(monkeypatch):
+    whisper = _FakeWhisper()
+    monkeypatch.setattr(tb, "_whisper_model", whisper)
+    monkeypatch.setattr(tb, "_whisper_key", ("large-v3-turbo", "cuda", "float16"))
+    monkeypatch.setattr(tb, "_parakeet_model", object())
+
+    tb.release_models()
+
+    assert tb._whisper_model is None and tb._whisper_key is None
+    assert tb._parakeet_model is None
+    assert whisper.model.unloaded  # ctranslate2 frees VRAM on unload, not on GC
+
+
+def test_release_models_hands_every_gate_slot_back():
+    tb.release_models()
+    # Every slot is free again: a transcription can start right after.
+    for _ in range(tb._ASR_SLOTS):
+        assert tb._ASR_GATE.acquire(blocking=False)
+    for _ in range(tb._ASR_SLOTS):
+        tb._ASR_GATE.release()
+
+
+def test_release_models_is_a_no_op_when_nothing_is_loaded(monkeypatch):
+    monkeypatch.setattr(tb, "_whisper_model", None)
+    monkeypatch.setattr(tb, "_parakeet_model", None)
+    tb.release_models()
+    assert tb._whisper_model is None and tb._parakeet_model is None
+
+
+def test_whisper_model_is_fetched_inside_the_gate(monkeypatch):
+    """release_models drains the gate before unloading; that only protects a
+    transcription if the model is taken *after* the gate is held."""
+    order = []
+
+    class _Gate:
+        def __enter__(self):
+            order.append("gate")
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Model:
+        def transcribe(self, path, **params):
+            order.append("transcribe")
+            return iter([]), SimpleNamespace(duration=0, language="en")
+
+    monkeypatch.setattr(tb, "_ASR_GATE", _Gate())
+    monkeypatch.setattr(tb, "_whisper_device", lambda: "cuda")
+    # The getter takes the forced language (turbo is swapped out on Hindustani).
+    monkeypatch.setattr(tb, "_get_whisper_model",
+                        lambda language=None: (order.append("model"), (_Model(), "cuda"))[1])
+
+    tb._run_whisper_once("x.mp4")
+
+    assert order == ["gate", "model", "transcribe"]

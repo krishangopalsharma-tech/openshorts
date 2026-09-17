@@ -34,6 +34,7 @@ with other models on the host, so loads can OOM under load).
 """
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -74,7 +75,8 @@ def _asr_language(language):
 # Serializes GPU transcription across concurrent jobs so N jobs can't stack
 # N model contexts / decode batches in VRAM. CPU whisper stays ungated
 # (CTranslate2 models are thread-safe and that matches the old behavior).
-_ASR_GATE = threading.Semaphore(int(os.environ.get("ASR_GPU_CONCURRENCY", "1")))
+_ASR_SLOTS = int(os.environ.get("ASR_GPU_CONCURRENCY", "1"))
+_ASR_GATE = threading.Semaphore(_ASR_SLOTS)
 
 
 class _NullGate:
@@ -154,10 +156,18 @@ def _get_whisper_model(language=None):
     return _whisper_model, cfg["device"]
 
 
+def _whisper_device():
+    return "cpu" if _whisper_force_cpu else get_whisper_config()["device"]
+
+
 def _run_whisper_once(media_path, **params):
-    model, device = _get_whisper_model(params.get("language"))
-    gate = _ASR_GATE if device != "cpu" else _NULL_GATE
+    gate = _ASR_GATE if _whisper_device() != "cpu" else _NULL_GATE
+    # The model is fetched inside the gate: release_models() drains the gate
+    # before unloading, so a transcription can never start on a model that is
+    # being dropped underneath it. The language still picks the build (a turbo
+    # model is swapped for large-v3 on Hindustani, see subtitles.get_whisper_config).
     with gate:
+        model, _device = _get_whisper_model(params.get("language"))
         segments, info = model.transcribe(media_path, **params)
         progress = _TranscribeProgress(getattr(info, "duration", 0))
         materialized = []
@@ -285,6 +295,54 @@ def _get_parakeet_model():
     return _parakeet_model
 
 
+def release_models():
+    """Drop the resident ASR models and hand their VRAM back to the GPU.
+
+    main.py runs one job per process, so its singletons die with the job.
+    The API process is different: ``/api/subtitle`` on a dubbed clip and the
+    thumbnail studio transcribe in-process, and after the first such request
+    the models sit in the long-lived uvicorn process for good. Measured in
+    prod on 17-sep-2026: the API held 7.7 GB of a 20 GB GPU while idle
+    (ctranslate2 whisper + onnxruntime CUDA parakeet + torch), and with eight
+    jobs running alongside it NVENC could not open a session ("Generic error
+    in an external library", exit 187, 0 bytes) and TransNetV2 hit CUDA OOM:
+    5 of 12 jobs failed. The API calls this after each in-process
+    transcription; a job process never needs to.
+
+    Drains every gate slot first, so no transcription is mid-decode on the
+    model being dropped, and both loaders fetch their model inside the gate.
+    """
+    global _whisper_model, _whisper_key, _parakeet_model
+    for _ in range(_ASR_SLOTS):
+        _ASR_GATE.acquire()
+    try:
+        with _whisper_lock:
+            whisper, _whisper_model, _whisper_key = _whisper_model, None, None
+        with _parakeet_lock:
+            parakeet, _parakeet_model = _parakeet_model, None
+    finally:
+        for _ in range(_ASR_SLOTS):
+            _ASR_GATE.release()
+    if whisper is not None:
+        try:
+            # ctranslate2 frees the weights on unload, not on garbage
+            # collection: the Python wrapper can outlive the last reference.
+            whisper.model.unload_model()
+        except Exception as e:
+            print(f"⚠️ [ASR] whisper unload failed ({type(e).__name__}: {e})")
+    del whisper, parakeet
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    if "onnxruntime" in sys.modules or "faster_whisper" in sys.modules:
+        print("🧹 [ASR] resident models released")
+
+
 def _extract_wav(media_path):
     """Parakeet wants 16kHz mono PCM wav; ffmpeg-extract to a temp file."""
     fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="asr_")
@@ -334,7 +392,6 @@ def _words_from_tokens(tokens, timestamps, seg_start, seg_end):
 
 
 def _transcribe_with_parakeet(media_path):
-    model = _get_parakeet_model()
     wav_path = _extract_wav(media_path)
     try:
         # 16kHz mono s16le wav -> 32000 bytes per second of audio.
@@ -343,6 +400,7 @@ def _transcribe_with_parakeet(media_path):
         except OSError:
             duration = 0.0
         with _ASR_GATE:
+            model = _get_parakeet_model()  # inside the gate: see release_models
             progress = _TranscribeProgress(duration)
             results = []
             for seg in model.recognize(wav_path):

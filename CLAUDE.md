@@ -189,6 +189,62 @@ LLM it logs one line and keeps the transcript hook. `HOOK_GROUNDING=0`
 disables it. The detail prompt itself now carries the rule "about this
 moment, not the video", which is the cheap half of the same fix.
 
+### The quota wall offers the first N minutes (`app.partial_offer`)
+
+The wall (`TopUpModal`, context `wall`) opens on a 402 from `/api/process`.
+Measured on 16-sep-2026, 93 of 99 walls were shown to accounts with their
+20 free minutes **untouched** that had pasted a 21-90 min video: the user was
+asked for $12 before seeing one clip, and 41 of the 68 subscriptions Stripe
+created in 30 days expired unpaid, none of them a card decline. So the 402
+now carries `partial_minutes` (the floored balance, when it is at least
+`PARTIAL_MIN_MINUTES` and shorter than the source), the wall shows "clip the
+first N min" next to the plans, and the dashboard resubmits the same job with
+`max_minutes=N`. `reserve_process_minutes` then reserves N (never more than
+the balance, whatever the client asks) and sets `MAX_SOURCE_MINUTES` for
+`main.py`, whose `cap_source_duration` cuts the downloaded/uploaded file **in
+place** before anything reads it, so transcription, the layout picker, the
+editor and `/api/source` all see a short video. The cut travels in the
+resume manifest: a resumed job downloads the source again and would
+otherwise process 45 minutes on a 20-minute reservation. `/api/status` and
+the process response carry `partial`, and the results view says which part
+of the video the clips came from, with the upsell for the rest.
+
+### Silent footage: the vision fallback (`main.get_visual_clips`)
+
+The moment picker reads the transcript, so a video with nothing said in it
+would score nothing. `main.py` switches paths by itself instead, and the
+switch is the part worth knowing because it is not only "no audio track":
+`transcribe_video` raising `NoAudioError`, **and** `speech_is_sparse()`
+coming back true, both set `transcript = None` and route to
+`get_visual_clips`. Sparse means under `MIN_SPEECH_WORDS` (8) in total or
+under `MIN_SPEECH_WORDS_PER_MIN` (5). Music-only footage and a session
+recorded with the mic muted transcribe to a handful of stray words, which
+is worse than silence: without that second test the picker scores those
+words and cuts around them.
+
+The vision pass uploads the video, Gemini watches it and returns the same
+`{"shorts"}` shape (`gemini_worker.VisualResponse`) in the same 15-60s
+band, so every stage after it is byte-identical: layouts, inset detection,
+hooks. `CLIP_TARGET_MIN`/`MAX` apply directly here rather than being
+derived from scoring windows, because there are none. The transcript is
+stored as `{"language": "none", "segments": []}`, so the clips come out
+with no subtitles, which is correct and not a bug.
+
+**This is the one stage that sends Gemini the video instead of frames, and
+that is deliberate** — 12 frames can say what kind of video this is (which
+is all the layout picker needs), they cannot say which 40 seconds to cut.
+The cost is the ceiling: Gemini bills video at ~300 tokens/second, so an
+hour is ~1.08M tokens, past a 1M window, and **nothing guards the length**.
+A silent multi-hour source fails at the model rather than politely. If that
+needs fixing, the answer is a guard or segmenting the source, not porting
+the frame trick over from the layout picker. Gemini-only either way: a
+text-only `LLM_BASE_URL` server cannot see footage, and with no
+`GEMINI_API_KEY` the function logs one line and returns None, which fails
+the job outright.
+
+The public `/gta-5-clips` page states these thresholds and this ceiling to
+users; if the behaviour changes, change `dashboard/seo/pages.js` too.
+
 ### Local LLM for the moment picker (`llm_backend.py`)
 
 `LLM_BASE_URL` (+ `LLM_MODEL`, `LLM_API_KEY`) routes the two transcript
@@ -867,6 +923,18 @@ Stripe retry the same doomed event for three days.
 ### Concurrency Model
 Async job queue with semaphore-based concurrency control. Configure via `MAX_CONCURRENT_JOBS` env var (default: 5). Jobs auto-cleanup after 1 hour.
 
+The real limit on the GPU box is VRAM, not CPU: each `main.py` job holds
+Parakeet (onnxruntime CUDA), TransNetV2 (torch, ~2 GB at peak) and an
+NVENC session, and when the card is full a cut fails as "Generic error in
+an external library" / exit 187 with 0 bytes, TransNetV2 as CUDA OOM, and
+the reframe writer as a broken pipe. The retry in `ffmpeg_utils.cut_clip`
+waits for a **busy** GPU; it cannot help with a **full** one. The API
+process itself was the biggest tenant (7.7 GB idle on 17-sep-2026): the
+thumbnail studio and `/api/subtitle` on a dubbed clip transcribe
+in-process and the ASR singletons then lived in uvicorn for good, so both
+now call `transcribe_backends.release_models()` when they are done. Size
+`MAX_CONCURRENT_JOBS` against the free VRAM, not the core count.
+
 ### Paid proxy accounting (`cloud/proxy_ledger.py`)
 
 Downloads go direct → static ISP proxies (flat rate) → DataImpulse (per GB),
@@ -915,7 +983,21 @@ paid ones, each free attempt's error); `app.py` persists it as a
 `proxy_usage` row at job end and pages Telegram when the paid proxy carried
 bytes, folding a burst into one message per 5 min. The in-memory monthly
 counter and the container log (rotates within the hour) cannot answer "what
-cost $14 on the 28th"; the table can. `PAID_PROXY_DAILY_MB` (default
+cost $14 on the 28th"; the table can. Both the probe and the download pass `noplaylist`: a
+`watch?v=X&list=...` or mix link is the one video the user was watching,
+and without it yt-dlp walks the whole list, dies on its first private /
+age-gated / bot-checked entry (a video nobody pasted), the probe reads
+that as an IP problem and pays the proxy to walk the same list again, and
+the user gets a 400 for a valid link (26 of the 37 paid probes between
+7 and 17-sep-2026). And the probe keeps **every** attempt's error per
+static route, not the last one: the anonymous retry ends in a bot-check
+by design, and a "confirm your age" from the cookie attempt is the
+verdict, so it must not be overwritten into an escalation. A search,
+playlist or channel URL is refused by path before any request
+(`yt_clients.youtube_non_video_reason`): `noplaylist` does nothing for
+those and yt-dlp walks them entry by entry (one search URL held the
+probe thread for 37 min in the prod container).
+`PAID_PROXY_DAILY_MB` (default
 500) is the hard ceiling: past it the paid proxy is dropped from the probe
 and from every new job's env until UTC midnight. The watcher probes the
 static pool against a real YouTube watch page (playable markers), not

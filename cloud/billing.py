@@ -16,7 +16,8 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .config import settings, PLAN_MINUTES, TRIAL_DAYS, SUBSCRIPTION_LOOKUP_KEYS, TOPUP_LOOKUP_KEYS
+from .config import (settings, PLAN_MINUTES, TRIAL_DAYS, SUBSCRIPTION_LOOKUP_KEYS,
+                     TOPUP_LOOKUP_KEYS, new_subscriber_label)
 from . import analytics, config, database
 from .models import User, Subscription, CreditTopup, StripeEvent, SignupAttribution
 from .auth import get_current_user_required
@@ -554,10 +555,16 @@ async def _upsert_subscription(sub_obj: dict, event_created: datetime):
                     setattr(row, k, v)
 
     # Purchase alert: someone just subscribed (trial started or paid outright).
+    # Not for 'incomplete': Checkout creates the subscription the moment the
+    # user hits pay, before 3DS / the card answer, so that status only says
+    # someone reached the button. About half of them expire unpaid (24 of 53
+    # in the 30 days to 16-sep-2026), and the ones that do pay are announced
+    # by the 'Payment received' alert on invoice.paid, which carries the
+    # amount; a second message here would just be noise.
     now_status = sub_obj["status"]
-    if is_new_sub:
+    label = new_subscriber_label(now_status) if is_new_sub else None
+    if label:
         from .alerts import send_admin_alert
-        label = "trial started — card on file" if now_status == "trialing" else now_status
         await send_admin_alert(
             "🎉 New subscriber",
             f"{buyer_email or 'A user'} started the {plan} ({interval}) plan.\nStatus: {label}.",

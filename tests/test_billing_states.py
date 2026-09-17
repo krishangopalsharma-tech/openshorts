@@ -80,3 +80,14 @@ class TestAttentionStates:
         # the dead end, so the two sets must stay reconciled.
         for status in config.CHECKOUT_BLOCKING_STATES:
             assert status in ("active", "trialing") or status in config.BILLING_ATTENTION_STATES
+
+
+class TestNewSubscriberAlert:
+    """The 'New subscriber' admin alert must mean money, not a click on pay."""
+
+    def test_incomplete_is_silent(self):
+        assert config.new_subscriber_label("incomplete") is None
+
+    @pytest.mark.parametrize("status", ["active", "trialing"])
+    def test_paid_states_alert(self, status):
+        assert config.new_subscriber_label(status)
