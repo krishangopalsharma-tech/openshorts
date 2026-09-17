@@ -51,6 +51,67 @@ MAX_FLIPS_PER_PART = 3
 TIERS = ("ending", "twist", "reveal", "midpoint")
 BANNED_TITLE_WORDS = ("setup", "beginning", "middle", "end", "ending", "finale",
                       "explained", "recap", "summary", "full story")
+# The narrator's register. The first real scripts (17-sep-2026) came out as a
+# lecture: "watch the lens", "the camera holds this kindness like an exhibit",
+# "here's the key design decision". Correct, and dead. "story" (default) tells
+# the moment from inside it, in the film's mood, and never names the
+# apparatus; "essay" is the original video-essay voice for anyone who wants it.
+NARRATION_STYLES = ("story", "essay")
+MOODS = ("tense", "ominous", "sad", "epic", "romantic", "eerie", "driving", "warm", "bitter")
+MOOD_GUIDE = {
+    "tense": "short sentences, present tense, breath held; say what could go wrong, not what does",
+    "ominous": "slow, low, plain words; let the dread sit in what is not said",
+    "sad": "quiet and simple; name the loss plainly, no adjectives doing the crying for you",
+    "epic": "long sentences that build; scale, stakes, the size of what is asked of him",
+    "romantic": "warm, close, small details noticed the way a lover notices them",
+    "eerie": "calm surface, one wrong detail per line; never explain the wrongness",
+    "driving": "momentum; verbs at the front, no pauses, one line pushes into the next",
+    "warm": "gentle, generous to the people on screen; humour allowed, mockery not",
+    "bitter": "dry, clipped, unforgiving; let the irony land without pointing at it",
+}
+# Lecture vocabulary. Warned per chunk in story mode, never auto-failed: a
+# storyteller may say "the camera" once, and a script that says it eleven
+# times is the problem the style exists to fix.
+CRAFT_PHRASES = (
+    "the film", "the camera", "the director", "the script", "the editor", "the editors", "the cut",
+    "the edit", "the shot", "the frame", "the score", "the lens", "close-up", "wide frame",
+    "wide shot", "establishing", "screen time", "design decision", "rhyme", "rhymes", "notice",
+    "watch how", "watch the", "listen to how", "listen for", "the viewer", "the audience",
+    "this stretch", "this opening", "part one", "part two", "part three",
+)
+
+NARRATION_RULES = {
+    "story": """NARRATION RULES - you are a storyteller, not a critic:
+- Tell the moment from inside it. What this person wants, what they fear, what
+  it costs them to stand there. Present tense. Make the viewer feel the room
+  before they understand it.
+- The mood of this part is {MOOD}: {MOOD_GUIDE}. Every line carries it.
+- Plain spoken words, the way you would tell a friend about a night that
+  changed someone. Short sentences. Names, not roles.
+- NEVER name the apparatus. Banned: "the film", "the camera", "the director",
+  "the script", "the edit", "the cut", "the shot", "the frame", "the score",
+  "the lens", "close-up", "wide shot", "screen time", "rhyme", "design",
+  "the viewer", "the audience", "part one/two/three".
+- Do not lecture. "Notice", "watch how", "listen for" at most ONCE in the whole
+  part. You are not pointing at things; you are living them.
+- Still no payoff, no resolution, no consequence landing. Say what he is about
+  to face, what she does not know yet, what is on the table. Never how it
+  goes. Banned: "then he/she", "turns out", "finally", "ends with", "we learn
+  that", "it is revealed", "in the end", "the twist is".
+- Every line must earn its place by feeling: cut any sentence that only
+  informs.
+- The last 2-3 lines are the ache the viewer takes away: the open question
+  above, felt, not asked like a quiz. Do not answer it.""",
+    "essay": """NARRATION RULES:
+- Analysis, context, criticism. Never plot recitation.
+- Apply this test to every sentence: could it substitute for watching the
+  scene? If yes, rewrite it.
+- Banned constructions: "then he/she", "turns out", "finally", "ends with",
+  "we learn that", "it is revealed", "in the end", "the twist is".
+- Address the viewer directly. Tell them what to watch for.
+- The last 2-3 lines open the question above. Do not answer it.""",
+}
+
 RESOLUTION_PHRASES = (
     "then he", "then she", "then they", "turns out", "finally", "ends with", "we learn",
     "it is revealed", "it's revealed", "in the end", "the twist is", "dies", "kills",
@@ -137,7 +198,10 @@ Return ONLY JSON:
         About the film's method, not 'what happens next'.",
       "withheld": "What this part deliberately does not say, stated plainly.
         This is a promise you are making.",
-      "cannot_deliver": "What only the film itself can give the viewer here."
+      "cannot_deliver": "What only the film itself can give the viewer here.",
+      "mood": "one of: tense, ominous, sad, epic, romantic, eerie, driving, warm,
+        bitter. The feeling this part should leave, matched to the film's own
+        register in this stretch, not to the essay's cleverness."
     }}
   ]
 }}
@@ -145,6 +209,8 @@ Return ONLY JSON:
 Titles must not contain: Setup, Beginning, Middle, End, Ending, Finale,
 Explained, Recap, Summary, Full Story.
 Every evidence_band must end at or before {WALL}.
+Titles are spoken to a viewer, not written for a seminar: no "grammar",
+"design", "structure", "motif" in a title.
 
 SUBTITLE DIGEST (up to the wall):
 {DIGEST}
@@ -156,6 +222,7 @@ This part argues: {CLAIM}
 It must end leaving the viewer with: {OPEN_QUESTION}
 It must NOT reveal: {WITHHELD}
 Only the film can give the viewer: {CANNOT_DELIVER}
+The mood of this part: {MOOD}
 
 BUDGET - these are hard limits, not targets:
 - Finished runtime {TARGET} s at {SPEED}x playback -> {FOOTAGE_BUDGET} s of footage
@@ -174,14 +241,7 @@ CLIP SELECTION RULES:
 - Never use the film's best shot or best line. Use the second-best.
 - No chunk may show an outcome, a resolution, or a consequence landing.
 
-NARRATION RULES:
-- Analysis, context, criticism. Never plot recitation.
-- Apply this test to every sentence: could it substitute for watching the
-  scene? If yes, rewrite it.
-- Banned constructions: "then he/she", "turns out", "finally", "ends with",
-  "we learn that", "it is revealed", "in the end", "the twist is".
-- Address the viewer directly. Tell them what to watch for.
-- The last 2-3 lines open the question above. Do not answer it.
+{NARRATION_RULES}
 
 Return ONLY JSON:
 
@@ -272,16 +332,23 @@ def build_prompt_b(cues, duration, spoilers, protected, target=PART_TARGET_SECON
     )
 
 
-def build_prompt_c(cues, duration, part, protected, target=PART_TARGET_SECONDS, speed=SPEED):
-    """``part``: one validated pass-B part (``Part`` or dict)."""
+def build_prompt_c(cues, duration, part, protected, target=PART_TARGET_SECONDS, speed=SPEED,
+                   style="story"):
+    """``part``: one validated pass-B part (``Part`` or dict). ``style`` picks
+    the narrator's register (NARRATION_STYLES); the part's ``mood`` from
+    Pass B shapes the story voice."""
     part = part if isinstance(part, Part) else Part.model_validate(part)
     b_start, b_end = part.band_seconds()
     wall = wall_seconds(duration)
     b_end = min(b_end, wall)
+    style = style if style in NARRATION_STYLES else "story"
+    mood = (part.mood or "").lower() if part.mood in MOODS else "tense"
+    rules = NARRATION_RULES[style].format(MOOD=mood, MOOD_GUIDE=MOOD_GUIDE[mood])
     return PROMPT_C.format(
         N=part.index, TITLE=part.title, CLAIM=part.claim,
         OPEN_QUESTION=part.open_question, WITHHELD=part.withheld,
         CANNOT_DELIVER=part.cannot_deliver or "the experience of not knowing",
+        MOOD=f"{mood} ({MOOD_GUIDE[mood]})", NARRATION_RULES=rules,
         TARGET=int(target), SPEED=speed, FOOTAGE_BUDGET=footage_budget(target, speed),
         CHUNKS_MIN=CHUNKS_RANGE[0], CHUNKS_MAX=CHUNKS_RANGE[1],
         CHUNK_MIN=int(CHUNK_SECONDS_RANGE[0]), CHUNK_MAX=int(CHUNK_SECONDS_RANGE[1]),
@@ -322,6 +389,7 @@ class Part(BaseModel):
     open_question: str
     withheld: str
     cannot_deliver: str = ""
+    mood: str = ""
 
     def band_seconds(self):
         return self.evidence_band.seconds()
@@ -478,15 +546,26 @@ def lint_narration(text):
     return [p for p in RESOLUTION_PHRASES if re.search(r"\b" + re.escape(p) + r"\b", low)]
 
 
-def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, speed=SPEED):
+def lint_craft(text):
+    """Lecture-vocabulary hits ("the camera", "notice", "rhyme"...) in one
+    narration string: the register the story style exists to avoid."""
+    low = " " + re.sub(r"\s+", " ", text.lower()) + " "
+    return [p for p in CRAFT_PHRASES if re.search(r"\b" + re.escape(p) + r"\b", low)]
+
+
+def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, speed=SPEED,
+                  style="story"):
     """Returns ``(PartPlan | None, errors, warnings)``. Errors block the
-    render; warnings (the lint) are for the user to read."""
+    render; warnings (the lint) are for the user to read. In the ``story``
+    style, lecture vocabulary is warned per chunk (``craft_language``) and a
+    part with it in more than a third of its chunks gets one summary warning."""
     try:
         plan = PartPlan.model_validate(data)
     except ValidationError as exc:
         return None, _schema_errors(exc), []
     part = part if isinstance(part, Part) else Part.model_validate(part)
     errors, warnings = [], []
+    craft_chunks = 0
     if plan.index != part.index:
         errors.append(_err("index", f"plan is for part {plan.index}, expected {part.index}"))
     n = len(plan.chunks)
@@ -529,6 +608,12 @@ def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, s
         words += len(c.narration.split())
         for hit in lint_narration(c.narration):
             warnings.append(_err("resolution_language", f'"{hit}" in narration', chunk=i))
+        if style == "story":
+            craft = lint_craft(c.narration)
+            if craft:
+                craft_chunks += 1
+                warnings.append(_err("craft_language", "lecture words: " + ", ".join(f'"{h}"' for h in craft[:4])
+                                     + ". Tell the moment, do not point at the filmmaking.", chunk=i))
         if c.flip:
             flips.append(i)
             if not (c.flip_reason or "").strip():
@@ -550,6 +635,10 @@ def validate_plan(data, part, duration, protected, target=PART_TARGET_SECONDS, s
         errors.append(_err("words", f"{words} narration words; budget {WORDS_PER_PART} (+{int(WORDS_TOLERANCE * 100)}%)"))
     if words and words < WORDS_PER_PART * 0.6:
         warnings.append(_err("words_low", f"{words} narration words; the part will run short of {plan.target_duration:.0f} s"))
+    if style == "story" and plan.chunks and craft_chunks * 3 > len(plan.chunks):
+        warnings.append(_err("craft_language", f"{craft_chunks} of {len(plan.chunks)} chunks talk about the "
+                             "filmmaking instead of the moment. Ask the model to rewrite the narration as a "
+                             f"story in the part's mood ({part.mood or 'tense'}), no camera, no 'notice'."))
     check = plan.spoiler_self_check.strip().lower().rstrip(".!")
     # "Nothing." is the failure; "Nothing about who is behind the door" is
     # the answer the prompt asked for.

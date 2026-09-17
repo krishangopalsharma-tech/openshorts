@@ -171,6 +171,49 @@ def test_validate_plan_budget_words_self_check_and_flip_guard():
         any("at most" in e["message"] for e in errors if e["code"] == "flips")
 
 
+def test_prompt_c_story_voice_carries_the_mood_and_bans_the_apparatus():
+    protected = _protected()
+    parts = [dict(p, mood="sad") for p in STRUCTURE["parts"]]
+    st, errors = mr.validate_structure({"parts": parts}, DURATION, protected)
+    assert errors == []
+    text = mr.build_prompt_c(CUES, DURATION, st.parts[0], protected)
+    assert "The mood of this part: sad (" in text
+    assert "you are a storyteller, not a critic" in text
+    assert 'Banned: "the film", "the camera"' in text
+    assert "Tell them what to watch for" not in text
+    # Essay keeps the original voice; an unknown mood falls back to tense.
+    essay = mr.build_prompt_c(CUES, DURATION, STRUCTURE["parts"][0], protected, style="essay")
+    assert "Tell them what to watch for" in essay and "storyteller" not in essay
+    assert "The mood of this part: tense (" in essay
+    # Pass B asks for the mood.
+    b = mr.build_prompt_b(CUES, DURATION, SPOILERS, protected)
+    assert '"mood": "one of: tense, ominous, sad' in b
+
+
+def test_story_style_warns_on_lecture_vocabulary_but_never_fails():
+    st, _ = mr.validate_structure(STRUCTURE, DURATION, _protected())
+    data = _plan()
+    lecture = ("Watch the lens. The camera holds this kindness like an exhibit, and notice how "
+               "the film stages the homecoming for the viewer " + "x " * 5)  # 27 words, on budget
+    for i in range(7):
+        data["chunks"][i]["narration"] = lecture
+    plan, errors, warnings = mr.validate_plan(data, st.parts[0], DURATION, _protected())
+    assert errors == []
+    craft = [w for w in warnings if w["code"] == "craft_language"]
+    assert len(craft) == 8  # seven chunks + the part-level summary
+    assert any('"the camera"' in w["message"] and w.get("chunk") == 0 for w in craft)
+    summary = next(w for w in craft if "chunk" not in w)
+    assert "7 of 18 chunks" in summary["message"] and "tense" in summary["message"]
+    # The essay style is allowed to talk about the camera.
+    _, _, essay_warnings = mr.validate_plan(data, st.parts[0], DURATION, _protected(), style="essay")
+    assert not [w for w in essay_warnings if w["code"] == "craft_language"]
+    # A part with lecture words in a third or fewer of its chunks gets no summary.
+    data2 = _plan()
+    data2["chunks"][0]["narration"] = lecture
+    _, _, w2 = mr.validate_plan(data2, st.parts[0], DURATION, _protected())
+    assert [w for w in w2 if w["code"] == "craft_language" and "chunk" not in w] == []
+
+
 def test_lint_narration_matches_whole_words_only():
     assert mr.lint_narration("The friendliness of the frame") == []
     assert "in the end" in mr.lint_narration("In the end, nothing.")

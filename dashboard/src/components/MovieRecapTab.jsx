@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { BookOpen, Loader2, AlertCircle, Download, Mic, Sparkles, ShieldCheck, ShieldAlert, ExternalLink, FileText, Copy, Check, Volume2, RefreshCw } from 'lucide-react';
 import StepIndicator from './ui/StepIndicator';
+import SegmentedControl from './ui/SegmentedControl';
 import SubtitleModal from './SubtitleModal';
 import OverlayEditor from './OverlayEditor';
 import SessionSetup, { Stat } from './film/SessionSetup';
@@ -112,6 +113,20 @@ export default function MovieRecapTab() {
 
         {step === 0 && (
           <SessionSetup kind="recap" session={session} onSession={onSession} settings={{}}>
+            {session && (
+              <div className="border border-rule rounded-card p-4 space-y-2">
+                <p className="text-xs uppercase tracking-wider text-muted">narration voice</p>
+                <SegmentedControl size="sm" value={session.settings?.narration_style || 'story'}
+                  onChange={async (v) => {
+                    try { setSession(await filmJson(`/api/film/session/${session.id}/settings`, { json: { narration_style: v } })); } catch (e) { setError(e.message); }
+                  }}
+                  options={[
+                    { value: 'story', label: 'story', hint: 'from inside the moment, in the film\'s mood; no camera talk' },
+                    { value: 'essay', label: 'essay', hint: 'video-essay analysis: what to watch for' },
+                  ]} />
+                <p className="readout">changes the pass C prompt and what the validator warns about. pick before generating the part plans.</p>
+              </div>
+            )}
             {session && <button type="button" onClick={() => setStep(1)} className="px-4 py-2 rounded-lg bg-ink text-paper text-sm">continue</button>}
           </SessionSetup>
         )}

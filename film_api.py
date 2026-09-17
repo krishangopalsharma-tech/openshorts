@@ -49,6 +49,9 @@ RECAP_DEFAULTS = {
     "fps": film_render.DEFAULT_FPS, "source_license": "unlicensed",
     # Generated voiceover (film_voice): a Kokoro voice id and its reading speed.
     "voice": film_voice.DEFAULT_VOICE, "tts_speed": film_voice.DEFAULT_SPEED,
+    # Narrator register for Pass C: "story" (from inside the moment, in the
+    # part's mood) or "essay" (the original video-essay voice).
+    "narration_style": "story",
 }
 _RATIO_TO_FORMAT = {"9:16": "vertical", "1:1": "square", "vertical": "vertical", "square": "square"}
 
@@ -362,7 +365,8 @@ async def recap_prompt(sid: str, request: Request, part: Optional[int] = None):
         if part is None:
             raise HTTPException(status_code=400, detail="pass=c needs ?part=N")
         text = mr.build_prompt_c(cues, sess["duration"], _part(sess, part), protected,
-                                 target=float(sess["settings"]["target_seconds"]), speed=float(sess["settings"]["speed"]))
+                                 target=float(sess["settings"]["target_seconds"]), speed=float(sess["settings"]["speed"]),
+                                 style=sess["settings"].get("narration_style", "story"))
     else:
         raise HTTPException(status_code=400, detail="pass must be a, b or c")
     if request.query_params.get("format") == "text":
@@ -435,7 +439,8 @@ async def recap_plan(sid: str, part: int, request: Request):
     protected = _protected(sess)
     plan, errors, warnings = mr.validate_plan(data, p, sess["duration"], protected,
                                               target=float(sess["settings"]["target_seconds"]),
-                                              speed=float(sess["settings"]["speed"]))
+                                              speed=float(sess["settings"]["speed"]),
+                                              style=sess["settings"].get("narration_style", "story"))
     if plan is None:
         return {"ok": False, "errors": errors, "warnings": [], "errors_text": mr.format_errors(errors),
                 "forceable": False}

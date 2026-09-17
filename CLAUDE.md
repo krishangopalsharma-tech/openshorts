@@ -109,6 +109,17 @@ nothing after 75% of the runtime is ever used. Full design in
   inside a protected range or past the 75% wall and only WARNS on resolution
   language. "accept anyway" keeps a plan past rule errors but never past the
   wall: protected chunks are dropped, not rendered.
+- **The narrator is a storyteller, not a critic (`narration_style`, default
+  `story`).** The first real scripts (17-sep-2026) were correct and dead:
+  "watch the lens", "the camera holds this kindness like an exhibit", eleven
+  "the film"s in one part. That is what "discuss craft, not events" produces
+  when taken literally. Pass B now returns a `mood` per part (`MOODS`), Pass C
+  in `story` style tells the moment from inside it in that mood
+  (`MOOD_GUIDE`) and bans the apparatus vocabulary (`CRAFT_PHRASES`: "the
+  film", "the camera", "notice", "rhyme"...); `validate_plan` warns per chunk
+  (`craft_language`) and once for the part when more than a third of its
+  chunks lecture. The spoiler rules are unchanged: still no payoff, still the
+  open question at the end. `essay` keeps the original video-essay voice.
 - **Speed before reframe.** `reframe_v2` emits sendcmd crop timelines; a PTS
   change after it lands every command on the wrong frame. Every cut part is
   scaled to one frame size and encoded with ONE encoder, or the `-c copy`

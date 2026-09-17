@@ -394,6 +394,17 @@ third act.
   ~25 per chunk, every chunk narrated, `shows`, `withholds`,
   `closing_lines`, `spoiler_self_check`. Band digest only.
 
+**Narration style (18-sep-2026).** The first real scripts came out as a
+lecture ("watch the lens", "the camera holds this kindness like an exhibit",
+eleven "the film"s in one part): "discuss craft, not events" taken literally.
+Pass B now returns a `mood` per part; Pass C has two registers,
+`narration_style` `story` (default: the moment told from inside it, in the
+part's mood, apparatus vocabulary banned, "notice"/"watch how" at most once
+per part) and `essay` (the original voice). `validate_plan` warns
+`craft_language` per chunk in story mode and once for the part when more
+than a third of its chunks lecture. The spoiler rules did not move: no
+payoff, no resolution, the open question at the end, felt rather than asked.
+
 Full text in `movierecap.PROMPTS` (rev 3 wording). Per-chunk `flip`
 survives as a manual editorial flag, default `false`; `flip: true` needs a
 `flip_reason`, and >3 flips per part or a regular alternation fails: that
