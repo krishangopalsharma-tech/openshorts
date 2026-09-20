@@ -1064,6 +1064,13 @@ _stopping = False                    # SIGTERM received: report not-ready so the
                                      # proxy stops routing here before the
                                      # listening socket closes
 _running_jobs: set = set()           # job ids with a live subprocess here
+# job_id -> the live Popen, so a job can be stopped on request. Kept OUT of
+# the `jobs` record: that dict is projected into API responses and written to
+# disk in places, and a Popen does not belong in either.
+_job_procs: dict = {}
+# Job ids the user asked to stop. Checked after the process exits so the
+# outcome is reported as cancelled rather than as a failed render.
+_cancelled_jobs: set = set()
 
 
 def _manifest_path(job_id):
@@ -2307,6 +2314,42 @@ def _visible_logs(logs):
 MAX_JOB_LOG_LINES = int(os.environ.get("MAX_JOB_LOG_LINES", "2000"))
 
 
+def _terminate_job_process(job_id):
+    """Stop a job's subprocess AND everything it spawned.
+
+    main.py is a parent: it runs ffmpeg, and on a long source those children
+    hold the GPU and the disk. Killing only the Python process leaves them
+    running with nobody reading their output, which looks exactly like the
+    job never stopped — so the whole tree goes.
+
+    Returns True if something was signalled.
+    """
+    proc = _job_procs.get(job_id)
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        if os.name == "nt":
+            # Windows has no process groups to signal: terminate() reaches
+            # the parent only. taskkill /T walks the tree.
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=False)
+        else:
+            import signal as _signal
+            try:
+                os.killpg(os.getpgid(proc.pid), _signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.terminate()
+        return True
+    except Exception as e:
+        print(f"⚠️ Could not stop job {job_id}: {e}")
+        try:
+            proc.kill()
+            return True
+        except Exception:
+            return False
+
+
 def enqueue_output(out, job_id):
     """Reads output from a subprocess and appends it to jobs logs.
 
@@ -2400,6 +2443,7 @@ async def run_job(job_id, job_data):
     output_dir = job_data['output_dir']
     
     jobs[job_id]['status'] = 'processing'
+    jobs[job_id].setdefault('started_at', time.time())
     jobs[job_id]['logs'].append("Job started by worker.")
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
     
@@ -2411,7 +2455,11 @@ async def run_job(job_id, job_data):
             env=env,
             cwd=os.getcwd()
         )
-        
+        _job_procs[job_id] = process
+        # A job the user stopped while it was still queued must not start now.
+        if job_id in _cancelled_jobs:
+            _terminate_job_process(job_id)
+
         # We need to capture logs in a thread because Popen isn't async
         t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
         t_log.daemon = True
@@ -2468,7 +2516,19 @@ async def run_job(job_id, job_data):
                 pass
 
         returncode = process.returncode
-        
+
+        # A job the user stopped exits non-zero because it was killed. That is
+        # the requested outcome, not a broken render, and it must not be
+        # resumed on the next restart either — which is the whole reason
+        # stopping the backend never stopped anything before.
+        if job_id in _cancelled_jobs:
+            _cancelled_jobs.discard(job_id)
+            _job_procs.pop(job_id, None)
+            jobs[job_id]['status'] = 'cancelled'
+            jobs[job_id]['logs'].append("⏹️ Stopped at your request.")
+            _clear_resume_manifest(job_id)
+            return
+
         if returncode == 0:
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['logs'].append("Process finished successfully.")
@@ -3053,6 +3113,24 @@ async def process_local_endpoint(request: Request):
     if not os.path.isfile(video_path):
         raise HTTPException(status_code=400,
                             detail=f"No video at that path: {video_path}")
+
+    # The same video already being cut. source_history only knows about runs
+    # that FINISHED, so it cannot see this one — and a second run transcribes
+    # the same hour again while both fight over one GPU. Refusable with
+    # `force`, because re-running with different picks is legitimate.
+    if not body.get("force"):
+        running = _active_job_for_source(video_path)
+        if running is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "already_running",
+                    "message": (f"“{running['name']}” is already being processed "
+                                f"({running['status']}). Open that job, or stop it first."),
+                    "job_id": running["job_id"],
+                    "status": running["status"],
+                    "elapsed_seconds": running["elapsed_seconds"],
+                })
     if clips_path and not os.path.isfile(clips_path):
         raise HTTPException(status_code=400,
                             detail=f"No clips file at that path: {clips_path}")
@@ -3157,6 +3235,10 @@ async def process_local_endpoint(request: Request):
         # exactly what a transcribe-only run produces. This is what tells it
         # the empty job dir is the expected outcome, not a broken render.
         'transcribe_only': transcribe_only,
+        # The file the user actually named, not the hardlink under uploads/:
+        # this is what the running-jobs list shows and what the duplicate
+        # check compares against.
+        'source_path': video_path,
         'attestation': {"acknowledged": True, "ip": "local", "user_agent": "",
                         "timestamp": time.time(), "source": "local_path"},
         'user_id': None,
@@ -3716,6 +3798,122 @@ async def get_status(job_id: str, request: Request):
         # offer), so the dashboard can say so next to the clips.
         "partial": job.get('partial'),
     }
+
+
+ACTIVE_STATUSES = ("queued", "processing")
+
+
+def _job_source_path(job):
+    """The video a job is cutting.
+
+    The recorded ``source_path`` wins over the argv: a local job hardlinks
+    its source into uploads/<job_id>_<name>, so the argv is a different path
+    for every job even when they are all cutting the same file — which is
+    exactly the case the duplicate check exists to catch.
+    """
+    recorded = job.get("source_path")
+    if recorded:
+        return recorded
+    cmd = job.get("cmd") or []
+    for flag in ("-i", "--input"):
+        if flag in cmd:
+            i = cmd.index(flag)
+            if i + 1 < len(cmd):
+                return cmd[i + 1]
+    return ""
+
+
+def _active_jobs():
+    """Every job this instance is running or has queued, newest first."""
+    out = []
+    for job_id, job in list(jobs.items()):
+        if job.get("status") not in ACTIVE_STATUSES:
+            continue
+        source = _job_source_path(job)
+        started = job.get("started_at")
+        out.append({
+            "job_id": job_id,
+            "status": job.get("status"),
+            "source": source,
+            "name": os.path.basename(source) or "video",
+            "started_at": started,
+            "elapsed_seconds": (time.time() - started) if started else None,
+            "transcribe_only": bool(job.get("transcribe_only")),
+            # The last thing it said, so the list is legible without opening
+            # the job. _visible_logs is what the dashboard already shows.
+            "last_log": (_visible_logs(job.get("logs") or [])[-1:] or [""])[0],
+        })
+    out.sort(key=lambda j: j.get("started_at") or 0, reverse=True)
+    return out
+
+
+def _active_job_for_source(path):
+    """An already-running job cutting this same file, or None.
+
+    Submitting the same video twice is the most expensive mistake the UI
+    allows — the second run does the whole transcription again and both
+    fight over one GPU — and source_history only knows about jobs that
+    FINISHED, so it cannot see the one still running.
+    """
+    target = os.path.normcase(os.path.abspath(path or ""))
+    if not target:
+        return None
+    for job in _active_jobs():
+        if os.path.normcase(os.path.abspath(job["source"] or "")) == target:
+            return job
+    return None
+
+
+@app.get("/api/jobs")
+async def list_jobs(request: Request):
+    """What is running right now, so nobody starts the same video twice."""
+    mine = []
+    for job in _active_jobs():
+        record = jobs.get(job["job_id"])
+        if record is not None:
+            try:
+                await _assert_job_owner(request, record)
+            except HTTPException:
+                continue          # someone else's job, in cloud mode
+        # The absolute path is the server's business; the name is the user's.
+        job.pop("source", None)
+        mine.append(job)
+    return {"jobs": mine, "running": len(mine),
+            "max_concurrent": MAX_CONCURRENT_JOBS}
+
+
+@app.post("/api/job/{job_id}/cancel")
+async def cancel_job(job_id: str, request: Request):
+    """Stop a job and make sure it stays stopped.
+
+    Clearing the resume manifest is the part that matters: without it the
+    next restart re-enqueues the job from disk, which is why stopping the
+    backend never stopped anything.
+    """
+    if not _JOB_ID_RE.match(job_id or ""):
+        raise HTTPException(status_code=400, detail="Not a job id")
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, job)
+
+    if job.get("status") not in ACTIVE_STATUSES:
+        return {"job_id": job_id, "status": job.get("status"),
+                "detail": "That job already finished."}
+
+    _cancelled_jobs.add(job_id)
+    signalled = _terminate_job_process(job_id)
+    _clear_resume_manifest(job_id)
+
+    if not signalled:
+        # Queued but never started: no process to kill, so it is finished
+        # here and now rather than when a slot frees up.
+        job["status"] = "cancelled"
+        job["logs"].append("⏹️ Stopped before it started.")
+        _cancelled_jobs.discard(job_id)
+
+    print(f"⏹️ Job {job_id} stopped by request (signalled={signalled})")
+    return {"job_id": job_id, "status": "cancelled", "signalled": signalled}
 
 
 def _locate_source(job_id: str):

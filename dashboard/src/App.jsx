@@ -27,6 +27,7 @@ import HistoryTab from './components/HistoryTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import LocalFileBrowser from './components/LocalFileBrowser';
+import RunningJobs from './components/RunningJobs';
 import { thumbUrl } from './lib/localBrowser';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError, getToken } from './lib/api';
@@ -269,6 +270,9 @@ function App() {
   // never its path — same reason clips.json travels as text.
   const [importedTranscript, setImportedTranscript] = useState(null);
   const [transcriptError, setTranscriptError] = useState('');
+  // The 409 body when this video is already being cut: the running job, so
+  // the panel can offer to open it instead of just refusing.
+  const [duplicateJob, setDuplicateJob] = useState(null);
   // Shares the uploader's setting rather than adding a second one: there is
   // one "what language is this video" answer, and having the local panel
   // quietly ignore it is what let a Hindi episode transcribe as English.
@@ -732,6 +736,19 @@ function App() {
   // Start a job from paths on this machine. Nothing is uploaded: the backend
   // reads the file where it already is, which is the point — copying a 4 GB
   // episode into a server running off the same disk is a copy for no reason.
+  // Follow a job that is already running — the one the running-jobs list
+  // offers, or the one a duplicate submission was refused in favour of.
+  const attachToJob = (id) => {
+    if (!id) return;
+    setLocalError(null);
+    setJobId(id);
+    setResults(null);
+    setLogs([]);
+    setNoSource(false);
+    setProcessingMedia({ type: 'server', payload: `/api/source/${id}` });
+    setStatus('processing');
+  };
+
   // Read a transcript the user already has. Parsed server-side on submit —
   // this only checks it is not empty, so the error they see names the real
   // reason ("no timestamps found") rather than a guess made here.
@@ -828,7 +845,7 @@ function App() {
   // brief; otherwise this renders, reusing that job's transcript when there
   // is one — without `transcript_job` the render would transcribe the same
   // video a second time, which is the whole cost the chat route is avoiding.
-  const startLocalJob = async (e, { transcribeOnly = false } = {}) => {
+  const startLocalJob = async (e, { transcribeOnly = false, force = false } = {}) => {
     if (e) e.preventDefault();
     const video = localVideoPath.trim().replace(/^"|"$/g, '');
     if (!video || localBusy) return;
@@ -840,6 +857,9 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           video_path: video,
+          // Re-cutting a video that is already running is legitimate (new
+          // picks), so the block is refusable rather than absolute.
+          force: force || undefined,
           // The spoken language chosen in advanced options applies here too.
           // Without it every local job auto-detects, and on Hindi/Urdu
           // auto-detect slides into English TRANSLATION partway through the
@@ -859,9 +879,20 @@ function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        setLocalError(data.detail || 'Could not start the job.');
+        // 409: this exact video is already being cut. The detail carries the
+        // running job, so the answer is "go look at it", not an error the
+        // user can only respond to by clicking submit again.
+        const detail = data.detail;
+        if (res.status === 409 && detail && typeof detail === 'object') {
+          setDuplicateJob(detail);
+          setLocalError(null);
+          return;
+        }
+        setLocalError(typeof detail === 'string' && detail
+          ? detail : 'Could not start the job.');
         return;
       }
+      setDuplicateJob(null);
       if (transcribeOnly) {
         setBrief(null);
         setTranscribeJob(data.job_id);
@@ -2152,6 +2183,12 @@ function App() {
                     knows the job it started itself. /api/status reads the job
                     dir when the id is not in memory, so pasting the folder
                     name is enough to get the per-clip tools on them. */}
+                {/* What is already running, with a way to follow it or stop
+                    it. Without this the same video got submitted four times
+                    in five minutes because nothing said the first was still
+                    going. */}
+                <RunningJobs onOpen={attachToJob} currentJobId={jobId} />
+
                 {/* Self-host only. Renders a file where it already sits, and
                     optionally takes picks already made in a chat — the chat
                     route without the command line. Hidden in cloud mode,
@@ -2205,6 +2242,38 @@ function App() {
                           <p className="text-[12px] text-ink2 min-w-0 truncate">
                             {localVideoPath.trim().replace(/^"|"$/g, '').split(/[\\/]/).pop()}
                           </p>
+                        </div>
+                      )}
+
+                      {/* Already running. Offering the job beats refusing:
+                          the user submitted again because nothing told them
+                          the first one was still going. */}
+                      {duplicateJob && (
+                        <div className="rounded-input border border-brass/60 bg-paper3 p-2.5 space-y-2">
+                          <p className="text-[12px] text-ink2">{duplicateJob.message}</p>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => { attachToJob(duplicateJob.job_id); setDuplicateJob(null); }}
+                              className="btn-primary text-[12px] py-1.5 px-3"
+                            >
+                              Open that job
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => { setDuplicateJob(null); startLocalJob(e, { force: true }); }}
+                              className="btn-quiet text-[12px]"
+                            >
+                              Start another anyway
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDuplicateJob(null)}
+                              className="btn-quiet text-[12px]"
+                            >
+                              Dismiss
+                            </button>
+                          </div>
                         </div>
                       )}
 

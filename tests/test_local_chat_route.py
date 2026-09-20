@@ -526,3 +526,134 @@ class TestSpokenLanguage:
                         language="hinglish").json()["job_id"]
         with open(os.path.join(local["out"], job_id, ".resume.json")) as f:
             assert json.load(f)["job_env"]["TRANSCRIBE_LANGUAGE"] == "hinglish"
+
+
+class TestRunningJobs:
+    """Seeing what is running, and being able to stop it.
+
+    Two real incidents behind this: four jobs were started for one video in
+    five minutes because nothing showed that the first was still going (the
+    machine then ran out of memory), and stopping the backend did not stop
+    the work — the resume manifest re-enqueued it on the next start.
+    """
+
+    def _queue(self, local, **body):
+        r = _start(local, **body)
+        assert r.status_code == 200, r.text
+        return r.json()["job_id"]
+
+    def test_a_queued_job_is_listed_with_its_name(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        body = local["client"].get("/api/jobs").json()
+        assert body["running"] == 1
+        row = body["jobs"][0]
+        assert row["job_id"] == job_id
+        assert row["name"] == os.path.basename(local["video"])
+        assert row["status"] == "queued"
+
+    def test_the_absolute_path_is_not_handed_to_the_client(self, local):
+        """The name is the user's business; where it sits on the server's
+        disk is not, and this endpoint is reachable in cloud mode too."""
+        self._queue(local, transcribe_only=True)
+        assert "source" not in local["client"].get("/api/jobs").json()["jobs"][0]
+
+    def test_a_finished_job_drops_off_the_list(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        app_module.jobs[job_id]["status"] = "completed"
+        assert local["client"].get("/api/jobs").json()["running"] == 0
+
+    def test_the_same_video_twice_is_refused_with_the_running_job(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        r = _start(local, transcribe_only=True)
+        assert r.status_code == 409
+        detail = r.json()["detail"]
+        assert detail["reason"] == "already_running"
+        assert detail["job_id"] == job_id
+
+    def test_force_runs_it_anyway(self, local):
+        """Re-cutting the same source with different picks is legitimate."""
+        self._queue(local, transcribe_only=True)
+        r = _start(local, transcribe_only=True, force=True)
+        assert r.status_code == 200
+
+    def test_a_different_video_is_not_blocked(self, local, tmp_path):
+        self._queue(local, transcribe_only=True)
+        other = tmp_path / "other.mp4"
+        other.write_bytes(b"\x00" * 2048)
+        r = local["client"].post("/api/process/local",
+                                 json={"video_path": str(other),
+                                       "transcribe_only": True})
+        assert r.status_code == 200
+
+    def test_a_finished_job_stops_blocking_the_same_video(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        app_module.jobs[job_id]["status"] = "completed"
+        assert _start(local, transcribe_only=True).status_code == 200
+
+
+class TestCancel:
+    def _queue(self, local, **body):
+        return _start(local, **body).json()["job_id"]
+
+    def test_stopping_a_queued_job_marks_it_cancelled(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        r = local["client"].post(f"/api/job/{job_id}/cancel")
+        assert r.status_code == 200
+        assert r.json()["status"] == "cancelled"
+        assert app_module.jobs[job_id]["status"] == "cancelled"
+
+    def test_the_resume_manifest_is_cleared(self, local):
+        """THE point. Without this the next restart re-enqueues the job from
+        disk, which is why stopping the backend never stopped anything."""
+        job_id = self._queue(local, transcribe_only=True)
+        manifest = os.path.join(local["out"], job_id, ".resume.json")
+        assert os.path.isfile(manifest)
+        local["client"].post(f"/api/job/{job_id}/cancel")
+        assert not os.path.exists(manifest)
+
+    def test_a_cancelled_job_is_not_resumed_on_restart(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        local["client"].post(f"/api/job/{job_id}/cancel")
+        app_module.jobs.clear()
+        app_module._resume_interrupted_jobs()
+        assert job_id not in app_module.jobs
+
+    def test_it_drops_off_the_running_list(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        local["client"].post(f"/api/job/{job_id}/cancel")
+        assert local["client"].get("/api/jobs").json()["running"] == 0
+
+    def test_the_same_video_can_be_started_again_after_stopping(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        local["client"].post(f"/api/job/{job_id}/cancel")
+        assert _start(local, transcribe_only=True).status_code == 200
+
+    def test_a_live_process_is_signalled_and_reported_cancelled(self, local, monkeypatch):
+        job_id = self._queue(local, transcribe_only=True)
+        killed = {}
+
+        class FakeProc:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+        monkeypatch.setitem(app_module._job_procs, job_id, FakeProc())
+        monkeypatch.setattr(app_module.subprocess, "run",
+                            lambda *a, **k: killed.setdefault("argv", a[0]))
+        r = local["client"].post(f"/api/job/{job_id}/cancel")
+        assert r.json()["signalled"] is True
+        if os.name == "nt":
+            assert "/T" in killed["argv"], "the ffmpeg children must go too"
+
+    def test_an_unknown_job_is_404_and_a_bad_id_is_400(self, local):
+        assert local["client"].post(
+            "/api/job/not-a-uuid/cancel").status_code == 400
+        assert local["client"].post(f"/api/job/{JOB}/cancel").status_code == 404
+
+    def test_stopping_a_finished_job_says_so_instead_of_failing(self, local):
+        job_id = self._queue(local, transcribe_only=True)
+        app_module.jobs[job_id]["status"] = "completed"
+        r = local["client"].post(f"/api/job/{job_id}/cancel")
+        assert r.status_code == 200
+        assert r.json()["status"] == "completed"
