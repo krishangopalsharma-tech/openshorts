@@ -44,7 +44,9 @@ SAMPLE_RATE = 16000
 # better and four times slower for the same stem, which is not worth it when
 # the input is a talk show rather than a music master.
 # demucs' output tensor is full-length and all-stems, so the window — not
-# the video — is what bounds memory. 240 s costs ~340 MB of host RAM.
+# the video — is what bounds memory. 240 s costs ~340 MB of host RAM, and
+# nothing full-length at the model's rate is built any more: each window is
+# resampled on its own (see _separate_windowed).
 WINDOW_SECONDS = 240.0
 # Cross-faded, so a window boundary cannot clip a word in half.
 OVERLAP_SECONDS = 3.0
@@ -131,18 +133,27 @@ def isolate_vocals(media_path, cache_path=None, gate=None):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = get_model(model_name).eval().to(device)
 
-        # demucs wants its own sample rate and two channels, and normalises
-        # against the mixture's own statistics.
-        wav = torchaudio.functional.resample(
-            torch.from_numpy(audio)[None, :], sr, model.samplerate).repeat(2, 1)
-        ref = wav.mean(0)
-        wav = (wav - ref.mean()) / (ref.std() + 1e-8)
+        # demucs normalises against the mixture's own statistics. Doing that
+        # HERE, at the source rate and in place, is what keeps a long input
+        # cheap: the old code first resampled the whole track to the model's
+        # 44.1 kHz and repeated it to two channels, which is 1.55 GB on a
+        # 73-minute source (measured; 2.35 GB peak for the step) allocated
+        # before a single window was separated — and MAX_CONCURRENT_JOBS
+        # lets several jobs do it at once, which is how the machine ran out
+        # of memory. Normalisation is affine and resampling is linear, so
+        # the order does not matter; the same two constants de-normalise
+        # each window, so the round trip is exact whichever rate they were
+        # computed at.
+        ref_mean = float(audio.mean())
+        ref_std = float(audio.std())
+        audio -= ref_mean
+        audio /= (ref_std + 1e-8)
 
         ctx = gate if gate is not None else _NullGate()
         with ctx:
             with torch.inference_mode():
                 vocals = _separate_windowed(
-                    model, wav, device, float(ref.std()), float(ref.mean()),
+                    model, audio, sr or SAMPLE_RATE, device, ref_std, ref_mean,
                     torch, torchaudio, np)
 
         out_path = cache_path or (tempfile.mkstemp(suffix=".vocals.wav")[1])
@@ -164,7 +175,7 @@ def isolate_vocals(media_path, cache_path=None, gate=None):
                 pass
 
 
-def _separate_windowed(model, wav, device, ref_std, ref_mean, torch, torchaudio, np):
+def _separate_windowed(model, audio, sr, device, ref_std, ref_mean, torch, torchaudio, np):
     """The vocals stem at SAMPLE_RATE, mono, computed a window at a time.
 
     demucs allocates its output for the WHOLE input and for EVERY stem on the
@@ -182,32 +193,49 @@ def _separate_windowed(model, wav, device, ref_std, ref_mean, torch, torchaudio,
     rather than by the length of the video. Windows overlap and are
     cross-faded, because a hard cut at a boundary can clip a word in half and
     the whole point of this is to not lose speech.
+
+    ``audio`` arrives as normalised mono at the SOURCE rate, and each window
+    is resampled to the model's rate on its own. Resampling the whole track
+    up front was the last full-length allocation left here — 1.55 GB for the
+    tensor on a 73-minute input — and it existed only to be sliced. The cost
+    is that each window's resample has its own filter transients at the
+    edges; they land inside the 3 s overlap that is already cross-faded, so
+    nothing reaches the output that was not already being faded.
     """
     from demucs.apply import apply_model   # the caller already proved it imports
 
     sr_m = model.samplerate
-    total = wav.shape[-1]
-    win = int(WINDOW_SECONDS * sr_m)
-    ov = int(OVERLAP_SECONDS * sr_m)
+    total = len(audio)
+    win = int(WINDOW_SECONDS * sr)
+    ov = int(OVERLAP_SECONDS * sr)
     step = max(1, win - ov)
     vocals_idx = model.sources.index("vocals")
 
-    out_len = int(total / sr_m * SAMPLE_RATE) + SAMPLE_RATE
+    # Built once rather than per window: torchaudio recomputes the sinc
+    # kernel on every functional.resample call, and there is one window
+    # every four minutes of input.
+    up = torchaudio.transforms.Resample(sr, sr_m)
+    down = torchaudio.transforms.Resample(sr_m, SAMPLE_RATE)
+
+    out_len = int(total / sr * SAMPLE_RATE) + SAMPLE_RATE
     acc = np.zeros(out_len, dtype=np.float32)
     wsum = np.zeros(out_len, dtype=np.float32)
 
     starts = list(range(0, total, step)) or [0]
     for n, start in enumerate(starts):
-        chunk = wav[:, start:start + win]
-        if chunk.shape[-1] < int(0.2 * sr_m):
+        chunk = audio[start:start + win]
+        if len(chunk) < int(0.2 * sr):
             break
-        # Mix stays on CPU: apply_model moves each sub-chunk to the GPU itself,
-        # so this window's full-length tensor never lands in VRAM.
-        stems = apply_model(model, chunk[None], device=device,
+        # This window only, at the model's rate and in the two channels it
+        # wants. Mix stays on CPU: apply_model moves each sub-chunk to the
+        # GPU itself, so even this window never lands in VRAM whole.
+        stereo = up(torch.from_numpy(chunk)[None, :]).repeat(2, 1)
+        stems = apply_model(model, stereo[None], device=device,
                             split=True, overlap=0.25, progress=False)[0]
+        del stereo
         v = stems[vocals_idx].mean(0, keepdim=True) * ref_std + ref_mean
-        v16 = torchaudio.functional.resample(
-            v.cpu(), sr_m, SAMPLE_RATE)[0].numpy().astype(np.float32)
+        del stems
+        v16 = down(v.cpu())[0].numpy().astype(np.float32)
 
         ramp = np.ones(len(v16), dtype=np.float32)
         ov16 = int(OVERLAP_SECONDS * SAMPLE_RATE)
@@ -216,7 +244,7 @@ def _separate_windowed(model, wav, device, ref_std, ref_mean, torch, torchaudio,
         if start + win < total and ov16 and len(ramp) > ov16:
             ramp[-ov16:] = np.linspace(1.0, 0.0, ov16, dtype=np.float32)
 
-        pos = int(start / sr_m * SAMPLE_RATE)
+        pos = int(start / sr * SAMPLE_RATE)
         end = min(pos + len(v16), out_len)
         take = end - pos
         if take <= 0:

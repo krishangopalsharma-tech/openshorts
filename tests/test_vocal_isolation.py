@@ -155,8 +155,11 @@ class TestLongInputsAreWindowed:
         monkeypatch.setitem(sys.modules, "demucs.apply", mod)
 
         model = self._fake_model(torch)
-        wav = torch.zeros(2, int(seconds * model.samplerate))
-        out = vi._separate_windowed(model, wav, "cuda", 1.0, 0.0,
+        # Mono at the SOURCE rate, which is what the caller now hands over:
+        # resampling the whole track to the model's rate up front was 1.55 GB
+        # on a 73-minute input, allocated only to be sliced.
+        audio = np.zeros(int(seconds * vi.SAMPLE_RATE), dtype=np.float32)
+        out = vi._separate_windowed(model, audio, vi.SAMPLE_RATE, "cuda", 1.0, 0.0,
                                     torch, torchaudio, np)
         return out, calls
 
@@ -187,3 +190,90 @@ class TestLongInputsAreWindowed:
         expected = seconds * vi.SAMPLE_RATE
         # Cross-fades and resampling move the tail by a few ms, not seconds.
         assert abs(len(out) - expected) < vi.SAMPLE_RATE, (len(out), expected)
+
+
+class TestNothingFullLengthAtTheModelRate:
+    """The last full-length allocation: the whole track was resampled to the
+    model's 44.1 kHz and repeated to two channels before any window ran —
+    1.55 GB of tensor on a 73-minute source, 2.35 GB peak for the step,
+    per job, with MAX_CONCURRENT_JOBS letting several do it at once. That is
+    how the machine ran out of memory. Each window resamples itself now.
+    """
+
+    def _fake_model(self, torch):
+        class M:
+            samplerate = 44100
+            sources = ["drums", "bass", "other", "vocals"]
+        return M()
+
+    def test_no_resampled_tensor_is_longer_than_one_window(self, monkeypatch):
+        import numpy as np
+        torch = pytest.importorskip("torch")
+        torchaudio = pytest.importorskip("torchaudio")
+        seen = []
+
+        def fake_apply_model(model, mix, device=None, **kw):
+            seen.append(mix.shape[-1])
+            return torch.zeros(1, len(model.sources), mix.shape[-2], mix.shape[-1])
+
+        import sys
+        import types
+        mod = types.ModuleType("demucs.apply")
+        mod.apply_model = fake_apply_model
+        monkeypatch.setitem(sys.modules, "demucs.apply", mod)
+
+        model = self._fake_model(torch)
+        seconds = vi.WINDOW_SECONDS * 3
+        audio = np.zeros(int(seconds * vi.SAMPLE_RATE), dtype=np.float32)
+        vi._separate_windowed(model, audio, vi.SAMPLE_RATE, "cpu", 1.0, 0.0,
+                              torch, torchaudio, np)
+
+        whole = int(seconds * model.samplerate)
+        cap = int((vi.WINDOW_SECONDS + 1) * model.samplerate)
+        assert seen, "nothing was separated"
+        assert max(seen) <= cap, (
+            f"a {max(seen)}-sample tensor at the model rate is longer than one "
+            f"window; the full track would be {whole}")
+
+    def test_the_source_stays_mono_at_its_own_rate(self, monkeypatch, tmp_path):
+        """isolate_vocals must not build the stereo model-rate copy itself."""
+        import numpy as np
+        torch = pytest.importorskip("torch")
+        pytest.importorskip("torchaudio")
+        captured = {}
+
+        def fake_separate(model, audio, sr, device, ref_std, ref_mean, *a):
+            captured["ndim"] = getattr(audio, "ndim", None)
+            captured["sr"] = sr
+            captured["len"] = len(audio)
+            return np.zeros(vi.SAMPLE_RATE, dtype=np.float32)
+
+        monkeypatch.setattr(vi, "_separate_windowed", fake_separate)
+        wav = tmp_path / "in.wav"
+        vi._write_wav_mono(str(wav), np.zeros(vi.SAMPLE_RATE * 5, dtype=np.float32),
+                           vi.SAMPLE_RATE)
+
+        class M:
+            samplerate = 44100
+            sources = ["drums", "bass", "other", "vocals"]
+
+            def eval(self):
+                return self
+
+            def to(self, device):
+                return self
+
+        import sys
+        import types
+        pre = types.ModuleType("demucs.pretrained")
+        pre.get_model = lambda name: M()
+        app = types.ModuleType("demucs.apply")
+        app.apply_model = lambda *a, **k: None
+        monkeypatch.setitem(sys.modules, "demucs.pretrained", pre)
+        monkeypatch.setitem(sys.modules, "demucs.apply", app)
+
+        out = vi.isolate_vocals(str(wav), cache_path=str(tmp_path / "out.wav"))
+        assert out, "separation returned nothing"
+        assert captured["ndim"] == 1, "the mix was handed over with channels"
+        assert captured["sr"] == vi.SAMPLE_RATE
+        assert captured["len"] == vi.SAMPLE_RATE * 5, "it was resampled up front"
