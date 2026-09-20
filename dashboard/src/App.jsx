@@ -269,6 +269,12 @@ function App() {
   // never its path — same reason clips.json travels as text.
   const [importedTranscript, setImportedTranscript] = useState(null);
   const [transcriptError, setTranscriptError] = useState('');
+  // Shares the uploader's setting rather than adding a second one: there is
+  // one "what language is this video" answer, and having the local panel
+  // quietly ignore it is what let a Hindi episode transcribe as English.
+  const [localLanguage, setLocalLanguage] = useState(() => {
+    try { return localStorage.getItem('os_language') || 'auto'; } catch { return 'auto'; }
+  });
   const [showTranscriptPaste, setShowTranscriptPaste] = useState(false);
   const [pastedTranscriptText, setPastedTranscriptText] = useState('');
   // clips.json is small, so its picker reads the CONTENTS instead: no path
@@ -834,6 +840,12 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           video_path: video,
+          // The spoken language chosen in advanced options applies here too.
+          // Without it every local job auto-detects, and on Hindi/Urdu
+          // auto-detect slides into English TRANSLATION partway through the
+          // file — a real Hindi episode came back as 1148 segments of
+          // English, which is a transcript of a video nobody uploaded.
+          language: localLanguage !== 'auto' ? localLanguage : undefined,
           transcribe_only: transcribeOnly || undefined,
           clips_json: transcribeOnly ? undefined : (clipsText || null),
           // An imported transcript wins over an earlier job's: the user just
@@ -2194,6 +2206,47 @@ function App() {
                             {localVideoPath.trim().replace(/^"|"$/g, '').split(/[\\/]/).pop()}
                           </p>
                         </div>
+                      )}
+
+                      {/* Spoken language. Shown here rather than only in the
+                          uploader's advanced options, because this panel is
+                          reached without ever opening that form — and a
+                          Hindi video left on auto-detect comes back as an
+                          English translation of itself. */}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[12px] text-ink2">spoken language</span>
+                        <select
+                          value={localLanguage}
+                          onChange={(e) => {
+                            setLocalLanguage(e.target.value);
+                            try { localStorage.setItem('os_language', e.target.value); }
+                            catch { /* private mode */ }
+                          }}
+                          className="input-field !w-auto text-xs py-1.5"
+                          aria-label="spoken language"
+                        >
+                          <option value="auto">Auto-detect</option>
+                          <option value="hinglish">Hinglish (Hindi in Latin letters)</option>
+                          <option value="hi">Hindi (Devanagari)</option>
+                          <option value="ur">Urdu</option>
+                          <option value="en">English</option>
+                          <option value="es">Spanish</option>
+                          <option value="pt">Portuguese</option>
+                          <option value="fr">French</option>
+                          <option value="de">German</option>
+                          <option value="it">Italian</option>
+                          <option value="ar">Arabic</option>
+                          <option value="ru">Russian</option>
+                          <option value="ja">Japanese</option>
+                          <option value="ko">Korean</option>
+                          <option value="zh">Chinese</option>
+                        </select>
+                      </div>
+                      {localLanguage === 'auto' && (
+                        <p className="text-[11px] text-muted">
+                          Auto-detect translates Hindi and Urdu into English partway
+                          through a file. Name the language for those.
+                        </p>
                       )}
 
                       {/* Optional: a transcript they already have. YouTube

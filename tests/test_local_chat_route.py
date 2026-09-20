@@ -497,3 +497,32 @@ class TestResumedTranscribeOnly:
                        "priority": 2, "attempts": 0}, f)
         app_module._resume_interrupted_jobs()
         assert app_module.jobs[JOB]["transcribe_only"] is False
+
+
+class TestSpokenLanguage:
+    """Naming the language is not cosmetic on Hindi/Urdu.
+
+    Auto-detect there slides into English TRANSLATION partway through the
+    file. A real Aap Ki Adalat episode came back as 1148 segments of English
+    ("Hello, welcome to your court.") because this endpoint accepted a
+    language and the panel never sent one.
+    """
+
+    def test_a_named_language_reaches_the_job(self, local):
+        job_id = _start(local, transcribe_only=True,
+                        language="hinglish").json()["job_id"]
+        assert app_module.jobs[job_id]["env"]["TRANSCRIBE_LANGUAGE"] == "hinglish"
+
+    def test_auto_leaves_whisper_to_decide(self, local, monkeypatch):
+        monkeypatch.delenv("TRANSCRIBE_LANGUAGE", raising=False)
+        job_id = _start(local, transcribe_only=True, language="auto").json()["job_id"]
+        assert "TRANSCRIBE_LANGUAGE" not in app_module.jobs[job_id]["env"]
+
+    def test_it_survives_a_resume(self, local):
+        """The manifest stores only what DIFFERS from the process env, and a
+        resumed job rebuilds from os.environ — so a Hinglish job that was
+        interrupted must not come back in English."""
+        job_id = _start(local, transcribe_only=True,
+                        language="hinglish").json()["job_id"]
+        with open(os.path.join(local["out"], job_id, ".resume.json")) as f:
+            assert json.load(f)["job_env"]["TRANSCRIBE_LANGUAGE"] == "hinglish"
