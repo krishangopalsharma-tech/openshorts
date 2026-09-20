@@ -331,3 +331,111 @@ class TestBrowseListing:
         r = local["client"].get("/api/local/thumb",
                                 params={"path": str(root / "notes.pdf")})
         assert r.status_code == 400
+
+
+class TestPipeDrain:
+    """app.enqueue_output is the ONLY thing draining the child's pipe.
+
+    The OS buffer is 64 KB; a child that fills it blocks inside print(),
+    alive and silent, while run_job heartbeats forever on process.poll().
+    A transcribe-only run wedged for 40 minutes that way, after its
+    transcription had already finished — so the reader must survive
+    anything one line can throw at it.
+    """
+
+    class _Pipe:
+        """A pipe that yields the given lines, then EOF."""
+
+        def __init__(self, lines):
+            self._lines = list(lines)
+            self.closed = False
+
+        def readline(self):
+            return self._lines.pop(0) if self._lines else b''
+
+        def close(self):
+            self.closed = True
+
+    def _drain(self, lines, job_id="job", jobs=None):
+        import app as m
+        if jobs is not None:
+            m.jobs.clear()
+            m.jobs.update(jobs)
+        pipe = self._Pipe(lines)
+        m.enqueue_output(pipe, job_id)
+        return pipe
+
+    def test_a_non_utf8_byte_does_not_kill_the_reader(self, local, monkeypatch):
+        """stderr is merged into this pipe and native libs write raw bytes to
+        fd 2 outside Python's encoder. A strict decode used to raise here,
+        break the loop and close the pipe on a child still writing."""
+        monkeypatch.setattr(app_module, "jobs", {"job": {"logs": []}})
+        self._drain([b"before\n", b"native \x92quote\x92\n", b"after\n"])
+        logs = app_module.jobs["job"]["logs"]
+        assert logs[0] == "before"
+        assert logs[-1] == "after", "the reader stopped at the bad byte"
+        assert len(logs) == 3
+
+    def test_it_reads_to_eof_even_when_a_line_explodes(self, local, monkeypatch):
+        monkeypatch.setattr(app_module, "jobs", {"job": {"logs": []}})
+        monkeypatch.setattr(app_module, "_scrub_secrets",
+                            lambda s: (_ for _ in ()).throw(RuntimeError("boom"))
+                            if "bad" in s else s)
+        self._drain([b"one\n", b"bad\n", b"two\n"])
+        assert app_module.jobs["job"]["logs"] == ["one", "two"]
+
+    def test_the_log_is_capped(self, local, monkeypatch):
+        """Unbounded it grows for the life of the job and is returned whole
+        on every /api/status poll."""
+        monkeypatch.setattr(app_module, "jobs", {"job": {"logs": []}})
+        monkeypatch.setattr(app_module, "MAX_JOB_LOG_LINES", 10)
+        self._drain([f"line {i}\n".encode() for i in range(50)])
+        logs = app_module.jobs["job"]["logs"]
+        assert len(logs) == 10
+        assert logs[-1] == "line 49", "the newest lines are the ones kept"
+
+    def test_a_blocked_operator_console_does_not_stop_the_drain(self, local, monkeypatch):
+        """A Windows console with a QuickEdit selection blocks every write."""
+        monkeypatch.setattr(app_module, "jobs", {"job": {"logs": []}})
+        def explode(*a, **k):
+            raise OSError("console is blocked")
+        monkeypatch.setattr("builtins.print", explode)
+        self._drain([b"one\n", b"two\n"])
+        assert app_module.jobs["job"]["logs"] == ["one", "two"]
+
+
+class TestLocalJobEnvironment:
+    def test_the_child_gets_utf8_stdio(self, local):
+        """main.py prints an emoji on its first line; on a cp1252 console the
+        child dies before rendering anything. /api/process has set this for
+        years and this endpoint never did."""
+        job_id = _start(local).json()["job_id"]
+        assert app_module.jobs[job_id]["env"]["PYTHONIOENCODING"] == "utf-8"
+
+    def test_an_explicit_setting_still_wins(self, local, monkeypatch):
+        monkeypatch.setenv("PYTHONIOENCODING", "utf-16")
+        job_id = _start(local).json()["job_id"]
+        assert app_module.jobs[job_id]["env"]["PYTHONIOENCODING"] == "utf-16"
+
+
+class TestDriveNavigation:
+    def test_a_drive_root_has_no_parent(self, local):
+        """On Windows dirname("C:\\\\") is "C:" — a RELATIVE path meaning "the
+        current directory on C", not the drive root. Offered as "up" it walks
+        the user somewhere arbitrary instead of out of the drive."""
+        root = os.path.abspath(os.sep) if os.name != "nt" else "C:\\"
+        body = local["client"].get("/api/local/browse", params={"path": root}).json()
+        assert body["parent"] is None
+
+    def test_a_folder_inside_a_drive_still_has_one(self, local):
+        body = local["client"].get(
+            "/api/local/browse", params={"path": str(local["tmp"])}).json()
+        assert body["parent"] and os.path.isabs(body["parent"])
+
+    def test_every_listing_carries_the_drive_list(self, local):
+        """The picker opens inside the remembered folder, so the drive list
+        has to be reachable from a listing rather than only from the empty
+        'this computer' screen."""
+        body = local["client"].get(
+            "/api/local/browse", params={"path": str(local["tmp"])}).json()
+        assert body["drives"], "no drives offered from inside a folder"

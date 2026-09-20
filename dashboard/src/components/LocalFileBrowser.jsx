@@ -213,6 +213,32 @@ export default function LocalFileBrowser({ kind = 'video', onPick, autoFocus = t
         </button>
       </div>
 
+      {/* Drives are always reachable. They used to render only in the
+          `!tree.path` listing, which is a screen you can no longer get to
+          once a folder is remembered — the picker opens inside that folder,
+          and "up" stops at the drive root, so a second drive was
+          unreachable without clearing storage. */}
+      {(tree?.drives || []).length > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <HardDrive size={12} className="text-muted shrink-0" />
+          {tree.drives.map((d) => {
+            const here = (tree.path || '').toLowerCase().startsWith(d.toLowerCase());
+            return (
+              <button
+                key={d}
+                type="button"
+                onClick={() => enter(d)}
+                title={d}
+                className={`px-2 py-0.5 rounded border text-[11px] font-mono ${
+                  here ? 'border-brass text-ink' : 'border-rule text-ink2 hover:border-brass'}`}
+              >
+                {d.replace(/[\\/]+$/, '')}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {recents.length > 0 && (
         <div className="flex items-center gap-1.5 flex-wrap">
           <Star size={12} className="text-muted shrink-0" />

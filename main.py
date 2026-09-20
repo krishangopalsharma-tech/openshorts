@@ -1533,17 +1533,29 @@ def clear_transcript_checkpoint(output_dir):
         print(f"⚠️ Could not remove transcript checkpoint: {e}")
 
 
+# How many transcript segments get echoed to the log as a sample.
+TRANSCRIPT_LOG_LINES = int(os.environ.get("TRANSCRIPT_LOG_LINES", "30"))
+
+
 def transcribe_video(video_path):
     print("🎙️  Transcribing video...")
     from transcribe_backends import transcribe_media
 
     transcript = transcribe_media(video_path)
 
-    print(f"   Detected language '{transcript['language']}', "
-          f"{len(transcript['segments'])} segments")
-    for segment in transcript['segments']:
-        # Print progress to keep user informed (and prevent timeouts feeling)
+    segments = transcript['segments']
+    print(f"   Detected language '{transcript['language']}', {len(segments)} segments")
+    # A sample, not the whole transcript. This used to print every segment —
+    # thousands of lines on an hour-long source, all of it through the pipe
+    # app.py's reader thread drains. The transcript is written to disk a
+    # moment later, so the dump bought a preview and risked wedging the job
+    # if anything downstream stopped reading for long enough to fill the
+    # 64 KB buffer. The first few lines prove the audio was heard, which is
+    # the only thing the log was really being read for.
+    for segment in segments[:TRANSCRIPT_LOG_LINES]:
         print(f"   [{segment['start']:.2f}s -> {segment['end']:.2f}s] {segment['text']}")
+    if len(segments) > TRANSCRIPT_LOG_LINES:
+        print(f"   … and {len(segments) - TRANSCRIPT_LOG_LINES} more segments")
 
     return transcript
 

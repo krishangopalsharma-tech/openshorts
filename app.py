@@ -2278,11 +2278,35 @@ def _visible_logs(logs):
     return friendly_logs(logs)
 
 
+# Kept per job in memory and returned whole on every /api/status poll.
+MAX_JOB_LOG_LINES = int(os.environ.get("MAX_JOB_LOG_LINES", "2000"))
+
+
 def enqueue_output(out, job_id):
-    """Reads output from a subprocess and appends it to jobs logs."""
+    """Reads output from a subprocess and appends it to jobs logs.
+
+    This thread is the ONLY thing draining the child's pipe, so it must never
+    stop early and must never block: the OS buffer is 64 KB, and a child that
+    fills it blocks inside ``print()`` — alive, silent, producing nothing,
+    with the job heartbeating forever because ``run_job`` only watches
+    ``process.poll()``. That is not hypothetical; it is what wedged a
+    transcribe-only run for 40 minutes after its transcription had already
+    finished.
+
+    Two things follow. ``errors='replace'`` rather than a strict decode,
+    because stderr is merged into this pipe and native libraries (ffmpeg,
+    absl/TF-Lite, CTranslate2) write raw bytes to fd 2 outside Python's
+    encoder — one cp1252 byte used to raise, break the loop and close the
+    pipe. And per-line error containment, so anything unexpected costs one
+    line instead of the rest of the job.
+    """
     try:
         for line in iter(out.readline, b''):
-            decoded_line = _scrub_secrets(line.decode('utf-8').strip())
+            try:
+                decoded_line = _scrub_secrets(
+                    line.decode('utf-8', 'replace').strip())
+            except Exception:
+                continue
             if decoded_line:
                 # Internal marker from main.py's downloader, not a log line.
                 # Internal marker: a clip finished its whole chain and this is
@@ -2314,12 +2338,33 @@ def enqueue_output(out, job_id):
                     except Exception:
                         pass
                     continue
-                print(f"📝 [Job Output] {decoded_line}")
+                try:
+                    print(f"📝 [Job Output] {decoded_line}")
+                except Exception:
+                    # The operator's console is not worth a wedged job. A
+                    # Windows console with QuickEdit selection blocks every
+                    # write until the selection is cleared, and anything that
+                    # stops this loop stops the child with it.
+                    pass
                 if job_id in jobs:
-                    jobs[job_id]['logs'].append(decoded_line)
+                    log = jobs[job_id]['logs']
+                    log.append(decoded_line)
+                    # Unbounded, this grows for the life of the job and is
+                    # returned in full on every /api/status poll. main.py
+                    # prints a line per transcript segment, so an hour-long
+                    # source alone is thousands.
+                    if len(log) > MAX_JOB_LOG_LINES:
+                        del log[:len(log) - MAX_JOB_LOG_LINES]
     except Exception as e:
         print(f"Error reading output for job {job_id}: {e}")
     finally:
+        # Draining to EOF matters even after an error: the child is still
+        # writing, and an unread pipe blocks it rather than ending it.
+        try:
+            for _ in iter(out.readline, b''):
+                pass
+        except Exception:
+            pass
         out.close()
 
 async def run_job(job_id, job_data):
@@ -2817,6 +2862,12 @@ async def local_browse(path: Optional[str] = None, kind: str = "video",
     files.sort(key=key, reverse=reverse)
 
     parent = os.path.dirname(target.rstrip(os.sep))
+    # On Windows ``dirname("C:\\")`` is ``"C:"`` — a RELATIVE path meaning
+    # "the current directory on drive C", not the drive root. Handed back as
+    # "up" it walks the user somewhere arbitrary instead of out of the drive,
+    # so a drive root has no parent and the drive list is the way out.
+    if parent and not os.path.isabs(parent):
+        parent = None
     return {
         "path": target,
         "parent": parent if parent and parent != target else None,
@@ -3059,6 +3110,11 @@ async def process_local_endpoint(request: Request):
     # Path.home() raises "Could not determine home directory". /api/process
     # has always done this; this endpoint did not.
     env = os.environ.copy()
+    # main.py prints an emoji on its first line. On a cp1252 console the
+    # child dies before it renders anything, and /api/process has set this
+    # for years — this endpoint never did, so a local job only worked when
+    # the operator's own shell happened to export it.
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     audience = str(body.get("audience") or "").strip().lower()
     if audience in ("in", "us"):
         env["AUDIENCE"] = audience
