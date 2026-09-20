@@ -2143,6 +2143,18 @@ function App() {
             <Gallery />
           )} */}
 
+          {/* What is running, on the dashboard tab whatever the view is
+              doing. Deliberately OUTSIDE the status === 'idle' gate: it
+              first lived inside it, which hid the list the moment a job
+              started — precisely when you want to know what is running, and
+              the reason the same video got submitted four times in five
+              minutes. Renders nothing when nothing is running. */}
+          {activeTab === 'dashboard' && (
+            <div className="px-4 pt-3 sm:px-6">
+              <RunningJobs onOpen={attachToJob} currentJobId={jobId} />
+            </div>
+          )}
+
           {/* View: Dashboard (Idle) */}
           {activeTab === 'dashboard' && status === 'idle' && (
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
@@ -2183,12 +2195,6 @@ function App() {
                     knows the job it started itself. /api/status reads the job
                     dir when the id is not in memory, so pasting the folder
                     name is enough to get the per-clip tools on them. */}
-                {/* What is already running, with a way to follow it or stop
-                    it. Without this the same video got submitted four times
-                    in five minutes because nothing said the first was still
-                    going. */}
-                <RunningJobs onOpen={attachToJob} currentJobId={jobId} />
-
                 {/* Self-host only. Renders a file where it already sits, and
                     optionally takes picks already made in a chat — the chat
                     route without the command line. Hidden in cloud mode,
