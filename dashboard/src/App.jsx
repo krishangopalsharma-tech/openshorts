@@ -26,6 +26,8 @@ import AdvancedBanner from './components/AdvancedBanner';
 import HistoryTab from './components/HistoryTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
+import LocalFileBrowser from './components/LocalFileBrowser';
+import { thumbUrl } from './lib/localBrowser';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError, getToken } from './lib/api';
 import { getApiUrl } from './config';
@@ -259,8 +261,16 @@ function App() {
   const [localBusy, setLocalBusy] = useState(false);
   // The browse dialog for the video. A browser file input only ever reports a
   // file's NAME, so the path has to be chosen by walking the server's disk.
-  const [browse, setBrowse] = useState(null);      // { path, dirs, files, drives, parent }
-  const [browseBusy, setBrowseBusy] = useState(false);
+  // `browse` is now just "is the dialog open" — LocalFileBrowser owns the
+  // listing, the filter, the remembered folder and the frame previews.
+  const [browse, setBrowse] = useState(false);
+  // A transcript the user already had (YouTube's panel, or an earlier run).
+  // Held as text because the browser can read a small file's contents and
+  // never its path — same reason clips.json travels as text.
+  const [importedTranscript, setImportedTranscript] = useState(null);
+  const [transcriptError, setTranscriptError] = useState('');
+  const [showTranscriptPaste, setShowTranscriptPaste] = useState(false);
+  const [pastedTranscriptText, setPastedTranscriptText] = useState('');
   // clips.json is small, so its picker reads the CONTENTS instead: no path
   // needed, and it works the same whether the file sits next to the video or
   // in the downloads folder. The same text box takes a reply pasted straight
@@ -716,16 +726,28 @@ function App() {
   // Start a job from paths on this machine. Nothing is uploaded: the backend
   // reads the file where it already is, which is the point — copying a 4 GB
   // episode into a server running off the same disk is a copy for no reason.
-  const loadBrowse = async (path) => {
-    setBrowseBusy(true);
+  // Read a transcript the user already has. Parsed server-side on submit —
+  // this only checks it is not empty, so the error they see names the real
+  // reason ("no timestamps found") rather than a guess made here.
+  const pickTranscriptFile = async (file) => {
+    if (!file) return;
+    setTranscriptError('');
     try {
-      const q = path ? `?path=${encodeURIComponent(path)}` : '';
-      const res = await apiFetch(`/api/local/browse${q}`);
-      const data = await res.json();
-      if (!res.ok) { setLocalError(data.detail || 'Could not read that folder.'); return; }
-      setBrowse(data);
-    } catch { setLocalError('Could not reach the backend.'); }
-    finally { setBrowseBusy(false); }
+      const text = await file.text();
+      if (!text.trim()) { setTranscriptError('That file is empty.'); return; }
+      setImportedTranscript({ name: file.name, text });
+      setPastedTranscriptText(text);
+    } catch { setTranscriptError('Could not read that file.'); }
+  };
+
+  const handleTranscriptTextChange = (raw) => {
+    setPastedTranscriptText(raw);
+    setTranscriptError('');
+    if (!raw.trim()) {
+      setImportedTranscript(null);
+      return;
+    }
+    setImportedTranscript({ name: 'pasted_transcript.txt', text: raw });
   };
 
   const pickClipsFile = async (file) => {
@@ -814,7 +836,13 @@ function App() {
           video_path: video,
           transcribe_only: transcribeOnly || undefined,
           clips_json: transcribeOnly ? undefined : (clipsText || null),
-          transcript_job: transcribeOnly ? undefined : (transcribeJob || undefined),
+          // An imported transcript wins over an earlier job's: the user just
+          // handed one over, so asking them which they meant is noise.
+          transcript_text: importedTranscript?.text || undefined,
+          transcript_name: importedTranscript?.name || undefined,
+          transcript_job: (transcribeOnly || importedTranscript)
+            ? undefined
+            : (transcribeJob || undefined),
         }),
       });
       const data = await res.json();
@@ -2144,12 +2172,101 @@ function App() {
                         />
                         <button
                           type="button"
-                          onClick={() => { setLocalError(null); loadBrowse(''); }}
+                          onClick={() => { setLocalError(null); setBrowse(true); }}
                           className="btn-quiet shrink-0"
                         >
                           Browse…
                         </button>
                       </div>
+
+                      {/* A frame from the chosen file, because the path alone
+                          does not tell two episodes apart and picking the
+                          wrong one is only discovered after a render. */}
+                      {localVideoPath.trim() && (
+                        <div className="flex items-center gap-2.5 rounded-input border border-rule bg-paper3 p-2">
+                          <img
+                            src={thumbUrl(localVideoPath.trim().replace(/^"|"$/g, ''))}
+                            alt=""
+                            className="w-[104px] h-[58px] object-cover rounded border border-rule shrink-0 bg-paper2"
+                            onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
+                          />
+                          <p className="text-[12px] text-ink2 min-w-0 truncate">
+                            {localVideoPath.trim().replace(/^"|"$/g, '').split(/[\\/]/).pop()}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Optional: a transcript they already have. YouTube
+                          hands one out for most videos, and transcribing the
+                          same hour again costs ~25 min of GPU for a file we
+                          were given. */}
+                      <div
+                        className="rounded-input border border-rule bg-paper3 p-2.5 space-y-2"
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const file = e.dataTransfer.files?.[0];
+                          if (file) pickTranscriptFile(file);
+                        }}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <label className="btn-quiet cursor-pointer text-[12px]">
+                              <input
+                                type="file"
+                                accept=".json,.txt,.srt,.vtt,text/plain,application/json"
+                                className="hidden"
+                                onChange={(e) => pickTranscriptFile(e.target.files?.[0])}
+                              />
+                              {importedTranscript ? 'Replace file' : 'Upload transcript'}
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => setShowTranscriptPaste(!showTranscriptPaste)}
+                              className="btn-quiet text-[12px]"
+                            >
+                              {showTranscriptPaste ? 'Hide paste box' : 'Paste transcript'}
+                            </button>
+                          </div>
+                          {importedTranscript && (
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-[11px] text-ink2 font-mono truncate max-w-[180px]">
+                                {importedTranscript.name}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setImportedTranscript(null);
+                                  setTranscriptError('');
+                                  setPastedTranscriptText('');
+                                }}
+                                className="text-muted hover:text-ink2"
+                                aria-label="drop the imported transcript"
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {showTranscriptPaste && (
+                          <textarea
+                            value={pastedTranscriptText}
+                            onChange={(e) => handleTranscriptTextChange(e.target.value)}
+                            placeholder="Paste Whisper JSON, SRT, VTT, or YouTube timestamp lines (e.g. 0:14 speech)..."
+                            rows={3}
+                            className="w-full rounded border border-rule bg-paper2 p-2 font-mono text-[11px] text-ink outline-none resize-y"
+                          />
+                        )}
+
+                        {transcriptError && (
+                          <p className="text-[11px] text-bad">{transcriptError}</p>
+                        )}
+                        <p className="text-[11px] text-muted">
+                          Upload/drop a file (.json, .srt, .vtt, .txt) or paste timestamps. Transcription is skipped entirely.
+                        </p>
+                      </div>
+
                       <div className="flex flex-wrap gap-2">
                         <button
                           type="button"
@@ -2272,59 +2389,27 @@ function App() {
                 {browse && (
                   <div
                     className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-                    onClick={() => setBrowse(null)}
+                    onClick={() => setBrowse(false)}
                   >
                     <div
-                      className="w-full max-w-lg max-h-[70vh] flex flex-col rounded-input border border-rule2 bg-paper2 p-3"
+                      className="w-full max-w-lg h-[76vh] flex flex-col rounded-input border border-rule2 bg-paper2 p-3"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <div className="flex items-center gap-2 mb-2">
-                        <p className="eyebrow flex-1 truncate">{browse.path || 'This computer'}</p>
-                        <button type="button" onClick={() => setBrowse(null)}
+                        <p className="eyebrow flex-1 truncate">Choose a video on this computer</p>
+                        <button type="button" onClick={() => setBrowse(false)}
                                 className="text-muted hover:text-ink2" aria-label="close">
                           <X size={16} />
                         </button>
                       </div>
-                      <div className="flex-1 overflow-y-auto custom-scrollbar text-[13px]">
-                        {browseBusy && <p className="text-muted px-2 py-1">Reading…</p>}
-                        {!browse.path && (browse.drives || []).map((d) => (
-                          <button key={d} type="button" onClick={() => loadBrowse(d)}
-                                  className="block w-full text-left px-2 py-1.5 rounded hover:bg-paper3 font-mono">
-                            {d}
-                          </button>
-                        ))}
-                        {browse.path && (
-                          <button type="button"
-                                  onClick={() => loadBrowse(browse.parent || '')}
-                                  className="block w-full text-left px-2 py-1.5 rounded hover:bg-paper3 text-muted">
-                            ../
-                          </button>
-                        )}
-                        {(browse.dirs || []).map((d) => (
-                          <button key={d} type="button"
-                                  onClick={() => loadBrowse(browse.path + browse.sep + d)}
-                                  className="block w-full text-left px-2 py-1.5 rounded hover:bg-paper3 truncate">
-                            {d}/
-                          </button>
-                        ))}
-                        {(browse.files || []).map((f) => (
-                          <button key={f.name} type="button"
-                                  onClick={() => {
-                                    setLocalVideoPath(browse.path + browse.sep + f.name);
-                                    setBrowse(null);
-                                  }}
-                                  className="flex w-full items-center gap-2 px-2 py-1.5 rounded hover:bg-paper3 text-ink2">
-                            <span className="flex-1 truncate text-left">{f.name}</span>
-                            <span className="text-[11px] text-muted shrink-0">
-                              {(f.size / 1048576).toFixed(0)} MB
-                            </span>
-                          </button>
-                        ))}
-                        {browse.path && !browseBusy
-                          && !(browse.dirs || []).length && !(browse.files || []).length && (
-                          <p className="text-muted px-2 py-1">No folders or videos here.</p>
-                        )}
-                      </div>
+                      <LocalFileBrowser
+                        kind="video"
+                        onPick={(path) => {
+                          setLocalVideoPath(path);
+                          setLocalError(null);
+                          setBrowse(false);
+                        }}
+                      />
                     </div>
                   </div>
                 )}

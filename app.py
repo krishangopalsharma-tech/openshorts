@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
@@ -2756,7 +2756,8 @@ def _local_drives():
 
 
 @app.get("/api/local/browse")
-async def local_browse(path: Optional[str] = None, kind: str = "video"):
+async def local_browse(path: Optional[str] = None, kind: str = "video",
+                       q: Optional[str] = None, sort: str = "name"):
     """List folders and matching files, so the dashboard can offer a file
     picker for a path the BROWSER is not allowed to see.
 
@@ -2781,6 +2782,11 @@ async def local_browse(path: Optional[str] = None, kind: str = "video"):
     wanted = ((".json",) if kind == "clips"
               else (".srt", ".vtt") if kind == "subtitle"
               else LOCAL_VIDEO_EXTS)
+    # Filtering and sorting happen HERE, not in the browser, because both
+    # lists are capped at 500 below: a folder of 3000 episodes would have the
+    # match cut off before the client ever saw it, which reads as "my file
+    # isn't there".
+    needle = (q or "").strip().lower()
     dirs, files = [], []
     try:
         with os.scandir(target) as it:
@@ -2788,25 +2794,108 @@ async def local_browse(path: Optional[str] = None, kind: str = "video"):
                 try:
                     if entry.name.startswith("."):
                         continue
+                    if needle and needle not in entry.name.lower():
+                        continue
                     if entry.is_dir():
-                        dirs.append(entry.name)
+                        dirs.append({"name": entry.name,
+                                     "mtime": entry.stat().st_mtime})
                     elif entry.name.lower().endswith(wanted):
+                        stat = entry.stat()
                         files.append({"name": entry.name,
-                                      "size": entry.stat().st_size})
+                                      "size": stat.st_size,
+                                      "mtime": stat.st_mtime})
                 except OSError:
                     continue          # a permission-denied entry is skipped
     except PermissionError:
         raise HTTPException(status_code=403, detail=f"No access to {target}")
+
+    if sort == "modified":
+        key, reverse = (lambda e: e.get("mtime") or 0.0), True
+    else:
+        key, reverse = (lambda e: e["name"].lower()), False
+    dirs.sort(key=key, reverse=reverse)
+    files.sort(key=key, reverse=reverse)
 
     parent = os.path.dirname(target.rstrip(os.sep))
     return {
         "path": target,
         "parent": parent if parent and parent != target else None,
         "drives": _local_drives(),
-        "dirs": sorted(dirs, key=str.lower)[:500],
-        "files": sorted(files, key=lambda f: f["name"].lower())[:500],
+        # Folders stayed a list of names for a year; the dashboard reads both
+        # shapes so an old cached bundle keeps working against a new server.
+        "dirs": [d["name"] for d in dirs[:500]],
+        "dir_entries": dirs[:500],
+        "files": files[:500],
         "sep": os.sep,
+        "truncated": len(dirs) > 500 or len(files) > 500,
     }
+
+
+@app.get("/api/local/thumb")
+async def local_thumb(path: str, at: float = 0.2):
+    """One JPEG frame from a local video, for the file picker.
+
+    A `<video>` element cannot preview these: the sources this route exists
+    for are .mkv, which Chrome will not play at all, so "click it and watch"
+    is not available and a still frame is. Sampled at a fraction of the
+    runtime rather than frame 0 — the first frame of most videos is black or
+    a title card, which is exactly the frame that cannot tell two episodes
+    apart, and telling them apart is the whole job.
+
+    Self-host only and extension-gated, matching /api/local/browse: it
+    exposes nothing that walking the same disk does not already expose.
+    """
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    target = os.path.abspath(os.path.expanduser((path or "").strip().strip('"')))
+    if not target.lower().endswith(LOCAL_VIDEO_EXTS):
+        raise HTTPException(status_code=400, detail="Not a video file")
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="No such file")
+
+    try:
+        import cv2
+        cap = cv2.VideoCapture(target)
+        try:
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+            if total > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES,
+                        int(total * min(max(at, 0.0), 0.95)))
+            ok, frame = cap.read()
+            if not ok:
+                # A seek past a broken index leaves the reader nowhere; the
+                # first frame is a worse thumbnail than none at all is a 404.
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = cap.read()
+            if not ok:
+                raise HTTPException(status_code=422, detail="Could not read a frame")
+            h, w = frame.shape[:2]
+            width = 320
+            if w > width:
+                frame = cv2.resize(frame, (width, max(1, int(h * width / w))))
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            if not ok:
+                raise HTTPException(status_code=422, detail="Could not encode a frame")
+            seconds = (total / fps) if (total and fps) else 0.0
+        finally:
+            cap.release()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not read that video ({e})")
+
+    return Response(
+        content=buf.tobytes(),
+        media_type="image/jpeg",
+        headers={
+            # The frame is a pure function of the file, and the picker asks
+            # for every row on every open.
+            "Cache-Control": "private, max-age=3600",
+            "X-Duration-Seconds": f"{seconds:.3f}",
+        },
+    )
 
 
 @app.post("/api/process/local")
@@ -2842,11 +2931,20 @@ async def process_local_endpoint(request: Request):
     clips_text = body.get("clips_json")
     transcribe_only = bool(body.get("transcribe_only"))
     transcript_job = str(body.get("transcript_job") or "").strip()
+    # A transcript the user already had (YouTube's, or one this pipeline
+    # wrote earlier). Same reasoning as clips_json above: the browser can
+    # read the file's text and never its path.
+    transcript_text = body.get("transcript_text")
+    transcript_name = str(body.get("transcript_name") or "").strip()
 
     if transcribe_only and (clips_path or clips_text):
         raise HTTPException(
             status_code=400,
             detail="transcribe_only writes the transcript and stops; it takes no clips")
+    if transcript_text and transcript_job:
+        raise HTTPException(
+            status_code=400,
+            detail="Send an uploaded transcript or an earlier job's, not both")
 
     transcript_path = ""
     if transcript_job:
@@ -2859,6 +2957,20 @@ async def process_local_endpoint(request: Request):
             raise HTTPException(
                 status_code=400,
                 detail=f"Job {transcript_job[:8]} has no transcript to reuse")
+
+    # Parse the uploaded transcript BEFORE a job exists: a malformed paste is
+    # the user's to fix in the box they pasted it into, and finding out after
+    # the job dir and the manifest are on disk leaves a dead job behind.
+    imported_transcript = None
+    if transcript_text:
+        import transcript_import
+        try:
+            imported_transcript = transcript_import.load_transcript(
+                transcript_text if isinstance(transcript_text, str)
+                else json.dumps(transcript_text),
+                transcript_name)
+        except transcript_import.TranscriptImportError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     if not video_path:
         raise HTTPException(status_code=400, detail="video_path is required")
@@ -2913,6 +3025,14 @@ async def process_local_endpoint(request: Request):
         with open(clips_path, "w", encoding="utf-8") as f:
             f.write(clips_text if isinstance(clips_text, str)
                     else json.dumps(clips_text))
+
+    # An imported transcript is written as this job's own transcript.json —
+    # the same name and shape --transcript already reads, and the same file a
+    # later job could point `transcript_job` at.
+    if imported_transcript is not None:
+        transcript_path = os.path.join(job_output_dir, "transcript.json")
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            json.dump(imported_transcript, f, ensure_ascii=False)
 
     # Hardlink the source under the job's name, exactly as the Thumbnail
     # Studio handover does: the clip editor, the preview and source lookup all

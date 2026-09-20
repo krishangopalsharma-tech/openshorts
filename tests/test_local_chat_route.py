@@ -217,3 +217,117 @@ class TestCompletionIsNotAFailure:
     def test_a_render_with_no_metadata_still_fails(self, local):
         job = self._run(local, transcribe_only=False, write_brief=False)
         assert job["status"] == "failed"
+
+
+class TestImportedTranscript:
+    """A transcript the user already had (YouTube's, or an earlier run).
+
+    The saving this exists for is the whole transcription — ~25 min of GPU on
+    an hour-long source — so the only thing that really has to hold is that
+    main.py is told to reuse the file instead of listening to the audio.
+    """
+
+    def test_it_is_written_into_the_job_and_passed_as_transcript(self, local):
+        r = _start(local, transcript_text="0:14 so I said no\n0:20 and he left",
+                   transcript_name="yt.txt")
+        assert r.status_code == 200, r.text
+        job_id = r.json()["job_id"]
+        cmd = _cmd(local, job_id)
+        assert "--transcript" in cmd
+        written = cmd[cmd.index("--transcript") + 1]
+        assert os.path.isfile(written)
+        data = json.loads(open(written, encoding="utf-8").read())
+        assert [s["text"] for s in data["segments"]] == ["so I said no", "and he left"]
+
+    def test_whisper_json_keeps_its_word_timings(self, local):
+        doc = json.dumps({"language": "en", "segments": [
+            {"start": 0.0, "end": 2.0, "text": "hello there",
+             "words": [{"word": " hello", "start": 0.0, "end": 1.0},
+                       {"word": " there", "start": 1.0, "end": 2.0}]}]})
+        job_id = _start(local, transcript_text=doc,
+                        transcript_name="t.json").json()["job_id"]
+        cmd = _cmd(local, job_id)
+        data = json.loads(open(cmd[cmd.index("--transcript") + 1], encoding="utf-8").read())
+        assert data["segments"][0]["words"][1]["start"] == 1.0
+
+    def test_it_lands_as_transcript_json_so_a_later_job_can_point_at_it(self, local):
+        """Same name and shape a transcribed job writes, which is what makes
+        `transcript_job` work against an imported one too."""
+        job_id = _start(local, transcript_text="0:01 hi").json()["job_id"]
+        assert os.path.isfile(os.path.join(local["out"], job_id, "transcript.json"))
+
+    def test_a_broken_transcript_is_refused_before_a_job_exists(self, local):
+        """Finding out after the job dir and manifest are on disk leaves a
+        dead job behind for the user to notice and clean up."""
+        before = set(os.listdir(local["out"]))
+        r = _start(local, transcript_text="no timestamps anywhere in here",
+                   transcript_name="yt.txt")
+        assert r.status_code == 400
+        assert "timestamp" in r.json()["detail"].lower()
+        assert set(os.listdir(local["out"])) == before
+
+    def test_an_imported_transcript_and_an_earlier_job_at_once_is_refused(self, local):
+        r = _start(local, transcript_text="0:01 hi", transcript_job=JOB)
+        assert r.status_code == 400
+        assert "not both" in r.json()["detail"]
+
+    def test_transcribe_only_with_an_import_skips_the_audio_entirely(self, local):
+        """The best case of the feature: a brief for the chat with no GPU at
+        all, because the transcript was handed to us."""
+        job_id = _start(local, transcribe_only=True,
+                        transcript_text="0:01 hi there").json()["job_id"]
+        cmd = _cmd(local, job_id)
+        assert "--transcribe-only" in cmd and "--transcript" in cmd
+
+
+class TestBrowseListing:
+    """The picker's listing. It is capped at 500 entries, so filtering and
+    sorting have to happen here rather than in the browser — a client-side
+    filter would only ever search the part that survived the cap."""
+
+    def _folder(self, local):
+        import time
+        root = local["tmp"] / "media"
+        root.mkdir()
+        for i, name in enumerate(["alpha.mp4", "beta.mkv", "gamma.mp4"]):
+            f = root / name
+            f.write_bytes(b"\x00" * 1024)
+            os.utime(f, (time.time() - i * 3600, time.time() - i * 3600))
+        (root / "nested").mkdir()
+        (root / "notes.pdf").write_bytes(b"x")
+        return root
+
+    def test_it_lists_videos_with_size_and_mtime(self, local):
+        root = self._folder(local)
+        body = local["client"].get("/api/local/browse",
+                                   params={"path": str(root)}).json()
+        assert [f["name"] for f in body["files"]] == ["alpha.mp4", "beta.mkv", "gamma.mp4"]
+        assert all(f["mtime"] and f["size"] for f in body["files"])
+        assert body["dirs"] == ["nested"]
+
+    def test_the_filter_runs_on_the_server(self, local):
+        root = self._folder(local)
+        body = local["client"].get("/api/local/browse",
+                                   params={"path": str(root), "q": "mm"}).json()
+        assert [f["name"] for f in body["files"]] == ["gamma.mp4"]
+
+    def test_newest_first_is_available(self, local):
+        root = self._folder(local)
+        body = local["client"].get("/api/local/browse",
+                                   params={"path": str(root), "sort": "modified"}).json()
+        assert [f["name"] for f in body["files"]] == ["alpha.mp4", "beta.mkv", "gamma.mp4"]
+
+    def test_dirs_stay_a_list_of_names_for_an_older_bundle(self, local):
+        """A cached dashboard build reads `dirs`; the richer shape rides
+        alongside it rather than replacing it."""
+        root = self._folder(local)
+        body = local["client"].get("/api/local/browse",
+                                   params={"path": str(root)}).json()
+        assert body["dirs"] == ["nested"]
+        assert body["dir_entries"][0]["name"] == "nested"
+
+    def test_the_thumbnail_route_refuses_a_non_video(self, local):
+        root = self._folder(local)
+        r = local["client"].get("/api/local/thumb",
+                                params={"path": str(root / "notes.pdf")})
+        assert r.status_code == 400

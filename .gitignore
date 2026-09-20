@@ -64,3 +64,4 @@ plan/behind_subject_test.png
 plan/behind_example.ass
 # Instrucciones locales con datos de infra (repo público)
 CLAUDE.local.md
+graphify-out/
