@@ -1226,9 +1226,21 @@ _RESUMABLE_ENV_KEYS = (
 )
 
 
+def _transcribe_only_cmd(cmd):
+    """Whether this command line stops at the brief.
+
+    Read off the argv rather than trusted from the manifest alone, so a job
+    whose manifest was written before the flag was persisted still recovers
+    as what it actually is — the argv has always carried the truth.
+    """
+    return "--transcribe-only" in (cmd or [])
+
+
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
                            webhook_url=None, webhook_secret=None, base_url=None,
-                           job_env=None, partial=None):
+                           job_env=None, partial=None, transcribe_only=None):
+    if transcribe_only is None:
+        transcribe_only = _transcribe_only_cmd(cmd)
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
@@ -1249,6 +1261,13 @@ def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, water
                 # A resumed job downloads the source again, so the cut must
                 # travel with it: only these minutes were reserved.
                 "partial": partial,
+                # A transcribe-only run cuts nothing on purpose, so run_job's
+                # "no metadata" check would call its success a failure. The
+                # flag lived only in the in-memory job record, which a resume
+                # rebuilds from scratch — so a resumed brief was reported as
+                # "Error: No metadata file generated" with the brief sitting
+                # finished on disk next to the manifest.
+                "transcribe_only": bool(transcribe_only),
             }, f)
     except Exception as e:
         print(f"⚠️ Could not write resume manifest for {job_id}: {e}")
@@ -1370,6 +1389,12 @@ def _resume_interrupted_jobs() -> set:
             'webhook_url': m.get("webhook_url"),
             'webhook_secret': m.get("webhook_secret"),
             'base_url': m.get("base_url"),
+            # Without this the brief a resumed job wrote is reported as
+            # "No metadata file generated" — a finished transcript called a
+            # failure. Falls back to the argv for manifests written before
+            # the flag was persisted.
+            'transcribe_only': bool(m.get("transcribe_only",
+                                          _transcribe_only_cmd(m.get("cmd")))),
         }
         _enqueue_job(job_id, int(m.get("priority", 2)))
         resumed += 1

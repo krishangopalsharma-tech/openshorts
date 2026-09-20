@@ -439,3 +439,61 @@ class TestDriveNavigation:
         body = local["client"].get(
             "/api/local/browse", params={"path": str(local["tmp"])}).json()
         assert body["drives"], "no drives offered from inside a folder"
+
+
+class TestResumedTranscribeOnly:
+    """A transcribe-only job that survives a restart is still transcribe-only.
+
+    run_job fails any job that produced no *_metadata.json — which is exactly
+    what a successful transcription produces — so the flag is what tells it
+    the empty job dir is the expected outcome. It lived only in the in-memory
+    job record, and a resume rebuilds that from the manifest, so a restart
+    turned a finished brief into "Error: No metadata file generated" with
+    paste_into_chat.txt sitting complete on disk.
+    """
+
+    def _manifest(self, local, job_id, **extra):
+        job_dir = os.path.join(local["out"], job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        payload = {
+            "cmd": [sys.executable, "-u", "main.py", "-i", local["video"],
+                    "-o", job_dir, "--transcribe-only"],
+            "priority": 2, "user_id": None, "reservation_id": None,
+            "watermark": False, "attempts": 0, "job_env": {},
+        }
+        payload.update(extra)
+        with open(os.path.join(job_dir, ".resume.json"), "w") as f:
+            json.dump(payload, f)
+        return job_dir
+
+    def test_the_flag_is_written_into_the_manifest(self, local):
+        job_id = _start(local, transcribe_only=True).json()["job_id"]
+        with open(os.path.join(local["out"], job_id, ".resume.json")) as f:
+            assert json.load(f)["transcribe_only"] is True
+
+    def test_an_ordinary_render_is_not_marked(self, local):
+        job_id = _start(local).json()["job_id"]
+        with open(os.path.join(local["out"], job_id, ".resume.json")) as f:
+            assert json.load(f)["transcribe_only"] is False
+
+    def test_a_resumed_job_keeps_the_flag(self, local):
+        self._manifest(local, JOB, transcribe_only=True)
+        app_module._resume_interrupted_jobs()
+        assert app_module.jobs[JOB]["transcribe_only"] is True
+
+    def test_an_old_manifest_recovers_from_the_argv(self, local):
+        """Manifests already on disk predate the field; the command line has
+        always carried the truth, so they must not resume as broken."""
+        self._manifest(local, JOB)                      # no transcribe_only key
+        app_module._resume_interrupted_jobs()
+        assert app_module.jobs[JOB]["transcribe_only"] is True
+
+    def test_a_resumed_render_is_still_not_transcribe_only(self, local):
+        job_dir = os.path.join(local["out"], JOB)
+        os.makedirs(job_dir, exist_ok=True)
+        with open(os.path.join(job_dir, ".resume.json"), "w") as f:
+            json.dump({"cmd": [sys.executable, "main.py", "-i", local["video"],
+                               "-o", job_dir],
+                       "priority": 2, "attempts": 0}, f)
+        app_module._resume_interrupted_jobs()
+        assert app_module.jobs[JOB]["transcribe_only"] is False
