@@ -84,3 +84,51 @@ class TestRobustness:
         assert main.TRANSCRIPT_CHECKPOINT.startswith(".")
         assert not main.TRANSCRIPT_CHECKPOINT.endswith("_metadata.json")
         assert not main.TRANSCRIPT_CHECKPOINT.endswith(".mp4")
+
+
+class TestPrecomputedTranscriptEncoding:
+    """The render half of the chat route hands main.py the transcript the
+    transcribe-only run wrote, via --transcript. That file is UTF-8, and it
+    was read with the platform default — cp1252 on Windows. One curly quote
+    in a Hinglish transcript (``”`` is E2 80 9D; 0x9D is undefined in cp1252)
+    raised, and main.py's fallback re-transcribed the whole video: 25 minutes
+    of GPU on a job whose transcript was sitting in the next folder.
+    """
+
+    TRANSCRIPT = {"language": "hinglish", "segments": [
+        {"start": 0.0, "end": 2.0,
+         "text": "Kapil ne kaha “aap kaise hain” — sab hans pade…",
+         "words": []}]}
+
+    def _write(self, tmp_path, *, bom=False, ensure_ascii=False):
+        path = tmp_path / "transcript.json"
+        text = json.dumps(self.TRANSCRIPT, ensure_ascii=ensure_ascii)
+        path.write_bytes((b"\xef\xbb\xbf" if bom else b"") + text.encode("utf-8"))
+        return str(path)
+
+    def test_a_utf8_transcript_with_curly_quotes_loads(self, tmp_path):
+        """Exactly the file manual_clips writes (utf-8, ensure_ascii=False)."""
+        t = main.load_precomputed_transcript(self._write(tmp_path))
+        assert "“aap kaise hain”" in t["segments"][0]["text"]
+
+    def test_the_byte_that_broke_it_really_is_undecodable_in_cp1252(self):
+        """Guards the premise: if this ever stops raising, the test above is
+        no longer testing the bug it was written for."""
+        with pytest.raises(UnicodeDecodeError):
+            "”".encode("utf-8").decode("cp1252")
+
+    def test_a_bom_is_tolerated(self, tmp_path):
+        """Notepad writes one when someone edits the file by hand."""
+        t = main.load_precomputed_transcript(self._write(tmp_path, bom=True))
+        assert t["language"] == "hinglish"
+
+    def test_an_empty_transcript_is_still_refused(self, tmp_path):
+        path = tmp_path / "empty.json"
+        path.write_text(json.dumps({"segments": []}), encoding="utf-8")
+        with pytest.raises(ValueError):
+            main.load_precomputed_transcript(str(path))
+
+    def test_the_checkpoint_round_trips_non_ascii(self, tmp_path):
+        _save(tmp_path, transcript=self.TRANSCRIPT)
+        got = _load(tmp_path)
+        assert got["segments"][0]["text"] == self.TRANSCRIPT["segments"][0]["text"]

@@ -1487,12 +1487,34 @@ def _checkpoint_source_key(input_video, duration):
     return {"name": os.path.basename(input_video), "duration": round(float(duration), 1)}
 
 
+def load_precomputed_transcript(path):
+    """A transcript handed over with --transcript, or raise.
+
+    Read as UTF-8 explicitly. Every writer of this file (manual_clips, the
+    dashboard's transcript import, the Thumbnail Studio handover) writes
+    UTF-8, and without the encoding Windows reads it as cp1252. One curly
+    quote in the text — ``”`` is E2 80 9D, and 0x9D does not exist in cp1252
+    — then raised, and the caller's fallback quietly re-transcribed the whole
+    video: 25 minutes of GPU on a render whose transcript was sitting right
+    there. ``utf-8-sig`` also tolerates a BOM, which Notepad adds.
+    """
+    with open(path, "r", encoding="utf-8-sig") as f:
+        transcript = json.load(f)
+    if not isinstance(transcript, dict) or not transcript.get("segments"):
+        raise ValueError("transcript has no segments")
+    return transcript
+
+
 def save_transcript_checkpoint(output_dir, transcript, input_video, duration):
     """Best effort: a failure here must never fail the job."""
     try:
         payload = {"source": _checkpoint_source_key(input_video, duration),
                    "transcript": transcript}
-        with open(os.path.join(output_dir, TRANSCRIPT_CHECKPOINT), "w") as f:
+        # Explicit on both ends so the pair cannot drift apart the way the
+        # --transcript reader did; json.dump's ASCII escaping keeps the file
+        # readable by anything, but the encoding is not left to the platform.
+        with open(os.path.join(output_dir, TRANSCRIPT_CHECKPOINT), "w",
+                  encoding="utf-8") as f:
             json.dump(payload, f)
     except Exception as e:
         print(f"⚠️ Could not save transcript checkpoint: {e}")
@@ -1507,7 +1529,7 @@ def load_transcript_checkpoint(output_dir, input_video, duration):
     if not os.path.isfile(path):
         return None
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8-sig") as f:
             payload = json.load(f)
         source = payload.get("source") or {}
         expected = _checkpoint_source_key(input_video, duration)
@@ -2039,10 +2061,7 @@ if __name__ == '__main__':
         # with the file falls back to transcribing normally rather than failing.
         if args.transcript:
             try:
-                with open(args.transcript, 'r') as f:
-                    transcript = json.load(f)
-                if not transcript.get('segments'):
-                    raise ValueError("transcript has no segments")
+                transcript = load_precomputed_transcript(args.transcript)
                 print(f"⏩ Reusing precomputed transcript "
                       f"({len(transcript['segments'])} segments) — skipping transcription.")
             except Exception as e:
