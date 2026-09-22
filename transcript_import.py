@@ -37,23 +37,52 @@ class TranscriptImportError(ValueError):
     """Unusable input. The message is shown to the user verbatim."""
 
 
-# ``0:14``, ``00:14``, ``1:02:33``, ``[00:14]``, ``(1:02:33)``, ``00:00:14.500``.
+# ``0:14``, ``00:14``, ``1:02:33``, ``[00:14]``, ``(1:02:33)``, ``00:00:14.500``,
+# and an editor's timecode, ``00:00:20:03`` (HH:MM:SS:frames), optionally as a
+# range, ``00:00:20:03 - 00:00:21:12``, which is what Premiere and Resolve
+# export. Before the frames and the range were understood, the parser stopped
+# at ``00:00:20`` and ``03 - 00:00:21:12`` became the first words of every
+# cue, so the burned captions read ``BAAT 01 -``.
 # Anchored at the start of a line: a timestamp in the middle of a sentence is
 # speech ("we did it at 3:30"), not a cue boundary, and treating it as one
 # splits a line in half.
+_STAMP = (r'(?:(?P<{p}h>\d{{1,2}}):)?(?P<{p}m>\d{{1,2}}):(?P<{p}s>\d{{2}})'
+          r'(?:[.,](?P<{p}frac>\d{{1,3}})|:(?P<{p}ff>\d{{2}}))?')
 _TS = re.compile(
     r'^[\s\[\(\-•]*'
-    r'(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?'
+    + _STAMP.format(p='a') +
+    r'(?:\s*(?:-->|[-–—]|to)\s*' + _STAMP.format(p='b') + r')?'
     r'[\s\]\)\-:]*'
 )
 
 
-def _seconds(h, m, s, frac):
+def _frame_rate(max_frame):
+    """The frame rate a timecode was written at, from the highest frame seen.
+
+    Timecode never says it. 25 is the broadcast rate of this pipeline's
+    sources (PAL: India, Europe); a frame number of 25 or more proves a
+    faster clock. Guessing wrong costs at most a few hundredths of a second,
+    far below a caption's line timing.
+    """
+    if max_frame >= 50:
+        return 60.0
+    if max_frame >= 30:
+        return 50.0
+    if max_frame >= 25:
+        return 30.0
+    return 25.0
+
+
+def _seconds(match, prefix, fps):
+    h, m, s = (match.group(prefix + k) for k in ("h", "m", "s"))
+    frac, ff = match.group(prefix + "frac"), match.group(prefix + "ff")
     total = int(m) * 60 + int(s)
     if h:
         total += int(h) * 3600
     if frac:
         total += float(f"0.{frac}")
+    if ff:
+        total += int(ff) / fps
     return float(total)
 
 
@@ -139,38 +168,44 @@ def parse_timestamped_text(text, language="en"):
     on ONE line (``0:14 so I said``), and the timestamp on its own line with
     the speech under it, which is what a plain copy out of the panel gives.
     A cue runs until the next timestamp, so nothing has to be guessed except
-    the last one.
+    the last one — unless the line gives a range, whose end is used as is
+    (the silence between two ranged cues is real, not part of either).
     """
-    cues = []
-    pending_start = None
-    pending_text = []
-
-    def flush(next_start=None):
-        if pending_start is None:
-            return
-        body = " ".join(part.strip() for part in pending_text if part.strip())
-        body = re.sub(r"\s+", " ", body).strip()
-        if not body:
-            return
-        end = next_start if next_start is not None else pending_start + DEFAULT_TAIL_SECONDS
-        if end <= pending_start:
-            end = pending_start + MIN_CUE_SECONDS
-        cues.append({"start": pending_start, "end": end, "text": body})
-
+    # Two passes: the frame rate comes from the highest frame number in the
+    # whole file, so no timestamp can be turned into seconds until all of
+    # them have been read.
+    blocks = []   # [match, [text lines]]
     for line in (text or "").splitlines():
         if not line.strip():
             continue
         match = _TS.match(line)
         if match:
-            start = _seconds(*match.groups())
-            flush(start)
-            pending_start = start
-            pending_text = [line[match.end():]]
-        elif pending_start is not None:
-            pending_text.append(line)
+            blocks.append([match, [line[match.end():]]])
+        elif blocks:
+            blocks[-1][1].append(line)
         # A line before the first timestamp is a header ("Transcript",
         # "English (auto-generated)") — dropped rather than dated to 0.
-    flush()
+
+    max_frame = max((int(m.group(p + "ff")) for m, _ in blocks
+                     for p in ("a", "b") if m.group(p + "ff")), default=0)
+    fps = _frame_rate(max_frame)
+
+    cues = []
+    for i, (match, lines) in enumerate(blocks):
+        body = " ".join(part.strip() for part in lines if part.strip())
+        body = re.sub(r"\s+", " ", body).strip()
+        if not body:
+            continue
+        start = _seconds(match, "a", fps)
+        if match.group("bm") is not None:
+            end = _seconds(match, "b", fps)
+        elif i + 1 < len(blocks):
+            end = _seconds(blocks[i + 1][0], "a", fps)
+        else:
+            end = start + DEFAULT_TAIL_SECONDS
+        if end <= start:
+            end = start + MIN_CUE_SECONDS
+        cues.append({"start": start, "end": end, "text": body})
 
     if not cues:
         raise TranscriptImportError(

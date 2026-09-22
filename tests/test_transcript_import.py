@@ -64,6 +64,33 @@ class TestTimestampedText:
         assert words[0]["start"] == 0.0
         assert words[-1]["end"] <= 10.0
 
+    def test_editor_timecode_range_leaves_no_numbers_in_the_text(self):
+        """Premiere/Resolve export: HH:MM:SS:FF - HH:MM:SS:FF above the line.
+        The frames and the range end used to become the first caption words."""
+        out = ti.parse_timestamped_text(
+            "00:00:20:03 - 00:00:21:12\nMain nahi.\n\n"
+            "00:00:21:12 - 00:00:23:13\nMain nahi aaunga.\n")
+        segs = out["segments"]
+        assert [s["text"] for s in segs] == ["Main nahi.", "Main nahi aaunga."]
+        assert segs[0]["start"] == pytest.approx(20 + 3 / 25)
+        assert segs[0]["end"] == pytest.approx(21 + 12 / 25)
+        assert all(not any(ch.isdigit() for ch in w["word"])
+                   for s in segs for w in s["words"])
+
+    def test_a_range_end_keeps_the_silence_after_the_cue(self):
+        out = ti.parse_timestamped_text(
+            "00:00:29:01 - 00:00:32:01\none\n00:00:32:22 - 00:00:33:21\ntwo")
+        assert out["segments"][0]["end"] == pytest.approx(32 + 1 / 25)
+
+    def test_a_frame_number_past_24_means_a_faster_clock(self):
+        out = ti.parse_timestamped_text("00:00:01:29 - 00:00:02:00\nx")
+        assert out["segments"][0]["start"] == pytest.approx(1 + 29 / 30)
+
+    def test_a_dash_before_speech_is_not_a_range(self):
+        out = ti.parse_timestamped_text("0:14 - so I said\n0:18 - and he left")
+        assert [s["text"] for s in out["segments"]] == ["so I said", "and he left"]
+        assert out["segments"][0]["end"] == 18.0
+
     def test_no_timestamps_says_so(self):
         with pytest.raises(ti.TranscriptImportError) as e:
             ti.parse_timestamped_text("just some prose with no times in it")
