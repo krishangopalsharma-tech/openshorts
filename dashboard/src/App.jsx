@@ -296,6 +296,13 @@ function App() {
     try { return localStorage.getItem('os_transcribe_job') || ''; } catch { return ''; }
   });
   const [brief, setBrief] = useState(null);   // { text, segments, min_clips, … }
+  // The imported transcript text the brief was built from (null: whisper, or
+  // unknown after a reload). Attaching a different transcript does not touch
+  // the brief on disk, so without this the panel kept offering the old one
+  // to copy as if it reflected what the user had just pasted.
+  const [briefTranscript, setBriefTranscript] = useState(null);
+  const briefStale = Boolean(
+    brief && importedTranscript && importedTranscript.text !== briefTranscript);
   const [briefBusy, setBriefBusy] = useState(false);
   const [briefCopied, setBriefCopied] = useState(false);
   // Controlled rather than a bare `open` prop: a brief arriving opens the
@@ -837,6 +844,7 @@ function App() {
 
   const forgetBrief = () => {
     setBrief(null);
+    setBriefTranscript(null);
     setTranscribeJob('');
     try { localStorage.removeItem('os_transcribe_job'); } catch { /* private mode */ }
   };
@@ -895,6 +903,7 @@ function App() {
       setDuplicateJob(null);
       if (transcribeOnly) {
         setBrief(null);
+        setBriefTranscript(importedTranscript?.text ?? null);
         setTranscribeJob(data.job_id);
         try { localStorage.setItem('os_transcribe_job', data.job_id); } catch { /* private mode */ }
       }
@@ -2402,7 +2411,9 @@ function App() {
                           disabled={!localVideoPath.trim() || localBusy}
                           className="btn-primary flex-1 min-w-[180px]"
                         >
-                          {localBusy ? <Loader2 size={15} className="animate-spin" /> : 'Transcribe for a chat'}
+                          {localBusy
+                            ? <Loader2 size={15} className="animate-spin" />
+                            : importedTranscript ? 'Build the brief from this transcript' : 'Transcribe for a chat'}
                         </button>
                         <button
                           type="button"
@@ -2419,10 +2430,27 @@ function App() {
                     {/* 2 — the brief. Served by its own endpoint: the /videos
                         mount refuses .txt, and widening that allowlist would
                         expose every text file under output/. */}
-                    <div className={`space-y-2 ${brief ? '' : 'opacity-45'}`}>
+                    <div className={`space-y-2 ${brief && !briefStale ? '' : 'opacity-45'}`}>
                       <p className="eyebrow">2 · Paste the brief into Claude or ChatGPT</p>
                       {briefBusy && <p className="text-[11px] text-muted">Reading the transcript…</p>}
-                      {brief ? (
+                      {briefStale ? (
+                        <div className="flex items-start gap-2">
+                          <p className="text-[11px] leading-relaxed text-muted">
+                            The brief from job {transcribeJob.slice(0, 8)} was built
+                            from an earlier transcript, not the one attached above.
+                            Click “Build the brief from this transcript” to replace it —
+                            nothing is transcribed, it takes a few seconds.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={forgetBrief}
+                            className="text-muted hover:text-ink2 shrink-0"
+                            aria-label="forget the old brief"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ) : brief ? (
                         <>
                           <pre className="max-h-28 overflow-auto rounded-input border border-rule2 bg-paper p-2.5 font-mono text-[11px] leading-relaxed text-muted whitespace-pre-wrap">
                             {brief.text.slice(0, 700)}
@@ -2456,8 +2484,9 @@ function App() {
                         </>
                       ) : !briefBusy && (
                         <p className="text-[11px] leading-relaxed text-muted">
-                          Appears here once the transcription finishes. About 25 minutes
-                          for a one-hour video — you can close this tab.
+                          {importedTranscript
+                            ? 'Appears here a few seconds after you build it — your transcript is used as is.'
+                            : 'Appears here once the transcription finishes. About 25 minutes for a one-hour video — you can close this tab.'}
                         </p>
                       )}
                     </div>
