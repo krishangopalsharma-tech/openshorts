@@ -252,6 +252,29 @@ def detect_content_ranges(video_path, video_duration):
     return ranges
 
 
+def fallback_ranges(scenes, strategies):
+    """When GEMINI_API_KEY is absent or returns nothing, treat GENERAL scenes as
+    0.75-wide content so explicit screencast mode still routes them to SCREENCAST.
+    """
+    out = []
+    for i, (start, end) in enumerate(scenes):
+        if i < len(strategies) and strategies[i] == "GENERAL":
+            s, e = start.get_seconds(), end.get_seconds()
+            if e - s >= MIN_OVERLAP_SECONDS:
+                out.append((s, e, "general", 0.75))
+    return out
+
+
+def screen_ranges(video_path, video_duration, scenes=None, strategies=None):
+    """Gemini content ranges when available, falling back to GENERAL scenes."""
+    if not ENABLED:
+        return []
+    ranges = detect_content_ranges(video_path, video_duration)
+    if not ranges and scenes and strategies:
+        ranges = fallback_ranges(scenes, strategies)
+    return ranges
+
+
 def detect_screencast_scenes(video_path, scenes, strategies, ranges, samples=6):
     """Route scenes that show wide on-screen content.
 

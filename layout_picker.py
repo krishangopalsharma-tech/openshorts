@@ -61,10 +61,12 @@ SAMPLE_FRAMES = int(os.environ.get("LAYOUT_SAMPLE_FRAMES", "12"))
 SAMPLE_WIDTH = int(os.environ.get("LAYOUT_SAMPLE_WIDTH", "1024"))
 
 # What each decision turns on. Keys match the layout names in the prompt.
+PER_SCENE_FLAGS = ["split_layout", "active_speaker"]
+
 DECISION_FLAGS = {
-    "none": [],
-    "screencast": ["screencast_layout"],
-    "split": ["split_layout", "active_speaker"],
+    "none": list(PER_SCENE_FLAGS),
+    "screencast": ["screencast_layout"] + PER_SCENE_FLAGS,
+    "split": list(PER_SCENE_FLAGS),
 }
 
 VALID = set(DECISION_FLAGS)

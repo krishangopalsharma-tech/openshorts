@@ -155,10 +155,11 @@ def general_filtergraph(out_w, out_h, content_h=None, orig_w=None, orig_h=None):
     if orig_w and orig_h:
         fg_h = max(fg_h, full_width_content_height(orig_w, orig_h, out_w))
     fg_h += fg_h % 2
+    bw, bh = max(2, (out_w // 4) - ((out_w // 4) % 2)), max(2, (out_h // 4) - ((out_h // 4) % 2))
     return (
         f"[0:v]split=2[bga][fga];"
-        f"[bga]scale=-2:{out_h},crop=w=min(iw\\,{out_w}):h={out_h},"
-        f"scale={out_w}:{out_h},gblur=sigma=12[bg];"
+        f"[bga]scale={bw}:{bh}:force_original_aspect_ratio=increase,"
+        f"crop={bw}:{bh},gblur=sigma=3,scale={out_w}:{out_h}[bg];"
         # Scale by HEIGHT, then trim any overflow to the output width. crop
         # centres by default, and min() makes it a no-op when the scaled source
         # is already narrower than the frame (portrait/square sources).
@@ -395,6 +396,10 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
               f"passing it through, no reframe")
     else:
         strategies = m.analyze_scenes_strategy(input_video, scenes)
+        if not content_ranges and screencast_layout.ENABLED:
+            dur = scene_boundaries[-1][1] / fps if scene_boundaries else 0.0
+            content_ranges = screencast_layout.screen_ranges(
+                input_video, dur, scenes, strategies)
 
     # SPLIT is an upgrade applied on top of the TRACK/GENERAL verdict, keyed by
     # the scene's START FRAME rather than its index: scene_frame_ranges() drops

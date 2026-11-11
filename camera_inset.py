@@ -94,9 +94,11 @@ def is_cornered(box, frame_w, frame_h, margin=CORNER_MARGIN):
 
 
 INSET_ASPECT = 16 / 9.0
+OVERLAY_FACE_WIDTHS = 3.0
+FACE_HEADROOM = 0.35
 
 
-def inset_box(box, frame_w, frame_h, padding=None):
+def inset_box(box, frame_w, frame_h, padding=None, is_face=False):
     """Estimated inset rectangle (x, y, w, h) around a detected subject.
 
     Grown from the corner the subject is anchored to, so the box hugs the same
@@ -110,9 +112,16 @@ def inset_box(box, frame_w, frame_h, padding=None):
     """
     padding = INSET_PADDING if padding is None else padding
     x, y, w, h = box
+    if is_face:
+        head_y = max(0.0, y - h * FACE_HEADROOM)
+        h = (y + h) - head_y
+        y = head_y
+        target_w = w * OVERLAY_FACE_WIDTHS
+        x = x - (target_w - w) / 2.0
+        w = target_w
     horizontal, vertical = nearest_corner(box, frame_w, frame_h)
 
-    new_w = min(frame_w, w * padding)
+    new_w = min(frame_w, w * (1.0 if is_face else padding))
     new_h = min(frame_h, max(h * padding, new_w / INSET_ASPECT))
 
     # Anchor: keep the edge the subject is already near, grow the other way.
@@ -137,7 +146,7 @@ def inset_box(box, frame_w, frame_h, padding=None):
         # Pin to the bottom edge: the inset is there, and the detection sits
         # somewhere inside it rather than at its top.
         new_y = frame_h - new_h
-        if (y + h) < frame_h * (1 - CORNER_MARGIN):
+        if (y + h) < frame_h * (1 - CORNER_MARGIN) or is_face or new_y > y:
             new_y = max(0, min(y - grow * 0.6, frame_h - new_h))
 
     return (int(round(new_x)), int(round(new_y)),
@@ -182,6 +191,7 @@ def detect(video_path, samples=10):
             # BlazeFace even at full resolution, while YOLO still finds the
             # person.
             faces = screencast_layout.detect_faces_full_res(frame)
+            is_face = bool(faces)
             if faces:
                 box = max(faces, key=lambda c: c['score'])['box']
             else:
@@ -190,7 +200,7 @@ def detect(video_path, samples=10):
                 continue
             if not is_cornered(box, frame_w, frame_h):
                 continue
-            boxes.append(inset_box(box, frame_w, frame_h))
+            boxes.append(inset_box(box, frame_w, frame_h, is_face=is_face))
     finally:
         cap.release()
 
