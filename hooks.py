@@ -24,6 +24,23 @@ FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSe
 FONT_DIR = "fonts"
 FONT_PATH = os.path.join(FONT_DIR, "NotoSerif-Bold.ttf")
 
+HOOK_FONTS = {
+    "montserrat": os.path.join(FONT_DIR, "Montserrat.ttf"),
+    "anton": os.path.join(FONT_DIR, "Anton-Regular.ttf"),
+    "serif": FONT_PATH,
+}
+
+
+def _resolve_font_path(font_key=None):
+    if font_key and font_key in HOOK_FONTS and os.path.exists(HOOK_FONTS[font_key]):
+        return HOOK_FONTS[font_key]
+    if os.path.exists(FONT_PATH):
+        return FONT_PATH
+    for candidate in HOOK_FONTS.values():
+        if os.path.exists(candidate):
+            return candidate
+    return FONT_PATH
+
 # Codepoint ranges NotoSerif has no glyphs for (would render as tofu boxes).
 _EMOJI_RE = re.compile(
     "["
@@ -205,20 +222,30 @@ HOOK_STYLES = {
 }
 
 
-def create_hook_image(text, target_width, output_image_path="hook_overlay.png", font_scale=1.0, style="classic"):
+def create_hook_image(text, target_width, output_image_path="hook_overlay.png", font_scale=1.0, style="classic", font_name=None):
     """
     Generates a hook overlay image using pixel-based wrapping.
     target_width: The max width the box should occupy (e.g. 85% of video)
-    style: one of HOOK_STYLES (classic/dark/yellow/red/outline/outline_yellow)
+    style: one of HOOK_STYLES (classic/dark/yellow/red/outline/outline_yellow) or 'pill'
     """
     download_font_if_needed()
 
-    look = HOOK_STYLES.get(style, HOOK_STYLES["classic"])
-    box_fill = look["box"]
-    text_fill = look["text"]
-    outline = look["outline"]
-    has_box = box_fill[3] > 0
-    draw_shadow = look["shadow"]
+    is_pill = style == "pill"
+    if is_pill:
+        box_fill = (255, 255, 255, 245)
+        text_fill = (18, 18, 20)
+        outline = None
+        has_box = False
+        draw_shadow = False
+        chosen_font_path = _resolve_font_path(font_name or "montserrat")
+    else:
+        look = HOOK_STYLES.get(style, HOOK_STYLES["classic"])
+        box_fill = look["box"]
+        text_fill = look["text"]
+        outline = look["outline"]
+        has_box = box_fill[3] > 0
+        draw_shadow = look["shadow"]
+        chosen_font_path = _resolve_font_path(font_name)
     
     # Configuration
     padding_x = 30 # Balanced padding
@@ -233,9 +260,9 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
     font_size = int(base_font_size * font_scale)
     
     try:
-        font = ImageFont.truetype(FONT_PATH, font_size)
+        font = ImageFont.truetype(chosen_font_path, font_size)
     except Exception as e:
-        print(f"⚠️ Warning: Could not load font {FONT_PATH}, using default. Error: {e}")
+        print(f"⚠️ Warning: Could not load font {chosen_font_path}, using default. Error: {e}")
         font = ImageFont.load_default()
 
     # Emoji handling: render with an emoji-capable font if one exists,
@@ -361,21 +388,63 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
         # Center X
         x = 20 + int(box_width - line_w) // 2
 
+        if is_pill:
+            pill_pad_x = max(14, int(font_size * 0.35))
+            pill_pad_y = max(8, int(font_size * 0.20))
+            pill_rect = [
+                (max(0, x - pill_pad_x), max(0, current_y - pill_pad_y)),
+                (min(canvas_w, int(x + line_w + pill_pad_x)), min(canvas_h, current_y + line_h + pill_pad_y)),
+            ]
+            pill_radius = max(10, (pill_rect[1][1] - pill_rect[0][1]) // 2)
+            draw_final.rounded_rectangle(pill_rect, radius=pill_radius, fill=box_fill)
+
         # Draw text in the style's color (emoji runs use the emoji font)
         _draw_mixed(img, draw_final, (x, current_y), line, font, emoji_font,
                     fill=text_fill, outline=outline)
 
         current_y += line_h + line_spacing
         
-    img.save(output_image_path)
+    if output_image_path:
+        img.save(output_image_path)
     return output_image_path, canvas_w, canvas_h
 
-def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="classic"):
+
+def _render_banner_image(text, video_width, video_height, position="top", font_scale=1.0, style="classic", font_name=None):
+    """Render an RGBA canvas of (video_width, video_height) with the hook banner positioned."""
+    import tempfile
+    target_box_width = int(video_width * 0.9)
+    fd, tmp_png = tempfile.mkstemp(prefix="hook_banner_", suffix=".png")
+    os.close(fd)
+    try:
+        _, box_w, box_h = create_hook_image(
+            text, target_box_width, tmp_png, font_scale=font_scale, style=style, font_name=font_name
+        )
+        card = Image.open(tmp_png).convert("RGBA")
+    finally:
+        if os.path.exists(tmp_png):
+            os.remove(tmp_png)
+
+    canvas = Image.new("RGBA", (video_width, video_height), (0, 0, 0, 0))
+    overlay_x = (video_width - box_w) // 2
+    if isinstance(position, (int, float)):
+        overlay_y = int(video_height * float(position)) - box_h // 2
+    elif position == "center":
+        overlay_y = (video_height - box_h) // 2
+    elif position == "bottom":
+        overlay_y = int(video_height * 0.70)
+    else:
+        overlay_y = int(video_height * 0.20)
+    overlay_y = max(0, min(video_height - box_h, overlay_y))
+    canvas.alpha_composite(card, (max(0, overlay_x), overlay_y))
+    return canvas
+
+
+def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="classic", font_name=None):
     """
     Overlays text hook onto video.
-    position: 'top', 'center', 'bottom'
+    position: 'top', 'center', 'bottom', 'auto', or float Y-fraction
     font_scale: float multiplier (1.0 = default)
-    style: hook look (see HOOK_STYLES)
+    style: hook look (see HOOK_STYLES or 'pill')
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video {video_path} not found")
@@ -407,12 +476,20 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
                      f"{_truncate_bytes(stem, 80)}.png")
     
     try:
-        img_path, box_w, box_h = create_hook_image(text, target_box_width, hook_filename, font_scale=font_scale, style=style)
+        img_path, box_w, box_h = create_hook_image(text, target_box_width, hook_filename, font_scale=font_scale, style=style, font_name=font_name)
         
         # 3. Calculate Overlay Position
         overlay_x = (video_width - box_w) // 2
         
-        if position == "center":
+        if position == "auto":
+            import hook_placement
+            faces = hook_placement.sample_faces(video_path, duration=duration or 5.0)
+            band_h = box_h / float(max(1, video_height))
+            y_frac = hook_placement.best_y(faces, band_height=band_h)
+            overlay_y = max(0, min(video_height - box_h, int(video_height * y_frac - box_h / 2.0)))
+        elif isinstance(position, (int, float)):
+            overlay_y = max(0, min(video_height - box_h, int(video_height * float(position) - box_h / 2.0)))
+        elif position == "center":
             overlay_y = (video_height - box_h) // 2
         elif position == "bottom":
              # Bottom 20% mark (approx)
