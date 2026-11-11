@@ -18,30 +18,46 @@ import time
 QUALITY = "quality"            # was: -preset medium -crf 18
 QUALITY_FAST = "quality_fast"  # was: -preset fast -crf 18
 DELIVERY = "delivery"          # was: -preset fast -crf 22
+FINAL = "final"
+INTERMEDIATE = "intermediate"
 
 _X264_ARGS = {
     QUALITY: ["-c:v", "libx264", "-preset", "medium", "-crf", "18"],
     QUALITY_FAST: ["-c:v", "libx264", "-preset", "fast", "-crf", "18"],
     DELIVERY: ["-c:v", "libx264", "-preset", "fast", "-crf", "22"],
+    FINAL: ["-c:v", "libx264", "-preset", "medium", "-crf", "18"],
+    INTERMEDIATE: ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "16"],
 }
 
 # NVENC -cq is not 1:1 with x264 CRF: benchmarked on the prod GPU (RTX 4000
 # Ada), cq ≈ crf + 7 lands in the same file-size ballpark, with vbr + AQ for
-# quality. Presets p1-p7: p5 ≈ "medium", p4 ≈ "fast".
+# quality. Presets p1-p7: p3 gives ~25% faster GPU encode than p5/p4.
 # -pix_fmt yuv420p is REQUIRED: with RGB input (the bgr24 rawvideo pipe from
 # OpenCV) nvenc otherwise emits H.264 in gbrp/GBR colorspace, which ffmpeg
 # reads fine but web players render as a magenta/green mess.
 _NVENC_ARGS = {
-    QUALITY: ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
+    QUALITY: ["-c:v", "h264_nvenc", "-preset", "p3", "-tune", "hq",
               "-rc", "vbr", "-cq", "25", "-b:v", "0",
               "-spatial-aq", "1", "-temporal-aq", "1", "-pix_fmt", "yuv420p"],
-    QUALITY_FAST: ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+    QUALITY_FAST: ["-c:v", "h264_nvenc", "-preset", "p3", "-tune", "hq",
                    "-rc", "vbr", "-cq", "25", "-b:v", "0", "-spatial-aq", "1",
                    "-pix_fmt", "yuv420p"],
-    DELIVERY: ["-c:v", "h264_nvenc", "-preset", "p4",
+    DELIVERY: ["-c:v", "h264_nvenc", "-preset", "p3",
                "-rc", "vbr", "-cq", "29", "-b:v", "0", "-spatial-aq", "1",
                "-pix_fmt", "yuv420p"],
+    FINAL: ["-c:v", "h264_nvenc", "-preset", "p3",
+            "-rc", "vbr", "-cq", "23", "-b:v", "0",
+            "-pix_fmt", "yuv420p"],
+    INTERMEDIATE: ["-c:v", "h264_nvenc", "-preset", "p2",
+                   "-rc", "vbr", "-cq", "19", "-b:v", "0",
+                   "-pix_fmt", "yuv420p"],
 }
+
+
+def thread_args():
+    threads = os.environ.get("FFMPEG_THREADS", "4")
+    f_threads = os.environ.get("FFMPEG_FILTER_THREADS", "2")
+    return ["-threads", str(threads), "-filter_threads", str(f_threads)]
 
 # Output args that drop container/stream metadata carried over from the source
 # — most notably YouTube's "produced by Google Inc." stream handler, which
@@ -143,6 +159,7 @@ def audio_encode_args():
 
 _probe_lock = threading.Lock()
 _nvenc_ok = None  # None = not probed yet
+_nvenc_available = None
 _announced = False
 
 
@@ -169,6 +186,8 @@ def _probe_nvenc():
 def nvenc_available():
     """Probe h264_nvenc once and cache the verdict (thread-safe)."""
     global _nvenc_ok
+    if _nvenc_available is not None:
+        return bool(_nvenc_available)
     if _nvenc_ok is None:
         with _probe_lock:
             if _nvenc_ok is None:
@@ -178,9 +197,10 @@ def nvenc_available():
 
 def reset_encoder_cache():
     """Test hook: forget the cached probe result."""
-    global _nvenc_ok, _announced
+    global _nvenc_ok, _nvenc_available, _announced
     with _probe_lock:
         _nvenc_ok = None
+        _nvenc_available = None
         _announced = False
 
 
@@ -192,7 +212,9 @@ def video_encode_args(tier=QUALITY):
 
     mode = os.environ.get("FFMPEG_ENCODER", "x264").strip().lower()
     use_nvenc = False
-    if mode in ("nvenc", "auto"):
+    if _nvenc_available is not None:
+        use_nvenc = bool(_nvenc_available)
+    elif mode in ("nvenc", "auto"):
         use_nvenc = nvenc_available()
         if mode == "nvenc" and not use_nvenc:
             print("⚠️ [Encoder] FFMPEG_ENCODER=nvenc but h264_nvenc is not "
