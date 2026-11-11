@@ -130,21 +130,24 @@ def load_manual_clips(path, transcript, duration):
                                             min_duration=min_secs, max_duration=max_secs)
 
         title = item.get("video_title_for_youtube_short") or item.get("title") or ""
-        hook = item.get("viral_hook_text") or item.get("hook") or title
+        pov_text = (item.get("pov_text") or item.get("caption") or "").strip()
+        hook = pov_text or item.get("viral_hook_text") or item.get("hook") or title
         desc = item.get("description") or title
-        shorts.append({
+        clip_entry = {
             "start": round(float(start), 3),
             "end": round(float(end), 3),
             "predicted_score": item.get("predicted_score", item.get("score", 0)),
             "video_title_for_youtube_short": title[:100],
             "viral_hook_text": hook,
+            "pov_text": pov_text or hook,
             "video_description_for_tiktok": item.get("video_description_for_tiktok") or desc,
             "video_description_for_instagram": item.get("video_description_for_instagram") or desc,
             "video_tags": item.get("video_tags") or item.get("tags") or "",
             # These came out of a chat window, not the in-pipeline picker.
             "picked_by": item.get("picked_by") or "claude",
-            "reason": item.get("reason", ""),
-        })
+            "reason": item.get("reason") or item.get("why_funny") or "",
+        }
+        shorts.append(clip_entry)
 
     if not shorts:
         raise ValueError(f"no usable clips in {path}")

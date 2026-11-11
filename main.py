@@ -2108,9 +2108,15 @@ if __name__ == '__main__':
             if transcript is None:
                 print("❌ No speech found — nothing to export for a chat app.")
                 sys.exit(1)
-            audience = audience_profiles.pick(transcript.get('language'))
-            out = manual_clips.write_ai_transcript(output_dir, transcript, duration,
-                                                   video_title, audience)
+            comedy_meta_raw = os.environ.get("COMEDY_METADATA", "").strip()
+            if comedy_meta_raw:
+                import comedy_studio
+                out = comedy_studio.write_comedy_prompt_files(
+                    output_dir, transcript, duration, json.loads(comedy_meta_raw))
+            else:
+                audience = audience_profiles.pick(transcript.get('language'))
+                out = manual_clips.write_ai_transcript(output_dir, transcript, duration,
+                                                       video_title, audience)
             print(f"📝 Paste into Claude/ChatGPT: {out}")
             sys.exit(0)
 
@@ -2171,8 +2177,9 @@ if __name__ == '__main__':
                     # ffmpeg cut — re-encoding for precision on strict seconds
                     cut_clip(input_video, clip_temp_path, start, end, i + 1)
 
+                    is_comedy_card = os.environ.get("COMEDY_CARD") == "1"
                     if (output_format != "horizontal"
-                            and os.environ.get("AUTO_CAPTIONS", "1").strip() != "0"
+                            and (os.environ.get("AUTO_CAPTIONS", "1").strip() != "0" or is_comedy_card)
                             and os.environ.get("TRIM_BURNED_SUBTITLES", "1").strip() != "0"):
                         try:
                             import burned_subtitles
@@ -2201,6 +2208,45 @@ if __name__ == '__main__':
                     # seam there, and /api/subtitle needs it again later.
                     import layout_ranges as _layouts
                     clip['layout_ranges'] = _layouts.read(clip_final_path)
+                    if success and is_comedy_card:
+                        # Optional captions burn into the video window first,
+                        # then the Twitter/X comedy card frames the clip.
+                        captioned = auto_caption_clip(
+                            deliver_path, transcript, start, end,
+                            split_ranges=_layouts.split_ranges(clip['layout_ranges']))
+                        target_for_card = captioned or deliver_path
+                        try:
+                            import comedy_card
+                            cfg = json.loads(os.environ.get("COMEDY_CARD_CONFIG") or "{}")
+                            pov_text = (
+                                clip.get("pov_text")
+                                or clip.get("viral_hook_text")
+                                or clip.get("video_title_for_youtube_short")
+                                or ""
+                            )
+                            comedy_card.apply_comedy_card(
+                                target_for_card,
+                                channel_name=cfg.get("channel_name", "Cheerful Videos"),
+                                handle=cfg.get("handle", "@Cheerfulvids"),
+                                pov_text=pov_text,
+                                verified=bool(cfg.get("verified", True)),
+                                avatar_path=cfg.get("avatar_path"),
+                            )
+                            if captioned and captioned != clip_final_path:
+                                os.replace(captioned, clip_final_path)
+                            deliver_path = clip_final_path
+                            clip["comedy_card"] = {
+                                "channel_name": cfg.get("channel_name", "Cheerful Videos"),
+                                "handle": cfg.get("handle", "@Cheerfulvids"),
+                                "pov_text": pov_text,
+                                "verified": bool(cfg.get("verified", True)),
+                            }
+                            print(f"   🐦 Applied Twitter/X comedy card: {pov_text!r}")
+                        except Exception as e:
+                            print(f"   ⚠️ Comedy card failed ({e})")
+                        print(f"   ✅ Clip {i+1} ready: {deliver_path}")
+                        print(f"CLIP_READY {i} {os.path.basename(deliver_path)}")
+                        return success
                     # The hook was written from the transcript alone. When the
                     # render put this clip's meaning on the screen, rewrite hook
                     # and title from three of its frames BEFORE burning them.
@@ -2244,7 +2290,7 @@ if __name__ == '__main__':
 
             # Persist per-clip render results added by the workers (auto_hook,
             # layout_ranges) so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c or 'hook_grounding' in c or 'layout_ranges' in c for c in shorts):
+            if any('auto_hook' in c or 'hook_grounding' in c or 'layout_ranges' in c or 'comedy_card' in c for c in shorts):
                 jsonfile.dump_atomic(metadata_file, clips_data, indent=2)
 
     # Clean up original if requested

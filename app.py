@@ -1230,6 +1230,7 @@ _RESUMABLE_ENV_KEYS = (
     "CLIP_TARGET_MIN", "CLIP_TARGET_MAX", "CLIP_MIN_SECONDS", "CLIP_MAX_SECONDS",
     "AUTO_LAYOUT", "SPLIT_LAYOUT", "SCREENCAST_LAYOUT", "SPEAKER_CUT",
     "PUNCH_IN", "SPEAKER_SIGNAL",
+    "COMEDY_CARD", "COMEDY_CARD_CONFIG", "COMEDY_METADATA",
 )
 
 
@@ -3219,6 +3220,24 @@ async def process_local_endpoint(request: Request):
     # for years — this endpoint never did, so a local job only worked when
     # the operator's own shell happened to export it.
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    if body.get("comedy_metadata") is not None:
+        import comedy_studio
+        try:
+            validated_meta = comedy_studio.validate_comedy_metadata(body.get("comedy_metadata"))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        env["COMEDY_METADATA"] = json.dumps(validated_meta)
+    if body.get("comedy_card"):
+        import comedy_studio
+        prof = comedy_studio.load_profile(OUTPUT_DIR)
+        override = body.get("comedy_card_config") or {}
+        if isinstance(override, dict):
+            for k in ("channel_name", "handle", "verified", "burn_subtitles"):
+                if k in override and override[k] is not None:
+                    prof[k] = override[k]
+        env["COMEDY_CARD"] = "1"
+        env["COMEDY_CARD_CONFIG"] = json.dumps(prof)
+        env["AUTO_CAPTIONS"] = "1" if prof.get("burn_subtitles") else "0"
     audience = str(body.get("audience") or "").strip().lower()
     if audience in ("in", "us"):
         env["AUDIENCE"] = audience
@@ -3311,13 +3330,14 @@ async def local_brief(job_id: str):
     # field is best-effort: a brief that exists must always be downloadable,
     # whatever shape the transcript beside it is in.
     info = {"segments": None, "language": None, "duration_seconds": None,
-            "min_clips": None, "max_clips": None}
+            "min_clips": None, "max_clips": None, "alignment": None}
     try:
         with open(os.path.join(job_dir, "transcript.json"), "r", encoding="utf-8") as f:
             transcript = json.load(f)
         segments = transcript.get("segments") or []
         info["segments"] = len(segments)
         info["language"] = transcript.get("language")
+        info["alignment"] = transcript.get("alignment")
         duration = max((float(s.get("end") or 0) for s in segments), default=0.0)
         info["duration_seconds"] = round(duration, 1) or None
         import manual_clips
@@ -3328,6 +3348,244 @@ async def local_brief(job_id: str):
 
     return {"job_id": job_id, "filename": "paste_into_chat.txt",
             "text": text, "bytes": len(text.encode("utf-8")), **info}
+
+
+@app.get("/api/comedy/profile")
+async def get_comedy_profile():
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    import comedy_studio
+    prof = comedy_studio.load_profile(OUTPUT_DIR)
+    return {
+        "channel_name": prof["channel_name"],
+        "handle": prof["handle"],
+        "verified": prof["verified"],
+        "burn_subtitles": prof["burn_subtitles"],
+        "has_avatar": prof["has_avatar"],
+        "avatar_url": "/api/comedy/avatar" if prof["has_avatar"] else None,
+    }
+
+
+@app.post("/api/comedy/profile")
+async def update_comedy_profile(request: Request):
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    body = await request.json() if await request.body() else {}
+    import comedy_studio
+    prof = comedy_studio.save_profile(OUTPUT_DIR, body)
+    return {
+        "channel_name": prof["channel_name"],
+        "handle": prof["handle"],
+        "verified": prof["verified"],
+        "burn_subtitles": prof["burn_subtitles"],
+        "has_avatar": prof["has_avatar"],
+        "avatar_url": "/api/comedy/avatar" if prof["has_avatar"] else None,
+    }
+
+
+@app.post("/api/comedy/avatar")
+async def upload_comedy_avatar(file: UploadFile = File(...)):
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    import comedy_studio
+    from PIL import Image
+    import io
+
+    raw = await file.read()
+    try:
+        im = Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image file: {e}")
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    avatar_path = os.path.join(OUTPUT_DIR, comedy_studio.COMEDY_AVATAR_FILE)
+    im.save(avatar_path, "PNG")
+    return {"has_avatar": True, "avatar_url": f"/api/comedy/avatar?t={int(time.time())}"}
+
+
+@app.get("/api/comedy/avatar")
+async def serve_comedy_avatar():
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    import comedy_studio
+    avatar_path = os.path.join(OUTPUT_DIR, comedy_studio.COMEDY_AVATAR_FILE)
+    if not os.path.isfile(avatar_path):
+        raise HTTPException(status_code=404, detail="No comedy avatar set")
+    with open(avatar_path, "rb") as f:
+        data = f.read()
+    return Response(content=data, media_type="image/png")
+
+
+@app.get("/api/comedy/preview-card")
+async def preview_comedy_card(
+    pov_text: str = "Zero survival instinct 😂",
+    channel_name: Optional[str] = None,
+    handle: Optional[str] = None,
+    verified: Optional[bool] = None,
+):
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    import comedy_card
+    import comedy_studio
+    import tempfile
+
+    prof = comedy_studio.load_profile(OUTPUT_DIR)
+    fd, tmp_png = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        comedy_card.render_card_overlay(
+            tmp_png,
+            channel_name=channel_name if channel_name is not None else prof["channel_name"],
+            handle=handle if handle is not None else prof["handle"],
+            pov_text=pov_text or "Zero survival instinct 😂",
+            verified=prof["verified"] if verified is None else bool(verified),
+            avatar_path=prof["avatar_path"],
+        )
+        with open(tmp_png, "rb") as f:
+            png_bytes = f.read()
+        return Response(content=png_bytes, media_type="image/png")
+    finally:
+        if os.path.exists(tmp_png):
+            try:
+                os.remove(tmp_png)
+            except OSError:
+                pass
+
+
+@app.post("/api/comedy/build-prompt")
+async def build_comedy_prompt_endpoint(request: Request):
+    """Verify/align transcript (or start Whisper transcription) and build the
+    Comedy discovery prompt, strictly gated by movie/series metadata."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    import comedy_studio
+    import manual_clips
+
+    body = await request.json() if await request.body() else {}
+    # 1. Hard Metadata Gate — must never build prompt if metadata is forgotten!
+    try:
+        validated_meta = comedy_studio.validate_comedy_metadata(body.get("metadata"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    video_path = str(body.get("video_path") or "").strip().strip('"')
+    if not video_path:
+        raise HTTPException(status_code=400, detail="video_path is required")
+    if not os.path.isfile(video_path):
+        raise HTTPException(status_code=400, detail=f"No video at that path: {video_path}")
+
+    duration = _media_duration_seconds(video_path) or 600.0
+    transcript_text = body.get("transcript_text")
+    subtitle_path = str(body.get("subtitle_path") or "").strip().strip('"')
+    manual_offset = body.get("manual_offset")
+    if manual_offset not in (None, ""):
+        try:
+            manual_offset = float(manual_offset)
+        except (TypeError, ValueError):
+            manual_offset = None
+    else:
+        manual_offset = None
+
+    raw_source = transcript_text or subtitle_path
+    if raw_source:
+        try:
+            aligned_transcript = await asyncio.to_thread(
+                comedy_studio.verify_and_align_transcript,
+                video_path,
+                raw_source,
+                duration,
+                manual_offset,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Transcript verification failed: {e}")
+
+        job_id = str(uuid.uuid4())
+        job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+        prompt_path = comedy_studio.write_comedy_prompt_files(
+            job_output_dir, aligned_transcript, duration, validated_meta
+        )
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            prompt_text = f.read()
+
+        segments = aligned_transcript.get("segments") or []
+        min_clips, max_clips = manual_clips.chat_clip_counts(aligned_transcript, duration)
+        jobs[job_id] = {
+            "status": "completed",
+            "logs": ["✅ Whisper audio verification & comedy prompt ready."],
+            "cmd": [],
+            "env": {},
+            "output_dir": job_output_dir,
+            "transcribe_only": True,
+            "source_path": video_path,
+            "result": {"clips": [], "transcribe_only": True},
+        }
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "filename": "paste_into_chat.txt",
+            "text": prompt_text,
+            "bytes": len(prompt_text.encode("utf-8")),
+            "segments": len(segments),
+            "language": aligned_transcript.get("language", "en"),
+            "duration_seconds": round(duration, 1),
+            "min_clips": min_clips,
+            "max_clips": max_clips,
+            "alignment": aligned_transcript.get("alignment"),
+            "metadata": validated_meta,
+        }
+
+    # No transcript attached -> delegate to full Whisper transcription job
+    job_id = str(uuid.uuid4())
+    job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(job_output_dir, exist_ok=True)
+    input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{os.path.basename(video_path)}")
+    try:
+        os.link(video_path, input_path)
+    except OSError:
+        input_path = video_path
+
+    cmd = [sys.executable, "-u", "main.py", "-i", input_path, "-o", job_output_dir, "--transcribe-only"]
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env["COMEDY_METADATA"] = json.dumps(validated_meta)
+    language = str(body.get("language") or "").strip().lower()
+    if language and language != "auto":
+        env["TRANSCRIBE_LANGUAGE"] = language
+
+    jobs[job_id] = {
+        "status": "queued",
+        "logs": [f"Comedy transcription job {job_id} queued."],
+        "cmd": cmd,
+        "env": env,
+        "output_dir": job_output_dir,
+        "transcribe_only": True,
+        "source_path": video_path,
+        "attestation": {"acknowledged": True, "ip": "local", "user_agent": "",
+                        "timestamp": time.time(), "source": "local_path"},
+        "user_id": None,
+        "reservation_id": None,
+        "watermark": False,
+        "webhook_url": None,
+        "webhook_secret": None,
+        "base_url": (os.environ.get("PUBLIC_API_URL", "").rstrip("/")
+                     or str(request.base_url).rstrip("/")),
+        "source_fp": source_history.fingerprint(
+            title=os.path.basename(video_path),
+            size_bytes=os.path.getsize(video_path),
+            duration_seconds=duration or None,
+        ),
+    }
+    _write_resume_manifest(job_id, cmd, 2, None, None, watermark=False,
+                           base_url=jobs[job_id]["base_url"],
+                           job_env={k: env[k] for k in _RESUMABLE_ENV_KEYS
+                                    if k in env and os.environ.get(k) != env[k]})
+    _enqueue_job(job_id, 2)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "transcribe_only": True,
+        "metadata": validated_meta,
+    }
 
 
 @app.post("/api/process")
