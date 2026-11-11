@@ -1,33 +1,4 @@
-"""SCREENCAST layout: full-width content on top, the speaker underneath.
-
-The fourth layout. It targets the failure this repo has now attacked three
-times: a screen recording that happens to contain a face gets classified TRACK,
-the 9:16 crop keeps a centre strip, and the chart or headline the shot is
-actually about comes out sliced mid-word.
-
-The two previous attempts tried to find that content in pixels and both failed
-(see the note above analyze_scenes_strategy in main.py): edge density and MSER
-text density BOTH score ordinary detailed footage higher than a clean panel of
-text, because they measure visual busyness rather than meaning. The third
-attempt asked Gemini and detected well, but decided badly: it flagged corner
-tickers and demoted well-framed talking heads to the blurred layout.
-
-What is different here is the question asked and what the answer is used for.
-
-  - The question is how much of the WIDTH the content spans, not how much of the
-    duration it covers. Coverage did not separate the cases (screencasts ran
-    88-97% of the video, a corner-ticker clip 2%, but the failure was on the
-    ticker anyway). Width is the quantity that actually decides whether a 9:16
-    crop destroys information: a corner bug spans ~15% of the frame and survives
-    any crop, a spreadsheet spans ~100% and cannot.
-  - The answer routes to THIS layout, not to GENERAL. The old wiring's worst
-    case was shrinking a subject into blurred filler to preserve a corner
-    counter. Here the worst case is showing the content full width above the
-    speaker, which is a reasonable frame even when the trigger was wrong.
-
-Off by default (``SCREENCAST_LAYOUT=1``). Needs GEMINI_API_KEY; without one it
-is a silent no-op, like every other optional Gemini path here.
-"""
+"""SCREENCAST layout: full-width content on top, the speaker underneath."""
 import json
 import os
 import time
@@ -36,36 +7,38 @@ import numpy as np
 
 ENABLED = os.environ.get("SCREENCAST_LAYOUT", "0") == "1"
 
-# Fraction of the frame width the content must span. A corner ticker, logo or
-# channel bug sits far below this; a screen recording, slide or spreadsheet sits
-# near 1.0. This is the axis the previous attempt did not ask about.
 MIN_WIDTH_FRACTION = 0.5
-
-# Above this the content fills the frame, so any presenter is composited ON TOP
-# of it rather than sitting beside it. Stacking then shows the same content
-# twice: measured on an Excel walkthrough where the speaker is keyed into the
-# corner, the bottom band came out as a zoomed crop of the same spreadsheet.
-# Those scenes get the full-width GENERAL layout instead, which is the fix they
-# actually needed — the default GENERAL ratio crops ~24% off the sides, and on a
-# spreadsheet the discarded columns are the point.
 STACK_MAX_WIDTH_FRACTION = 0.85
-
-# Seconds of overlap before a scene counts as showing the content.
 MIN_OVERLAP_SECONDS = 0.25
-
-# The speaker crop below the content needs a face of at least this width
-# (fraction of frame width). Smaller than this and the bottom half is mostly
-# desktop with a stamp-sized webcam in it, which is worse than GENERAL.
 MIN_FACE_WIDTH = 0.05
+
+# Content columns beside the presenter (non-duplicating crop)
+MIN_CONTENT_SIDE = 0.3
+PERSON_GAP = 0.02
+MAX_CONTENT_BAND = 0.55
+
+# Standing presenter in a filmed room (whiteboard/TV) guard
+FILMED_PERSON_HEIGHT = 0.6
+PERSON_BOX_SHARE = 0.4
+BODY_FACE_WIDTHS = 3.0
+
+FOCUS_MAX_WIDTH = 0.9
+FOCUS_PADDING = 0.04
+FOCUS_MAX_HEIGHT_RATIO = 0.6
+
+WIDE_CONTENT_HEIGHT_RATIO = float(
+    os.environ.get("WIDE_CONTENT_HEIGHT_RATIO", "0.41"))
+WIDE_MAX_ZOOM = 1.4
+WIDE_MIN_ZOOM = 1.05
+WIDE_ACTION_MIN_GAIN = 0.1
+WIDE_ACTION_TIE = 0.005
+WIDE_ACTION_SAMPLES = 8
+WIDE_ACTION_WIDTH = 160
+WIDE_ACTION_NOISE = 16
 
 
 def content_bands(orig_w, orig_h, out_w, out_h):
-    """(content_height, speaker_height) for the stacked screencast frame.
-
-    The content keeps its full width, which is the entire point of this layout,
-    so its height follows from the source aspect: a 16:9 source gives 608px of a
-    1920px frame. The speaker takes the rest.
-    """
+    """(content_height, speaker_height) for the stacked screencast frame."""
     content_h = int(round(out_w * orig_h / float(orig_w)))
     content_h -= content_h % 2
     content_h = max(2, min(content_h, out_h - 2))
@@ -95,15 +68,51 @@ def speaker_crop(orig_w, orig_h, out_w, speaker_h, face_centre):
     return crop_w, crop_h, x - (x % 2), y - (y % 2)
 
 
-def screencast_filtergraph(orig_w, orig_h, out_w, out_h, face_centre):
-    """Full-width content above, face-framed speaker below."""
+def content_side(frame_w, person_left, person_right):
+    """(x, w) of the columns beside the presenter, or None when there are none."""
+    gap = frame_w * PERSON_GAP
+    centre = (person_left + person_right) / 2.0
+    if centre >= frame_w / 2.0:
+        x, w = 0, int(person_left - gap)
+    else:
+        x = int(person_right + gap)
+        w = frame_w - x
+    if w < frame_w * MIN_CONTENT_SIDE:
+        return None
+    x += x % 2
+    w -= w % 2
+    return x, w
+
+
+def screencast_filtergraph(orig_w, orig_h, out_w, out_h, face_centre, content=None):
+    """Full-width (or content_side) content above, face-framed speaker below."""
+    if content is not None:
+        from ffmpeg_utils import blurred_backdrop
+
+        cx_, cw_ = content
+        max_h = int(out_h * MAX_CONTENT_BAND)
+        scale = min(out_w / float(cw_), max_h / float(orig_h))
+        sw = min(out_w, int(round(cw_ * scale)))
+        sh = min(max_h, int(round(orig_h * scale)))
+        sw -= sw % 2
+        sh -= sh % 2
+        speaker_h = out_h - sh
+        cw, ch, cx, cy = speaker_crop(orig_w, orig_h, out_w, speaker_h, face_centre)
+
+        return (
+            f"[0:v]split=3[bga][ca][sa];"
+            f"[bga]{blurred_backdrop(out_w, out_h, 14)}[bg];"
+            f"[ca]crop=w={cw_}:h={orig_h}:x={cx_}:y=0,scale={sw}:{sh}[content];"
+            f"[sa]crop=w={cw}:h={ch}:x={cx}:y={cy},scale={out_w}:{speaker_h}[speaker];"
+            f"[bg][content]overlay=x={(out_w - sw) // 2}:y=0[top];"
+            f"[top][speaker]overlay=x=0:y={sh},setsar=1[v]"
+        )
+
     content_h, speaker_h = content_bands(orig_w, orig_h, out_w, out_h)
     cw, ch, cx, cy = speaker_crop(orig_w, orig_h, out_w, speaker_h, face_centre)
 
     return (
         f"[0:v]split=2[ca][sa];"
-        # The content band is the WHOLE frame scaled down. Nothing is cropped
-        # off the sides, which is the one thing this layout exists to guarantee.
         f"[ca]scale={out_w}:{content_h}[content];"
         f"[sa]crop=w={cw}:h={ch}:x={cx}:y={cy},scale={out_w}:{speaker_h}[speaker];"
         f"[content][speaker]vstack=inputs=2,"
@@ -112,16 +121,7 @@ def screencast_filtergraph(orig_w, orig_h, out_w, out_h, face_centre):
 
 
 def detect_faces_full_res(frame):
-    """Face boxes from the UNSCALED frame, in original coordinates.
-
-    main.detect_face_candidates() runs detection on a 640px copy, which is the
-    right trade for a talking head whose face spans a third of the frame. A
-    presenter inset into a screen recording does not survive it: measured on a
-    1920x1080 Excel walkthrough, the presenter's ~110px face becomes ~37px at
-    640 and BlazeFace returned zero detections on every sample. At full width
-    the same frames detect fine. Six samples per scene, so the cost is paid on
-    screencast candidates only.
-    """
+    """Face boxes from the UNSCALED frame, in original coordinates."""
     import cv2
     import main as m
 
@@ -150,26 +150,35 @@ def _face_centre(candidates, frame_w):
     return box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
 
 
-def overlapping_width(scene_start, scene_end, ranges):
-    """Widest content the scene overlaps, as a fraction of frame width.
-
-    0.0 when the scene overlaps nothing, which leaves its routing untouched.
-    """
-    widest = 0.0
+def overlapping_range(scene_start, scene_end, ranges):
+    """(width_fraction, focus) of the widest range the scene overlaps."""
+    widest, focus = 0.0, None
     for r in ranges:
         start, end = r[0], r[1]
         width = r[3] if len(r) > 3 else 1.0
         if min(scene_end, end) - max(scene_start, start) > MIN_OVERLAP_SECONDS:
-            widest = max(widest, width)
-    return widest
+            if width > widest:
+                widest = width
+                focus = r[4] if len(r) > 4 else None
+    return widest, focus
+
+
+def overlapping_width(scene_start, scene_end, ranges):
+    """Widest content the scene overlaps, as a fraction of frame width."""
+    return overlapping_range(scene_start, scene_end, ranges)[0]
+
+
+def presenter_cam(scene_start, scene_end, ranges):
+    """Whether the shot check saw a live webcam window over this scene's screen."""
+    for r in ranges:
+        if len(r) > 5 and r[5] and \
+                min(scene_end, r[1]) - max(scene_start, r[0]) > MIN_OVERLAP_SECONDS:
+            return True
+    return False
 
 
 def detect_content_ranges(video_path, video_duration):
-    """Time ranges where on-screen content spans most of the frame width.
-
-    Returns (start, end, what, width_fraction) tuples, or [] on any failure:
-    a missing answer must degrade to today's routing rather than break the job.
-    """
+    """Time ranges where on-screen content spans most of the frame width."""
     if not ENABLED:
         return []
     api_key = os.getenv("GEMINI_API_KEY")
@@ -182,12 +191,6 @@ def detect_content_ranges(video_path, video_duration):
 
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print("🔎 Checking for full-width on-screen content…")
-    # This is the ONE stage that sends the whole video file to Google rather
-    # than a handful of frames, so it is also the one that leaves a copy of a
-    # user's source on someone else's servers. The Files API keeps an upload for
-    # 48 h unless it is deleted; the finally block below deletes it as soon as
-    # the answer is back, which is what makes "we do not leave your video with
-    # the model provider" a true sentence in the privacy policy.
     client = None
     file_upload = None
     try:
@@ -219,9 +222,6 @@ def detect_content_ranges(video_path, video_duration):
         print(f"   ⚠️ On-screen check failed ({e}) — keeping face-only routing.")
         return []
     finally:
-        # Every exit path, including the two early returns above and the failure
-        # branch: a video left behind because the call raised is exactly the
-        # copy nobody would ever notice.
         if client is not None and file_upload is not None:
             try:
                 client.files.delete(name=file_upload.name)
@@ -237,8 +237,6 @@ def detect_content_ranges(video_path, video_duration):
             width = float(r.get("width_fraction", 0))
         except (TypeError, ValueError):
             continue
-        # The width gate is the whole point: everything narrower survives a 9:16
-        # crop and must not move a single scene.
         if e - s >= 0.5 and width >= MIN_WIDTH_FRACTION:
             ranges.append((s, e, str(r.get("what", ""))[:40], width))
     ranges.sort()
@@ -252,14 +250,17 @@ def detect_content_ranges(video_path, video_duration):
     return ranges
 
 
-def fallback_ranges(scenes, strategies):
+def fallback_ranges(scenes, strategies, fps=None):
     """When GEMINI_API_KEY is absent or returns nothing, treat GENERAL scenes as
-    0.75-wide content so explicit screencast mode still routes them to SCREENCAST.
+    0.75-wide content so explicit screencast mode still routes them to SCREENCAST/WIDE.
     """
     out = []
     for i, (start, end) in enumerate(scenes):
         if i < len(strategies) and strategies[i] == "GENERAL":
-            s, e = start.get_seconds(), end.get_seconds()
+            if hasattr(start, "get_seconds"):
+                s, e = start.get_seconds(), end.get_seconds()
+            else:
+                s, e = start.get_frames() / float(fps or 30.0), end.get_frames() / float(fps or 30.0)
             if e - s >= MIN_OVERLAP_SECONDS:
                 out.append((s, e, "general", 0.75))
     return out
@@ -275,21 +276,143 @@ def screen_ranges(video_path, video_duration, scenes=None, strategies=None):
     return ranges
 
 
+def focus_crop(orig_w, orig_h, out_w, out_h, focus):
+    """(x, w) of the source columns to show for a screen shot, or None."""
+    if not focus:
+        return None
+    left = max(0.0, focus[0] - FOCUS_PADDING)
+    right = min(1.0, focus[1] + FOCUS_PADDING)
+    if right <= left or right - left >= FOCUS_MAX_WIDTH:
+        return None
+    min_w = out_w * orig_h / (FOCUS_MAX_HEIGHT_RATIO * out_h)
+    crop_w = min(orig_w, int(round(max((right - left) * orig_w, min_w))))
+    crop_w -= crop_w % 2
+    if crop_w >= orig_w * FOCUS_MAX_WIDTH:
+        return None
+    x = int(round((left + right) / 2.0 * orig_w - crop_w / 2.0))
+    x = max(0, min(x, orig_w - crop_w))
+    return x - (x % 2), crop_w
+
+
+def crop_content_height(orig_h, out_w, out_h, crop_w):
+    """Height (even) that ``crop_w`` source columns fill at the output width."""
+    fg_h = min(out_h, int(round(out_w * orig_h / float(crop_w))))
+    return fg_h - fg_h % 2
+
+
+def content_band(out_h, fg_h):
+    """(top, bottom) of a vertically centred foreground, as frame fractions."""
+    top = (out_h - fg_h) / 2.0 / out_h
+    return round(top, 3), round(1.0 - top, 3)
+
+
+def focus_filtergraph(orig_w, orig_h, out_w, out_h, crop):
+    """A screen shot cut down to its reading area, over a blurred backdrop."""
+    from ffmpeg_utils import blurred_backdrop
+
+    x, w = crop
+    fg_h = crop_content_height(orig_h, out_w, out_h, w)
+    return (
+        f"[0:v]split=2[bga][fga];"
+        f"[bga]{blurred_backdrop(out_w, out_h, 12)}[bg];"
+        f"[fga]crop=w={w}:h={orig_h}:x={x}:y=0,scale={out_w}:{fg_h}[fg];"
+        f"[bg][fg]overlay=x=0:y=(H-h)/2,setsar=1[v]"
+    )
+
+
+def wide_crop(orig_w, orig_h, out_w, out_h, centre=0.5):
+    """(x, w) of the source columns a WIDE scene shows, or None for full width."""
+    full_h = out_w * orig_h / float(orig_w)
+    zoom = min(WIDE_MAX_ZOOM, WIDE_CONTENT_HEIGHT_RATIO * out_h / full_h)
+    if zoom < WIDE_MIN_ZOOM:
+        return None
+    w = int(round(orig_w / zoom))
+    w -= w % 2
+    x = int(round(centre * orig_w - w / 2.0))
+    x = max(0, min(x, orig_w - w))
+    return x - (x % 2), w
+
+
+def action_window_centre(profile, frac):
+    """Centre (fraction of width) of the window of width ``frac`` holding the most motion."""
+    profile = np.asarray(profile, dtype=np.float64)
+    n = len(profile)
+    total = float(profile.sum())
+    if n == 0 or total <= 0 or frac >= 1.0:
+        return None
+    win = max(1, min(n, int(round(frac * n))))
+    sums = np.convolve(profile, np.ones(win), mode="valid") / total
+    centred = (n - win) // 2
+    best = float(sums.max())
+    if best - float(sums[centred]) < WIDE_ACTION_MIN_GAIN:
+        return None
+    near = np.flatnonzero(sums >= best - WIDE_ACTION_TIE)
+    start = int(near[np.argmin(np.abs(near - centred))])
+    return (start + win / 2.0) / n
+
+
+def wide_action_centre(video_path, start_f, end_f, frac,
+                       samples=WIDE_ACTION_SAMPLES):
+    """Where the action is in a WIDE scene, for wide_crop's ``centre``."""
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    try:
+        if not cap.isOpened():
+            return None
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        gap = max(1, int(round(fps * 0.1)))
+        last = end_f - 1 - gap
+        if total:
+            last = min(last, total - 1 - gap)
+        if last < start_f:
+            return None
+        profile = None
+        for f_idx in np.linspace(start_f, last, samples):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(f_idx)))
+            ok, a = cap.read()
+            for _ in range(gap - 1):
+                ok = ok and cap.grab()
+            ok2, b = cap.read() if ok else (False, None)
+            if not (ok and ok2):
+                continue
+            h = max(1, int(round(a.shape[0] * WIDE_ACTION_WIDTH / a.shape[1])))
+            ga = cv2.cvtColor(cv2.resize(a, (WIDE_ACTION_WIDTH, h)), cv2.COLOR_BGR2GRAY)
+            gb = cv2.cvtColor(cv2.resize(b, (WIDE_ACTION_WIDTH, h)), cv2.COLOR_BGR2GRAY)
+            diff = cv2.absdiff(ga, gb) > WIDE_ACTION_NOISE
+            col = diff.sum(axis=0).astype(np.float64)
+            profile = col if profile is None else profile + col
+        if profile is None:
+            return None
+        return action_window_centre(profile, frac)
+    finally:
+        cap.release()
+
+
+def _filmed_person(cap, m, s_f, last_f, samples=3):
+    """True when most samples show a person standing in the shot at full size."""
+    import cv2
+
+    frame_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
+    if not frame_h:
+        return False
+    hits = 0
+    for f_idx in np.linspace(s_f, last_f, samples):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(f_idx)))
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        person = m.detect_person_yolo(frame)
+        if person and person[3] / PERSON_BOX_SHARE >= FILMED_PERSON_HEIGHT * frame_h:
+            hits += 1
+    return hits * 2 > samples
+
+
 def detect_screencast_scenes(video_path, scenes, strategies, ranges, samples=6):
-    """Route scenes that show wide on-screen content.
-
-    Returns ``{scene_index: ('SCREENCAST', centre) | ('WIDE', None)}``:
-
-      - SCREENCAST stacks the content over the presenter, for content that
-        leaves room beside itself (width below STACK_MAX_WIDTH_FRACTION) and
-        where a presenter is actually found.
-      - WIDE is the blurred layout with side-cropping disabled, for content that
-        fills the frame, or that has no presenter to stack.
-    """
+    """Route scenes that show wide on-screen content."""
     if not ENABLED or not ranges:
         return {}
-    # Below the gate on purpose: main pulls torch/mediapipe, and the disabled
-    # path (the default, and what CI exercises) must not pay that import.
     import cv2
     import main as m
 
@@ -305,14 +428,8 @@ def detect_screencast_scenes(video_path, scenes, strategies, ranges, samples=6):
     try:
         for i, (start, end) in enumerate(scenes):
             s_f, e_f = start.get_frames(), end.get_frames()
-            width = overlapping_width(s_f / fps, e_f / fps, ranges)
+            width, focus = overlapping_range(s_f / fps, e_f / fps, ranges)
             if not width:
-                continue
-
-            # Content that fills the frame has the presenter on top of it, so
-            # there is nothing to stack — just stop cropping the sides.
-            if width > STACK_MAX_WIDTH_FRACTION:
-                found[i] = ('WIDE', None)
                 continue
 
             last_f = e_f - 1
@@ -321,37 +438,47 @@ def detect_screencast_scenes(video_path, scenes, strategies, ranges, samples=6):
             if last_f < s_f:
                 continue
 
-            centres = []
+            if _filmed_person(cap, m, s_f, last_f):
+                continue
+
+            if width > STACK_MAX_WIDTH_FRACTION:
+                found[i] = ('WIDE', focus)
+                continue
+
+            centres, extents = [], []
             for f_idx in np.linspace(s_f, last_f, samples):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(f_idx)))
                 ok, frame = cap.read()
                 if not ok:
                     continue
-                centre = _face_centre(detect_faces_full_res(frame), frame_w)
-                if centre is None:
-                    # A presenter keyed into the corner of a screen recording is
-                    # often too small for BlazeFace even at full resolution
-                    # (measured: zero detections across an Excel walkthrough
-                    # where the person is plainly visible). YOLO finds the body
-                    # in the same frames, and a body centre frames the speaker
-                    # just as well for this layout.
-                    person = m.detect_person_yolo(frame)
-                    if person:
-                        centre = (person[0] + person[2] / 2.0,
-                                  person[1] + person[3] / 2.0)
-                if centre:
-                    centres.append(centre)
+                faces = detect_faces_full_res(frame)
+                centre = _face_centre(faces, frame_w)
+                person = m.detect_person_yolo(frame)
+                if centre is None and person:
+                    centre = (person[0] + person[2] / 2.0,
+                              person[1] + person[3] / 2.0)
+                if not centre:
+                    continue
+                centres.append(centre)
+                if person:
+                    extents.append((person[0], person[0] + person[2]))
+                else:
+                    face_w = max(c['box'][2] for c in faces)
+                    half = face_w * BODY_FACE_WIDTHS / 2.0
+                    extents.append((centre[0] - half, centre[0] + half))
 
-            # Half the samples: a webcam inset is static and easy to find, so a
-            # weaker signal than this means there is no presenter to stack, and
-            # the content still deserves its full width.
             if len(centres) < samples / 2.0:
-                found[i] = ('WIDE', None)
+                found[i] = ('WIDE', focus)
                 continue
 
+            content = content_side(
+                frame_w, float(np.median([e[0] for e in extents])),
+                float(np.median([e[1] for e in extents])))
+            if content is None:
+                continue
             found[i] = ('SCREENCAST',
-                        (float(np.median([c[0] for c in centres])),
-                         float(np.median([c[1] for c in centres]))))
+                        ((float(np.median([c[0] for c in centres])),
+                          float(np.median([c[1] for c in centres]))), content))
     finally:
         cap.release()
 

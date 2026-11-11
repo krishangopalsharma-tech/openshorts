@@ -228,6 +228,16 @@ def video_encode_args(tier=QUALITY):
     return list((_NVENC_ARGS if use_nvenc else _X264_ARGS)[tier])
 
 
+def blurred_backdrop(out_w, out_h, sigma=12):
+    """Filter chain (no labels) filling out_w x out_h with a 1/4-res blurred copy."""
+    bw = max(2, (out_w // 4) - ((out_w // 4) % 2))
+    bh = max(2, (out_h // 4) - ((out_h // 4) % 2))
+    return (
+        f"scale={bw}:{bh}:force_original_aspect_ratio=increase,"
+        f"crop={bw}:{bh},gblur=sigma={sigma / 4:g},scale={out_w}:{out_h}"
+    )
+
+
 def escape_filter_value(value):
     r"""Escape a path/value for use inside a quoted FFmpeg filter argument.
 

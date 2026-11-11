@@ -439,7 +439,7 @@ def _render_banner_image(text, video_width, video_height, position="top", font_s
     return canvas
 
 
-def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="classic", font_name=None):
+def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="classic", font_name=None, layout_ranges=None):
     """
     Overlays text hook onto video.
     position: 'top', 'center', 'bottom', 'auto', or float Y-fraction
@@ -485,7 +485,9 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
             import hook_placement
             faces = hook_placement.sample_faces(video_path, duration=duration or 5.0)
             band_h = box_h / float(max(1, video_height))
-            y_frac = hook_placement.best_y(faces, band_height=band_h)
+            forbidden = hook_placement.forbidden_bands(
+                layout_ranges, duration=duration or 5.0, band_height=band_h)
+            y_frac = hook_placement.best_y(faces, band_height=band_h, forbidden=forbidden)
             overlay_y = max(0, min(video_height - box_h, int(video_height * y_frac - box_h / 2.0)))
         elif isinstance(position, (int, float)):
             overlay_y = max(0, min(video_height - box_h, int(video_height * float(position) - box_h / 2.0)))

@@ -255,6 +255,7 @@ function App() {
   // one from a previous browser. /api/status falls back to reading the job
   // dir, so nothing has to be in memory for this to work.
   const [openJobId, setOpenJobId] = useState('');
+  const [mediaInputKey, setMediaInputKey] = useState(0);
   // Render a file that is already on this machine, optionally with picks
   // already made in a chat. Self-host only; the endpoint 404s in cloud mode.
   const [localVideoPath, setLocalVideoPath] = useState('');
@@ -278,6 +279,12 @@ function App() {
   // quietly ignore it is what let a Hindi episode transcribe as English.
   const [localLanguage, setLocalLanguage] = useState(() => {
     try { return localStorage.getItem('os_language') || 'auto'; } catch { return 'auto'; }
+  });
+  const [localLayout, setLocalLayout] = useState(() => {
+    try { return localStorage.getItem('os_local_layout') || 'auto'; } catch { return 'auto'; }
+  });
+  const [localPunchIn, setLocalPunchIn] = useState(() => {
+    try { return localStorage.getItem('os_local_punch_in') === '1'; } catch { return false; }
   });
   const [showTranscriptPaste, setShowTranscriptPaste] = useState(false);
   const [pastedTranscriptText, setPastedTranscriptText] = useState('');
@@ -874,6 +881,9 @@ function App() {
           // file — a real Hindi episode came back as 1148 segments of
           // English, which is a transcript of a video nobody uploaded.
           language: localLanguage !== 'auto' ? localLanguage : undefined,
+          layouts: transcribeOnly
+            ? undefined
+            : [localLayout, ...(localPunchIn ? ['punch_in'] : [])],
           transcribe_only: transcribeOnly || undefined,
           clips_json: transcribeOnly ? undefined : (clipsText || null),
           // An imported transcript wins over an earlier job's: the user just
@@ -1396,7 +1406,48 @@ function App() {
     setProjectState(null);
     setNoSource(false);
     setPartialJob(null);
-    localStorage.removeItem(SESSION_KEY);
+    setDurableClips({});
+    setQualityGate(null);
+    setEditingClip(null);
+    setReframingClip(null);
+    setSyncedTime(0);
+    setIsSyncedPlaying(false);
+    setBulkSub({ running: false, current: 0, total: 0, errors: 0 });
+    setBulkLook({ running: false, current: 0, total: 0, errors: 0 });
+    setBulkMusic({ running: false, current: 0, total: 0, errors: 0 });
+    setBulkOverlays({ running: false, current: 0, total: 0, errors: 0 });
+
+    // Local file & chat flow inputs (selected clips, transcript, prompt/brief, json)
+    setLocalVideoPath('');
+    setLocalError(null);
+    setLocalBusy(false);
+    setBrowse(false);
+    setImportedTranscript(null);
+    setTranscriptError('');
+    setShowTranscriptPaste(false);
+    setPastedTranscriptText('');
+    setClipsFileName('');
+    setClipsText('');
+    setTranscribeJob('');
+    setBrief(null);
+    setBriefTranscript(null);
+    setBriefBusy(false);
+    setBriefCopied(false);
+    setLocalPanelOpen(false);
+    setDuplicateJob(null);
+    setOpenJobId('');
+    setOpenJobError(null);
+    setOpeningJob(false);
+
+    // Reset MediaInput component to default fresh state
+    setMediaInputKey((k) => k + 1);
+
+    // Navigate to dashboard tab
+    setActiveTab('dashboard');
+
+    try { localStorage.removeItem(SESSION_KEY); } catch { /* private mode */ }
+    try { localStorage.removeItem('os_transcribe_job'); } catch { /* private mode */ }
+    try { localStorage.removeItem('os_pending_url'); } catch { /* private mode */ }
   };
 
   // --- UI Components ---
@@ -1647,16 +1698,15 @@ function App() {
             <span data-tutorial="nav-clips" className="md:hidden font-display lowercase text-base text-ink truncate">
               {activeNav?.label || 'openshorts'}
             </span>
-            {status !== 'idle' && (
-              <button
-                onClick={handleReset}
-                className="btn-quiet px-3 py-1.5 text-xs shrink-0"
-                aria-label="New Project"
-              >
-                <Plus size={14} />
-                <span className="hidden sm:inline">New Project</span>
-              </button>
-            )}
+            <button
+              onClick={handleReset}
+              className="btn-quiet px-3 py-1.5 text-xs shrink-0"
+              aria-label="New Project"
+              title="Start a new project"
+            >
+              <Plus size={14} />
+              <span className="hidden sm:inline">New Project</span>
+            </button>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-4 shrink-0">
@@ -2196,7 +2246,7 @@ function App() {
                   )}
                 </div>
 
-                <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                <MediaInput key={mediaInputKey} onProcess={handleProcess} isProcessing={status === 'processing'} />
 
                 {/* Clips made outside this browser — a CLI run (the chat
                     route), or a job started before the tab was closed — are
@@ -2218,6 +2268,19 @@ function App() {
                     Use a file on this computer, or pick the clips in a chat
                   </summary>
                   <form onSubmit={startLocalJob} className="mt-2.5 space-y-4">
+                    {(localVideoPath || clipsText || importedTranscript || pastedTranscriptText || brief) && (
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={handleReset}
+                          className="text-[11px] text-muted hover:text-ink2 flex items-center gap-1 transition-colors"
+                          aria-label="Clear local project form"
+                        >
+                          <RotateCcw size={11} />
+                          <span>Clear form / New project</span>
+                        </button>
+                      </div>
+                    )}
 
                     {/* 1 — the video. A browser file input reports a name and
                         never a path, so the only way to name a multi-GB file
@@ -2332,6 +2395,40 @@ function App() {
                           through a file. Name the language for those.
                         </p>
                       )}
+
+                      {/* Vertical layout & beat punch-in for local / chat-picked clips */}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[12px] text-ink2">vertical layout</span>
+                        <select
+                          value={localLayout}
+                          onChange={(e) => {
+                            setLocalLayout(e.target.value);
+                            try { localStorage.setItem('os_local_layout', e.target.value); }
+                            catch { /* private mode */ }
+                          }}
+                          className="input-field !w-auto text-xs py-1.5"
+                          aria-label="vertical layout"
+                        >
+                          <option value="auto">Auto (face track + two-person split screen)</option>
+                          <option value="split">Two people: split screen (stacked)</option>
+                          <option value="speaker_cut">Two people: cut to active speaker</option>
+                          <option value="screencast">Screen / slides over presenter</option>
+                          <option value="none">Single crop only (1 person track)</option>
+                        </select>
+                      </div>
+                      <label className="flex items-center justify-between gap-2 text-[12px] text-ink2 cursor-pointer">
+                        <span>punch-in zoom on audio beats</span>
+                        <input
+                          type="checkbox"
+                          checked={localPunchIn}
+                          onChange={(e) => {
+                            setLocalPunchIn(e.target.checked);
+                            try { localStorage.setItem('os_local_punch_in', e.target.checked ? '1' : '0'); }
+                            catch { /* private mode */ }
+                          }}
+                          className="accent-[var(--color-accent)]"
+                        />
+                      </label>
 
                       {/* Optional: a transcript they already have. YouTube
                           hands one out for most videos, and transcribing the

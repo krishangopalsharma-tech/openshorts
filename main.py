@@ -561,6 +561,8 @@ def analyze_scenes_strategy(video_path, scenes):
     Analyzes each scene to determine if it should be TRACK (Single person) or GENERAL (Group/Wide).
     Returns list of strategies corresponding to scenes.
     """
+    import frame_sampler
+
     cap = cv2.VideoCapture(video_path)
     strategies = []
 
@@ -569,7 +571,10 @@ def analyze_scenes_strategy(video_path, scenes):
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
-    for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
+    # Every scene's samples first, then one forward pass over the clip
+    # (frame_sampler): same frames, same detector calls in the same order.
+    plan = []
+    for si, (start, end) in enumerate(scenes):
         s_f, e_f = start.get_frames(), end.get_frames()
         # Sample 5 frames spread across the scene, clamped inside it (the old
         # start+5/end-5 samples landed outside scenes shorter than ~10 frames).
@@ -577,12 +582,15 @@ def analyze_scenes_strategy(video_path, scenes):
         frames_to_check = sorted(set(
             int(round(f)) for f in np.linspace(s_f + margin, e_f - 1 - margin, 5)
         ))
+        plan.extend((si, f_idx) for f_idx in frames_to_check)
 
-        face_counts = []
-        for f_idx in frames_to_check:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ret, frame = cap.read()
-            if not ret: continue
+    counts_per_scene = [[] for _ in scenes]
+    try:
+        frames = frame_sampler.read_at_path(video_path, cap, [f_idx for _si, f_idx in plan])
+        for (si, _f_idx), frame in tqdm(zip(plan, frames), total=len(plan),
+                                        desc="   Analyzing Scenes"):
+            if frame is None:
+                continue
 
             # Near-black frames (fades, cut-to-black) carry no faces and used
             # to drag single-person scenes into GENERAL. Skip them.
@@ -591,8 +599,11 @@ def analyze_scenes_strategy(video_path, scenes):
 
             # Detect faces
             candidates = detect_face_candidates(frame)
-            face_counts.append(len(candidates))
+            counts_per_scene[si].append(len(candidates))
+    finally:
+        cap.release()
 
+    for face_counts in counts_per_scene:
         # Decision Logic
         if not face_counts:
             avg_faces = 0
@@ -608,8 +619,6 @@ def analyze_scenes_strategy(video_path, scenes):
             strategies.append('GENERAL')
         else:
             strategies.append('TRACK')
-
-    cap.release()
 
     # Hysteresis: a short scene whose two neighbors agree on the opposite
     # strategy is almost always a sampling miss (profile face, insert shot).
@@ -1151,22 +1160,24 @@ def auto_hook_clip(clip_path, clip):
     text = (clip.get('viral_hook_text') or '').strip()
     if not text:
         return None
-    style = os.environ.get("AUTO_HOOK_STYLE", "classic")
+    style = os.environ.get("AUTO_HOOK_STYLE", "pill")
+    position = os.environ.get("AUTO_HOOK_POSITION", "auto")
     try:
         seconds = float(os.environ.get("AUTO_HOOK_SECONDS", "5"))
     except ValueError:
         seconds = 5.0
     try:
         from hooks import add_hook_to_video, HOOK_STYLES
-        if style not in HOOK_STYLES:
-            style = "classic"
+        if style not in HOOK_STYLES and style != "pill":
+            style = "pill"
         output_dir = os.path.dirname(clip_path)
         out_path = os.path.join(
             output_dir, f"hooked_{int(time.time())}_{os.path.basename(clip_path)}")
-        add_hook_to_video(clip_path, text, out_path, position="top",
-                          duration=seconds, style=style)
-        print(f"   🪝 Hook burned ({style}, {seconds:g}s): {text}")
-        return out_path, {"text": text, "style": style, "position": "top",
+        add_hook_to_video(clip_path, text, out_path, position=position,
+                          duration=seconds, style=style,
+                          layout_ranges=clip.get('layout_ranges'))
+        print(f"   🪝 Hook burned ({style}, {position}, {seconds:g}s): {text}")
+        return out_path, {"text": text, "style": style, "position": position,
                           "duration_seconds": seconds}
     except Exception as e:
         print(f"   ⚠️ Auto-hook failed ({type(e).__name__}: {e}) — "
@@ -2014,7 +2025,7 @@ if __name__ == '__main__':
     # instead of one per clip, and the answer is a property of the material
     # ("this is a screencast"), which does not change between its own clips.
     # It runs before any render so the modules are switched on in time.
-    if layout_picker.ENABLED:
+    if layout_picker.ENABLED and not args.transcribe_only:
         try:
             _cap = cv2.VideoCapture(input_video)
             _fps = _cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -2028,6 +2039,10 @@ if __name__ == '__main__':
             # anyway costs a Gemini call per upload to be ignored.
             if _w and _h and source_already_fits(_w, _h, ASPECT_RATIO):
                 print(f"   ↕️  Source is {_w}x{_h} — already vertical, no layout to pick.")
+            elif args.clips:
+                touched = layout_picker.apply("none")
+                if touched:
+                    print(f"   ✅ Enabled per-scene layouts: {', '.join(touched)}")
             else:
                 layout_picker.pick_and_apply(input_video, _duration)
         except Exception as e:
@@ -2134,9 +2149,9 @@ if __name__ == '__main__':
             # --keep-original) or in uploads/ (upload jobs).
             clips_data['source_video'] = os.path.basename(input_video)
             clips_data['output_format'] = output_format
+            import jsonfile
             metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
-            with open(metadata_file, 'w') as f:
-                json.dump(clips_data, f, indent=2)
+            jsonfile.dump_atomic(metadata_file, clips_data, indent=2)
             print(f"   Saved metadata to {metadata_file}")
 
             # 5. Process clips in parallel: each worker cuts + renders one
@@ -2155,6 +2170,16 @@ if __name__ == '__main__':
                 try:
                     # ffmpeg cut — re-encoding for precision on strict seconds
                     cut_clip(input_video, clip_temp_path, start, end, i + 1)
+
+                    if (output_format != "horizontal"
+                            and os.environ.get("AUTO_CAPTIONS", "1").strip() != "0"
+                            and os.environ.get("TRIM_BURNED_SUBTITLES", "1").strip() != "0"):
+                        try:
+                            import burned_subtitles
+                            if burned_subtitles.crop_clip(clip_temp_path):
+                                print("   ✂️ Trimmed burned-in source subtitles before reframe")
+                        except Exception as e:
+                            print(f"   ⚠️ Burned-in subtitle check skipped ({e})")
 
                     success = render_clip(clip_temp_path, clip_final_path, output_format)
                     # Cinematic grade/glow/grain/vignette/gradients/letterbox
@@ -2217,11 +2242,10 @@ if __name__ == '__main__':
                     except Exception as e:
                         print(f"   ❌ Clip {i+1} failed: {type(e).__name__}: {e}")
 
-            # Persist per-clip render results added by the workers (auto_hook)
-            # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c or 'hook_grounding' in c for c in shorts):
-                with open(metadata_file, 'w') as f:
-                    json.dump(clips_data, f, indent=2)
+            # Persist per-clip render results added by the workers (auto_hook,
+            # layout_ranges) so the editor can see what is already burned into each clip.
+            if any('auto_hook' in c or 'hook_grounding' in c or 'layout_ranges' in c for c in shorts):
+                jsonfile.dump_atomic(metadata_file, clips_data, indent=2)
 
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):

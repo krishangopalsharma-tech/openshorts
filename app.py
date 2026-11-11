@@ -2684,10 +2684,11 @@ LAYOUT_ENV = {
     "punch_in": "PUNCH_IN",           # small push on the clip's beats
 }
 
-# Stacking and cutting both need to know who is speaking.
+# Stacking and cutting both need to know who is speaking, and speaker_cut
+# needs split_layout's two-person scene detector to find the pair of speakers.
 LAYOUT_IMPLIES = {
     "split": ["SPEAKER_SIGNAL"],
-    "speaker_cut": ["SPEAKER_SIGNAL"],
+    "speaker_cut": ["SPEAKER_SIGNAL", "SPLIT_LAYOUT"],
 }
 
 
@@ -3224,6 +3225,18 @@ async def process_local_endpoint(request: Request):
     language = str(body.get("language") or "").strip().lower()
     if language and language != "auto":
         env["TRANSCRIBE_LANGUAGE"] = language
+    if not transcribe_only:
+        raw_layouts = body.get("layouts")
+        if isinstance(raw_layouts, str):
+            requested_layouts = [s for s in raw_layouts.split(",") if s.strip()]
+        elif isinstance(raw_layouts, list):
+            requested_layouts = raw_layouts
+        else:
+            requested_layouts = ["auto"]
+        chosen_layouts = layout_env(requested_layouts)
+        if chosen_layouts:
+            env.update(chosen_layouts)
+            print(f"   📐 [Local Layouts] {chosen_layouts}")
 
     jobs[job_id] = {
         'status': 'queued',

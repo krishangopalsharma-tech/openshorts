@@ -20,6 +20,49 @@ def _overlap_1d(a0, a1, b0, b1):
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
+def forbidden_bands(ranges=None, duration=5.0, band_height=0.08):
+    """Caption and WIDE content bands to avoid during the hook window [0, duration]."""
+    window_end = float(duration or 5.0)
+    bands = set()
+    covered = 0.0
+    content = []
+    for r in ranges or []:
+        try:
+            s = max(0.0, float(r["start"]))
+            e = min(window_end, float(r["end"]))
+            layout = str(r.get("layout", "")).lower()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if e <= s:
+            continue
+        covered += e - s
+        bands.add(SEAM_BAND if layout == "split" else CAPTION_BAND)
+        if "content" in r and isinstance(r["content"], (list, tuple)) and len(r["content"]) == 2:
+            try:
+                ct, cb = float(r["content"][0]), float(r["content"][1])
+                if 0.0 <= ct < cb <= 1.0:
+                    content.append((ct, cb))
+            except (TypeError, ValueError):
+                pass
+    if covered < window_end - 1e-3 or not bands:
+        bands.add(CAPTION_BAND)
+    base = sorted(bands)
+    if content:
+        with_content = sorted(set(base) | set(content))
+        # Only enforce WIDE content bands if at least one candidate spot still fits
+        half = band_height / 2.0
+        y = MIN_Y + half
+        fits = False
+        while y <= MAX_Y - half + 1e-6:
+            if not any(_overlap_1d(y - half, y + half, f0, f1) > 0 for f0, f1 in with_content):
+                fits = True
+                break
+            y += STEP
+        if fits:
+            return with_content
+    return base
+
+
 def best_y(faces, band_height, forbidden=None):
     """Pick the Y-centre in [MIN_Y, MAX_Y] minimizing face overlap while avoiding forbidden bands."""
     forbidden = list(forbidden or [CAPTION_BAND])
@@ -49,6 +92,7 @@ def sample_faces(video_path, duration=5.0, samples=6):
     """Sample normalized (xmin, ymin, w, h) face boxes over the hook window."""
     try:
         import cv2
+        import frame_sampler
         import main as m
     except Exception:
         return []
@@ -58,13 +102,11 @@ def sample_faces(video_path, duration=5.0, samples=6):
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
     end_f = min(total, max(1, int(float(duration or 5.0) * fps)))
+    indices = sorted({int(i * end_f / max(1, samples)) for i in range(samples)})
     faces = []
     try:
-        for i in range(samples):
-            f_idx = int(i * end_f / max(1, samples))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ok, frame = cap.read()
-            if not ok:
+        for frame in frame_sampler.read_at(cap, indices):
+            if frame is None:
                 continue
             h, w = frame.shape[:2]
             if not w or not h:
