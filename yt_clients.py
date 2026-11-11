@@ -62,6 +62,9 @@ def youtube_non_video_reason(url):
         return "a search results page, not a video"
     if first == "playlist":
         return "a playlist, not a video; open one video in it and paste that link"
+    qs = parse_qs(parts.query or "")
+    if "list" in qs and "v" not in qs:
+        return "a playlist, not a video; open one video in it and paste that link"
     if first.startswith("@") or first in ("channel", "c", "user"):
         return "a channel page, not a video"
     if first in ("feed", "", "gaming", "music"):

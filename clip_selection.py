@@ -259,3 +259,38 @@ def snap_clip_to_words(start, end, words, video_duration,
     if new_end <= new_start or new_end - new_start < min_duration:
         return original
     return (round(new_start, 3), round(new_end, 3))
+
+
+MAX_OVERLAP_RATIO = 0.25
+
+
+def dedupe_overlapping(clips, max_overlap=MAX_OVERLAP_RATIO):
+    """Keep higher-scored clips first, dropping any candidate that overlaps an
+    already-kept clip by >= 25% of the shorter clip's duration.
+    """
+    kept = []
+    for clip in clips or []:
+        s, e = float(clip.get("start", 0)), float(clip.get("end", 0))
+        dur = max(0.001, e - s)
+        conflict = False
+        for k in kept:
+            ks, ke = float(k.get("start", 0)), float(k.get("end", 0))
+            inter = max(0.0, min(e, ke) - max(s, ks))
+            if inter / min(dur, max(0.001, ke - ks)) >= max_overlap:
+                conflict = True
+                break
+        if not conflict:
+            kept.append(clip)
+    return kept
+
+
+def vision_segments(total_duration, max_segment_seconds=2400.0):
+    """Split a long silent video into near-equal stretches of at most 40 minutes."""
+    import math
+    total = float(total_duration or 0.0)
+    if total <= 0:
+        return []
+    n = max(1, int(math.ceil(total / float(max_segment_seconds))))
+    step = total / n
+    return [(round(i * step, 2), round((i + 1) * step, 2)) for i in range(n)]
+
