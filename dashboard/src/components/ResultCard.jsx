@@ -45,6 +45,9 @@ const FORMAT_LABELS = { vertical: '9:16', square: '1:1', horizontal: '16:9' };
 const GRADE_LABELS = {
     warm: 'Warm', cool: 'Cool', teal_orange: 'Teal & Orange',
     vintage: 'Vintage', vibrant: 'Vibrant', bw: 'Black & White',
+    washed: 'Washed', cold: 'Cold', classic_remaster: 'Classic TV',
+    film_print: 'Film print', studio_pop: 'Studio pop', hdr_punch: 'HDR punch',
+    moody_cinema: 'Moody cinema',
 };
 
 // Tailwind classes for the preview column per output format. Written out in
@@ -809,7 +812,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
     const gradeLabel = clip.cinematic?.color_grade && clip.cinematic.color_grade !== 'none'
         ? (GRADE_LABELS[clip.cinematic.color_grade] || clip.cinematic.color_grade)
-        : null;
+        : (clip.cinematic?.lut && clip.cinematic.lut !== 'none')
+            ? `LUT ${clip.cinematic.lut}`
+            : (clip.cinematic?.sharpen && clip.cinematic.sharpen !== 'none')
+                ? 'Sharpened'
+                : null;
 
     return (
         <div className="card overflow-hidden flex flex-col md:flex-row group hover:border-rule2 transition-colors animate-fade md:min-h-[420px]" style={{ animationDelay: `${index * 0.1}s` }}>

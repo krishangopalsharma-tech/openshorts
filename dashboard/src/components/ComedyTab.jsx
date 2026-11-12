@@ -19,6 +19,7 @@ import {
 import LocalFileBrowser from './LocalFileBrowser';
 import { thumbUrl } from '../lib/localBrowser';
 import { apiFetch } from '../lib/api';
+import { FALLBACK_LOOK_OPTIONS, fetchLookOptions } from '../lib/lookOptions';
 import { getApiUrl } from '../config';
 
 const parsePastedClips = (raw) => {
@@ -72,6 +73,22 @@ export default function ComedyTab({ onJobStarted }) {
   const [punchIn, setPunchIn] = useState(
     () => localStorage.getItem('os_comedy_punch_in') === '1'
   );
+  // Grade / sharpening / LUT for the video inside the card. main.py applies
+  // it right after the reframe and before the card is composited, so the
+  // white post frame and the text stay ungraded.
+  const [look, setLook] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('os_comedy_look') || '{}');
+      return {
+        color_grade: saved.color_grade || 'none',
+        sharpen: saved.sharpen || 'none',
+        lut: saved.lut || 'none',
+      };
+    } catch {
+      return { color_grade: 'none', sharpen: 'none', lut: 'none' };
+    }
+  });
+  const [lookOptions, setLookOptions] = useState(FALLBACK_LOOK_OPTIONS);
   const [transcriptFile, setTranscriptFile] = useState(null); // { name, text }
   const [pastedTranscript, setPastedTranscript] = useState('');
   const [showPasteTranscript, setShowPasteTranscript] = useState(false);
@@ -380,6 +397,9 @@ export default function ComedyTab({ onJobStarted }) {
           verified,
           burn_subtitles: burnSubtitles,
         },
+        ...(look.color_grade !== 'none' || look.sharpen !== 'none' || look.lut !== 'none'
+          ? { cinematic: { ...look } }
+          : {}),
         comedy_metadata: {
           content_type: contentType,
           title: title.trim(),
@@ -416,6 +436,22 @@ export default function ComedyTab({ onJobStarted }) {
       setError(err.message);
     } finally {
       setRenderBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    let alive = true;
+    fetchLookOptions().then((o) => { if (alive) setLookOptions(o); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const updateLook = (key, value) => {
+    const next = { ...look, [key]: value };
+    setLook(next);
+    try {
+      localStorage.setItem('os_comedy_look', JSON.stringify(next));
+    } catch {
+      /* ignore */
     }
   };
 
@@ -1048,6 +1084,54 @@ export default function ComedyTab({ onJobStarted }) {
                   className="accent-[var(--color-accent)]"
                 />
               </label>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <label className="flex flex-col gap-1 text-[11px] text-muted">
+                  color grade
+                  <select
+                    value={look.color_grade}
+                    onChange={(e) => updateLook('color_grade', e.target.value)}
+                    className="input-field text-xs py-1.5"
+                    aria-label="comedy clip color grade"
+                  >
+                    {lookOptions.grades.map((g) => (
+                      <option key={g.value} value={g.value}>{g.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] text-muted">
+                  sharpening
+                  <select
+                    value={look.sharpen}
+                    onChange={(e) => updateLook('sharpen', e.target.value)}
+                    className="input-field text-xs py-1.5"
+                    aria-label="comedy clip sharpening"
+                  >
+                    {lookOptions.sharpen.map((g) => (
+                      <option key={g.value} value={g.value}>{g.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] text-muted">
+                  LUT
+                  <select
+                    value={look.lut}
+                    onChange={(e) => updateLook('lut', e.target.value)}
+                    className="input-field text-xs py-1.5"
+                    aria-label="comedy clip LUT"
+                    disabled={lookOptions.luts.length === 0 && look.lut === 'none'}
+                    title={lookOptions.luts.length === 0 ? 'Drop .cube files into assets/luts/' : undefined}
+                  >
+                    <option value="none">{lookOptions.luts.length ? 'No LUT' : 'No LUTs in assets/luts'}</option>
+                    {look.lut !== 'none' && !lookOptions.luts.includes(look.lut) && (
+                      <option value={look.lut}>{look.lut} (missing)</option>
+                    )}
+                    {lookOptions.luts.map((name) => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
 
               {error && (
                 <div className="rounded-input border border-bad/50 bg-paper3 px-3 py-2 text-xs text-bad flex items-center gap-2">

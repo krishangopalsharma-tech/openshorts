@@ -3252,6 +3252,12 @@ async def process_local_endpoint(request: Request):
         env["COMEDY_CARD"] = "1"
         env["COMEDY_CARD_CONFIG"] = json.dumps(prof)
         env["AUTO_CAPTIONS"] = "1" if prof.get("burn_subtitles") else "0"
+    # Grade / sharpening / LUT, same keys as /api/process's cinematic_effects.
+    # main.py burns it right after the reframe, under the comedy card.
+    if isinstance(body.get("cinematic"), dict):
+        local_fx = cinematic.normalize(body["cinematic"])
+        if not cinematic.is_noop(local_fx):
+            env["CINEMATIC_EFFECTS"] = json.dumps(local_fx)
     audience = str(body.get("audience") or "").strip().lower()
     if audience in ("in", "us"):
         env["AUDIENCE"] = audience
@@ -6404,6 +6410,15 @@ async def get_caption_styles():
         "position_grid": caption_styles.POSITION_GRID,
         "fonts": caption_styles.list_fonts(),
     }
+
+
+@app.get("/api/look-options")
+async def get_look_options():
+    """Color grades, sharpening levels and the .cube LUTs in assets/luts/ that
+    the format & look modal offers. One source for the names, so the
+    dashboard cannot offer a grade the server would normalize to "none".
+    No auth, like /api/caption-styles: only names are listed."""
+    return cinematic.options_for_api()
 
 
 @app.get("/api/fonts")

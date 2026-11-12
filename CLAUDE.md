@@ -51,7 +51,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
-| `cinematic.py` | Cinematic look (grade/glow/grain/vignette/gradients/letterbox): one ffmpeg pass, applied per clip after generation (`/api/clip/look`) or at render for API callers |
+| `cinematic.py` | Cinematic look (grade/sharpen/LUT/glow/grain/vignette/gradients/letterbox): one ffmpeg pass, applied per clip after generation (`/api/clip/look`) or at render for API callers. Order: denoise → LUT → grade → sharpen (CAS) → glow → grain. `.cube` LUTs live in `assets/luts/` and only listed names are accepted. `GET /api/look-options` is the dashboard's list |
 | `caption_styles.py` | Caption looks: 23 presets (19 ported from ClipForge, `film_pop` for the film modules), 5 theme bundles, the override schema and the bundled font registry (`fonts/`) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |

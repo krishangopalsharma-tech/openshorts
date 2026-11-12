@@ -2,13 +2,15 @@ import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
+import { FALLBACK_LOOK_OPTIONS, fetchLookOptions } from '../lib/lookOptions';
 
 /**
  * Per-clip output format + cinematic look. Clips render plain 9:16 with no
  * look at all; this is where the user picks both, for one clip or for every
  * clip of the job. Only what changed travels: `outputFormat` when it differs
- * from the clip's current format, `cinematic` when any of its six keys
- * differs from the clip's current look.
+ * from the clip's current format, `cinematic` when any of its keys differs
+ * from the clip's current look. Grades, sharpening levels and LUTs come from
+ * GET /api/look-options.
  */
 
 // Not exported: the react-refresh lint rule wants component files to export
@@ -19,15 +21,6 @@ const FORMAT_OPTIONS = [
     { value: 'horizontal', label: '16:9', hint: 'Keep landscape · YouTube' },
 ];
 
-const GRADE_OPTIONS = [
-    { value: 'none', label: 'No grade' },
-    { value: 'warm', label: 'Warm' },
-    { value: 'cool', label: 'Cool' },
-    { value: 'teal_orange', label: 'Teal & Orange' },
-    { value: 'vintage', label: 'Vintage' },
-    { value: 'vibrant', label: 'Vibrant' },
-    { value: 'bw', label: 'Black & White' },
-];
 
 const TOGGLES = [
     { key: 'glow', label: 'glow' },
@@ -37,11 +30,13 @@ const TOGGLES = [
     { key: 'bottom_gradient', label: 'caption scrim' },
 ];
 
-// The clip's stored `cinematic` may be null or partial; normalise to the six
+// The clip's stored `cinematic` may be null or partial; normalise to the
 // keys the server understands so comparisons are key-by-key.
 function normaliseLook(cinematic) {
     return {
         color_grade: cinematic?.color_grade || 'none',
+        sharpen: cinematic?.sharpen || 'none',
+        lut: cinematic?.lut || 'none',
         glow: !!cinematic?.glow,
         grain: !!cinematic?.grain,
         vignette: !!cinematic?.vignette,
@@ -51,7 +46,7 @@ function normaliseLook(cinematic) {
 }
 
 function isPlainLook(look) {
-    return look.color_grade === 'none' && !look.glow && !look.grain && !look.vignette && !look.letterbox && !look.bottom_gradient;
+    return look.color_grade === 'none' && look.sharpen === 'none' && look.lut === 'none' && !look.glow && !look.grain && !look.vignette && !look.letterbox && !look.bottom_gradient;
 }
 
 function sameLook(a, b) {
@@ -64,6 +59,14 @@ export default function LookModal({ isOpen, onClose, clip, clipCount = 1, bulkPr
 
     const [format, setFormat] = useState(currentFormat);
     const [look, setLook] = useState(currentLook);
+    const [options, setOptions] = useState(FALLBACK_LOOK_OPTIONS);
+
+    useEffect(() => {
+        if (!isOpen) return undefined;
+        let alive = true;
+        fetchLookOptions().then((o) => { if (alive) setOptions(o); }).catch(() => {});
+        return () => { alive = false; };
+    }, [isOpen]);
 
     // Re-seed from the clip each time the modal opens (or the clip is
     // re-rendered under it) so it never shows a stale choice.
@@ -149,18 +152,53 @@ export default function LookModal({ isOpen, onClose, clip, clipCount = 1, bulkPr
                 </div>
 
                 <div className="pt-4 border-t border-rule">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                        <span className="eyebrow">Cinematic look</span>
-                        <select
-                            value={look.color_grade}
-                            onChange={(e) => setLook({ ...look, color_grade: e.target.value })}
-                            className="input-field !w-auto text-xs py-1.5"
-                            aria-label="cinematic color grade"
-                        >
-                            {GRADE_OPTIONS.map((g) => (
-                                <option key={g.value} value={g.value}>{g.label}</option>
-                            ))}
-                        </select>
+                    <span className="eyebrow">Cinematic look</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                        <label className="flex flex-col gap-1 text-[11px] text-muted">
+                            color grade
+                            <select
+                                value={look.color_grade}
+                                onChange={(e) => setLook({ ...look, color_grade: e.target.value })}
+                                className="input-field text-xs py-1.5"
+                                aria-label="cinematic color grade"
+                            >
+                                {options.grades.map((g) => (
+                                    <option key={g.value} value={g.value}>{g.label}</option>
+                                ))}
+                            </select>
+                        </label>
+                        <label className="flex flex-col gap-1 text-[11px] text-muted">
+                            sharpening
+                            <select
+                                value={look.sharpen}
+                                onChange={(e) => setLook({ ...look, sharpen: e.target.value })}
+                                className="input-field text-xs py-1.5"
+                                aria-label="sharpening"
+                            >
+                                {options.sharpen.map((g) => (
+                                    <option key={g.value} value={g.value}>{g.label}</option>
+                                ))}
+                            </select>
+                        </label>
+                        {(options.luts.length > 0 || look.lut !== 'none') && (
+                            <label className="flex flex-col gap-1 text-[11px] text-muted sm:col-span-2">
+                                LUT (.cube from assets/luts)
+                                <select
+                                    value={look.lut}
+                                    onChange={(e) => setLook({ ...look, lut: e.target.value })}
+                                    className="input-field text-xs py-1.5"
+                                    aria-label="3D LUT"
+                                >
+                                    <option value="none">No LUT</option>
+                                    {look.lut !== 'none' && !options.luts.includes(look.lut) && (
+                                        <option value={look.lut}>{look.lut} (missing)</option>
+                                    )}
+                                    {options.luts.map((name) => (
+                                        <option key={name} value={name}>{name}</option>
+                                    ))}
+                                </select>
+                            </label>
+                        )}
                     </div>
                     <div className="flex flex-wrap gap-x-4 gap-y-2 mt-3">
                         {TOGGLES.map((t) => (
