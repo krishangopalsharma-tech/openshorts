@@ -2209,12 +2209,6 @@ if __name__ == '__main__':
                     import layout_ranges as _layouts
                     clip['layout_ranges'] = _layouts.read(clip_final_path)
                     if success and is_comedy_card:
-                        # Optional captions burn into the video window first,
-                        # then the Twitter/X comedy card frames the clip.
-                        captioned = auto_caption_clip(
-                            deliver_path, transcript, start, end,
-                            split_ranges=_layouts.split_ranges(clip['layout_ranges']))
-                        target_for_card = captioned or deliver_path
                         try:
                             import comedy_card
                             cfg = json.loads(os.environ.get("COMEDY_CARD_CONFIG") or "{}")
@@ -2225,37 +2219,34 @@ if __name__ == '__main__':
                                 or ""
                             )
                             comedy_card.apply_comedy_card(
-                                target_for_card,
+                                clip_final_path,
                                 channel_name=cfg.get("channel_name", "Cheerful Videos"),
                                 handle=cfg.get("handle", "@Cheerfulvids"),
                                 pov_text=pov_text,
                                 verified=bool(cfg.get("verified", True)),
                                 avatar_path=cfg.get("avatar_path"),
                             )
-                            if captioned and captioned != clip_final_path:
-                                os.replace(captioned, clip_final_path)
                             deliver_path = clip_final_path
                             clip["comedy_card"] = {
                                 "channel_name": cfg.get("channel_name", "Cheerful Videos"),
                                 "handle": cfg.get("handle", "@Cheerfulvids"),
                                 "pov_text": pov_text,
                                 "verified": bool(cfg.get("verified", True)),
+                                "avatar_path": cfg.get("avatar_path"),
                             }
                             print(f"   🐦 Applied Twitter/X comedy card: {pov_text!r}")
                         except Exception as e:
                             print(f"   ⚠️ Comedy card failed ({e})")
-                        print(f"   ✅ Clip {i+1} ready: {deliver_path}")
-                        print(f"CLIP_READY {i} {os.path.basename(deliver_path)}")
-                        return success
-                    # The hook was written from the transcript alone. When the
-                    # render put this clip's meaning on the screen, rewrite hook
-                    # and title from three of its frames BEFORE burning them.
-                    if success and hook_grounding.wanted(clip['layout_ranges'], end - start):
-                        hook_grounding.reground(clip_final_path, clip, transcript, start, end)
-                    if success and os.environ.get("AUTO_HOOK") == "1":
-                        hooked = auto_hook_clip(clip_final_path, clip)
-                        if hooked:
-                            deliver_path, clip['auto_hook'] = hooked
+                    else:
+                        # The hook was written from the transcript alone. When the
+                        # render put this clip's meaning on the screen, rewrite hook
+                        # and title from three of its frames BEFORE burning them.
+                        if success and hook_grounding.wanted(clip['layout_ranges'], end - start):
+                            hook_grounding.reground(clip_final_path, clip, transcript, start, end)
+                        if success and os.environ.get("AUTO_HOOK") == "1":
+                            hooked = auto_hook_clip(clip_final_path, clip)
+                            if hooked:
+                                deliver_path, clip['auto_hook'] = hooked
                     if success:
                         captioned = auto_caption_clip(
                             deliver_path, transcript, start, end,

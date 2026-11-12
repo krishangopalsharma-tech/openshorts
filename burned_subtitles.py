@@ -30,7 +30,7 @@ def decide(ymins, total_frames):
     return min(valid)
 
 
-def crop_clip(video_path, ymin):
+def crop_clip(video_path, ymin=None):
     """Crop the bottom (1 - ymin) strip off ``video_path`` in place.
     Preserves top-left (0, 0) so existing pixel face coordinates remain valid.
     """

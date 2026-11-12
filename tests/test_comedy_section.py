@@ -336,3 +336,21 @@ def test_apply_comedy_card_ffmpeg_end_to_end(tmp_path):
     assert r > 180 and b < 60
 
 
+def test_comedy_card_keeps_canonical_clip_uncaptioned_for_subtitle_editor(tmp_path):
+    """Regression test: comedy_card must apply onto the clean canonical clip_N.mp4
+    BEFORE auto_caption_clip writes subtitled_<ts>_clip_N.mp4, so opening the
+    Subtitle Editor or restyling via /api/subtitle strips subtitled_<ts>_ and
+    never shows double captions."""
+    import app as app_mod
+
+    clean_clip = tmp_path / "show_clip_1.mp4"
+    subtitled_clip = tmp_path / "subtitled_1794484500_show_clip_1.mp4"
+    clean_clip.write_bytes(b"clean comedy card video")
+    subtitled_clip.write_bytes(b"captioned comedy card video")
+
+    stripped = app_mod._strip_burned_captions(str(tmp_path), subtitled_clip.name)
+    assert stripped == "show_clip_1.mp4"
+    assert app_mod._canonical_clip_file(str(tmp_path), "show", 0) == subtitled_clip.name
+
+
+

@@ -881,13 +881,27 @@ def _relayer(output_dir, clip, current_file, changed):
                          _UNDER_CAPTION_LAYERS[idx:])
 
 
-def _clip_layer_hooks(output_dir, clip):
+def _clip_layer_hooks(output_dir, clip, reapply_comedy_card=False):
     """(effects, captioner) for recut.perform_recut, carrying the clip's own
     look, music and caption style through a re-render so a trim or format
     change puts back what the user chose instead of the deployment defaults."""
     style = clip.get('caption_style') or {}
+    card_cfg = clip.get('comedy_card') if reapply_comedy_card else None
 
     def effects(clean_path):
+        if card_cfg and isinstance(card_cfg, dict):
+            try:
+                import comedy_card
+                comedy_card.apply_comedy_card(
+                    clean_path,
+                    channel_name=card_cfg.get("channel_name", "Cheerful Videos"),
+                    handle=card_cfg.get("handle", "@Cheerfulvids"),
+                    pov_text=card_cfg.get("pov_text", ""),
+                    verified=bool(card_cfg.get("verified", True)),
+                    avatar_path=card_cfg.get("avatar_path"),
+                )
+            except Exception as e:
+                print(f"⚠️ Comedy card re-apply failed on {clean_path}: {e}")
         final = _apply_layers(output_dir, clip, clean_path)
         return final if final != clean_path else None
 
@@ -5120,7 +5134,8 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
 
     # The clip's cinematic look and caption style ride along, so a trim keeps
     # the grade and the captions come back in the user's style, not the stock one.
-    look_effects, look_captioner = _clip_layer_hooks(output_dir, clip)
+    look_effects, look_captioner = _clip_layer_hooks(
+        output_dir, clip, reapply_comedy_card=not fast)
 
     def run_recut():
         if fast:
@@ -5893,7 +5908,8 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
     # and captioning and the path blew past the filesystem limit:
     # "Error opening output ...: File name too long".
     clean_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
-    look_effects, look_captioner = _clip_layer_hooks(output_dir, clip)
+    look_effects, look_captioner = _clip_layer_hooks(
+        output_dir, clip, reapply_comedy_card=True)
 
     def run():
         return recut.perform_recut(
