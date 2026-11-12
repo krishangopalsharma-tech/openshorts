@@ -24,9 +24,9 @@ def test_comedy_card_overlay_geometry_and_verified_badge(tmp_path):
 
     arr = np.array(img)
     x, y, w, h = box["x"], box["y"], box["w"], box["h"]
-    # Square-ish video window (~4:5 to 1:1) centered horizontally
+    # Taller video window (~68-70% of canvas height, matching "What I want") centered horizontally
     assert 900 <= w <= 1020
-    assert 960 <= h <= 1260
+    assert 1280 <= h <= 1380
     assert abs((1080 - w) // 2 - x) <= 2
 
     # Outer canvas margin (top-left) is solid white

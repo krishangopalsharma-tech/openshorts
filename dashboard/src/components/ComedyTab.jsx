@@ -1089,7 +1089,7 @@ export default function ComedyTab({ onJobStarted }) {
 
               {/* 9:16 White Twitter/X Card Mockup */}
               <div
-                className="mx-auto w-full max-w-[300px] aspect-[9/16] rounded-2xl border border-rule2 shadow-lg flex flex-col px-4 pt-9 pb-7 select-none"
+                className="mx-auto w-full max-w-[300px] aspect-[9/16] rounded-2xl border border-rule2 shadow-lg flex flex-col px-4 pt-8 pb-11 select-none"
                 style={{ backgroundColor: '#FFFFFF', color: '#0F1419' }}
               >
                 {/* Profile Header */}
@@ -1135,8 +1135,8 @@ export default function ComedyTab({ onJobStarted }) {
                   {previewPov || 'Zero survival instinct 😂'}
                 </div>
 
-                {/* Square-ish Rounded Video Window */}
-                <div className="relative w-full flex-1 max-h-[330px] rounded-[10px] overflow-hidden bg-neutral-900 border border-black/10 flex items-center justify-center">
+                {/* Taller Rounded Video Window ("What I want") */}
+                <div className="relative w-full flex-1 rounded-[10px] overflow-hidden bg-neutral-900 border border-black/10 flex items-center justify-center">
                   {videoPath.trim() ? (
                     <img
                       src={thumbUrl(videoPath.trim().replace(/^"|"$/g, ''))}

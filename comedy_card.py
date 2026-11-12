@@ -25,11 +25,11 @@ from hooks import (
 CANVAS_W = 1080
 CANVAS_H = 1920
 
-# Video window geometry matching the Twitter/X comedy reference card
+# Video window geometry matching the Twitter/X comedy reference card ("What I want")
 BOX_W = 992
 BOX_X = (CANVAS_W - BOX_W) // 2  # 44 px white margin on left and right
-DEFAULT_BOX_Y = 468
-DEFAULT_BOX_H = 1220
+DEFAULT_BOX_Y = 418
+DEFAULT_BOX_H = 1320
 CORNER_RADIUS = 18
 
 # Colors
@@ -175,7 +175,7 @@ def render_card_overlay(
     draw = ImageDraw.Draw(card)
 
     header_x = 76
-    avatar_y = 196
+    avatar_y = 148
     avatar_size = 112
 
     # 1. Circular Profile Avatar
