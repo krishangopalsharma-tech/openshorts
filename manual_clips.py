@@ -132,7 +132,35 @@ def load_manual_clips(path, transcript, duration):
         title = item.get("video_title_for_youtube_short") or item.get("title") or ""
         pov_text = (item.get("pov_text") or item.get("caption") or "").strip()
         hook = pov_text or item.get("viral_hook_text") or item.get("hook") or title
-        desc = item.get("description") or title
+        reason = item.get("reason") or item.get("why_funny") or ""
+        desc = item.get("description") or reason or title
+        raw_tags = item.get("video_tags") or item.get("tags") or ""
+        if isinstance(raw_tags, list):
+            raw_tags = ", ".join(str(t).strip().lstrip("#") for t in raw_tags if str(t).strip())
+        else:
+            raw_tags = str(raw_tags).strip()
+        if not raw_tags:
+            tag_parts = []
+            try:
+                meta = json.loads(os.environ.get("COMEDY_METADATA") or "{}")
+                if meta.get("title"):
+                    tag_parts.append(str(meta["title"]).strip())
+                if meta.get("episode_title"):
+                    tag_parts.append(str(meta["episode_title"]).strip())
+            except Exception:
+                pass
+            words_clean = [w for w in re.findall(r"[A-Za-z0-9']+", title) if len(w) > 3]
+            if words_clean:
+                tag_parts.extend(words_clean[:4])
+            tag_parts.extend(["comedy", "funny moments", "sitcom", "shorts", "viral"])
+            seen = set()
+            deduped = []
+            for t in tag_parts:
+                tl = t.lower()
+                if tl and tl not in seen:
+                    seen.add(tl)
+                    deduped.append(t)
+            raw_tags = ", ".join(deduped)
         clip_entry = {
             "start": round(float(start), 3),
             "end": round(float(end), 3),
@@ -142,10 +170,10 @@ def load_manual_clips(path, transcript, duration):
             "pov_text": pov_text or hook,
             "video_description_for_tiktok": item.get("video_description_for_tiktok") or desc,
             "video_description_for_instagram": item.get("video_description_for_instagram") or desc,
-            "video_tags": item.get("video_tags") or item.get("tags") or "",
+            "video_tags": raw_tags,
             # These came out of a chat window, not the in-pipeline picker.
             "picked_by": item.get("picked_by") or "claude",
-            "reason": item.get("reason") or item.get("why_funny") or "",
+            "reason": reason,
         }
         shorts.append(clip_entry)
 

@@ -4376,13 +4376,39 @@ async def download_all_clips(job_id: str, request: Request):
             base_label = _sanitize_export_label(title) if title else os.path.splitext(os.path.basename(path))[0]
             arcname = f"{file_id}_{base_label}{ext}"
             files.append((i, path, arcname))
+            raw_tags = clip.get("video_tags") or ""
+            if isinstance(raw_tags, list):
+                raw_tags = ", ".join(str(t).strip().lstrip("#") for t in raw_tags if str(t).strip())
+            else:
+                raw_tags = str(raw_tags).strip()
+            if not raw_tags:
+                tag_parts = []
+                for chunk in re.split(r"\s*[-–—]\s*", base_name):
+                    c = re.sub(r"\(\d{4}\)", "", chunk).strip()
+                    if c and not re.match(r"^[sS]\d+[eE]\d+$", c):
+                        tag_parts.append(c)
+                words_clean = [w for w in re.findall(r"[A-Za-z0-9']+", title) if len(w) > 3]
+                tag_parts.extend(words_clean[:4])
+                tag_parts.extend(["comedy", "funny moments", "sitcom", "shorts", "viral"])
+                seen_tags = set()
+                deduped_tags = []
+                for t in tag_parts:
+                    tl = t.lower()
+                    if tl and tl not in seen_tags:
+                        seen_tags.add(tl)
+                        deduped_tags.append(t)
+                raw_tags = ", ".join(deduped_tags)
+            desc = (
+                clip.get("video_description_for_instagram")
+                or clip.get("video_description_for_tiktok")
+                or clip.get("reason")
+                or title
+            )
             csv_rows.append({
                 "id": file_id,
-                "title": clip.get("video_title_for_youtube_short", ""),
-                "description": (clip.get("video_description_for_instagram")
-                                 or clip.get("video_description_for_tiktok") or ""),
-                "tags": clip.get("video_tags", ""),
-                "picked_by": clip.get("picked_by", ""),
+                "title": title,
+                "description": desc,
+                "tags": raw_tags,
             })
 
     if not files:
@@ -4411,7 +4437,8 @@ async def download_all_clips(job_id: str, request: Request):
             csv_buffer = io.StringIO()
             writer = csv.DictWriter(
                 csv_buffer,
-                fieldnames=["id", "title", "description", "tags", "picked_by"])
+                fieldnames=["id", "title", "description", "tags"],
+                lineterminator="\n")
             writer.writeheader()
             writer.writerows(csv_rows)
             zf.writestr(f"clips_{job_id}.csv", csv_buffer.getvalue())

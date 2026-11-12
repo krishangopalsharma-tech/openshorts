@@ -213,6 +213,9 @@ def test_manual_clips_preserves_pov_text(tmp_path):
     loaded = manual_clips.load_manual_clips(str(clips_file), transcript, 120.0)
     assert loaded["shorts"][0]["pov_text"] == "Zero survival instinct 😂"
     assert loaded["shorts"][0]["viral_hook_text"] == "Zero survival instinct 😂"
+    assert loaded["shorts"][0]["video_tags"] != ""
+    assert "comedy" in loaded["shorts"][0]["video_tags"].lower()
+
 
 
 def test_api_comedy_endpoints_hard_gate_and_prompt_build(tmp_path, monkeypatch):
