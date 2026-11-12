@@ -29,7 +29,8 @@ CANVAS_H = 1920
 BOX_W = 992
 BOX_X = (CANVAS_W - BOX_W) // 2  # 44 px white margin on left and right
 DEFAULT_BOX_Y = 418
-DEFAULT_BOX_H = 1320
+DEFAULT_BOX_H = 1436
+BOTTOM_MARGIN = 66
 CORNER_RADIUS = 18
 
 # Colors
@@ -237,7 +238,7 @@ def render_card_overlay(
 
     box_w = BOX_W
     box_x = BOX_X
-    box_h = min(DEFAULT_BOX_H, CANVAS_H - box_y - 160)
+    box_h = min(DEFAULT_BOX_H, CANVAS_H - box_y - BOTTOM_MARGIN)
     if box_h % 2 == 1:
         box_h -= 1
 

@@ -1089,11 +1089,11 @@ export default function ComedyTab({ onJobStarted }) {
 
               {/* 9:16 White Twitter/X Card Mockup */}
               <div
-                className="mx-auto w-full max-w-[300px] aspect-[9/16] rounded-2xl border border-rule2 shadow-lg flex flex-col px-4 pt-8 pb-11 select-none"
-                style={{ backgroundColor: '#FFFFFF', color: '#0F1419' }}
+                className="mx-auto w-[300px] max-w-full rounded-2xl border border-rule2 shadow-lg flex flex-col px-3.5 pt-6 pb-3.5 select-none"
+                style={{ backgroundColor: '#FFFFFF', color: '#0F1419', height: '533px' }}
               >
                 {/* Profile Header */}
-                <div className="flex items-center gap-2.5">
+                <div className="flex items-center gap-2.5 shrink-0">
                   <div className="w-9 h-9 rounded-full overflow-hidden bg-[#1D9BF0] flex items-center justify-center shrink-0 text-white font-bold text-sm">
                     {avatarUrl ? (
                       <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
@@ -1129,14 +1129,17 @@ export default function ComedyTab({ onJobStarted }) {
 
                 {/* POV Caption Text */}
                 <div
-                  className="mt-2.5 mb-2 text-[13.5px] font-normal leading-snug break-words"
+                  className="mt-2 mb-2 text-[13.5px] font-normal leading-snug break-words shrink-0"
                   style={{ color: '#0F1419' }}
                 >
                   {previewPov || 'Zero survival instinct 😂'}
                 </div>
 
                 {/* Taller Rounded Video Window ("What I want") */}
-                <div className="relative w-full flex-1 rounded-[10px] overflow-hidden bg-neutral-900 border border-black/10 flex items-center justify-center">
+                <div
+                  className="relative w-full flex-1 rounded-[10px] overflow-hidden bg-neutral-900 border border-black/10 flex items-center justify-center"
+                  style={{ minHeight: '390px' }}
+                >
                   {videoPath.trim() ? (
                     <img
                       src={thumbUrl(videoPath.trim().replace(/^"|"$/g, ''))}
