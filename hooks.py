@@ -136,17 +136,30 @@ def _render_emoji_chunk(chunk, emoji_font, scale, fill):
     w = int(probe.textlength(chunk, font=efont))
     if w <= 0:
         return None
-    # Emoji glyphs can overshoot the em box slightly; 1.3x covers it.
-    tmp = Image.new('RGBA', (w, int(native * 1.3)), (0, 0, 0, 0))
+    try:
+        bx0, by0, bx1, by1 = probe.textbbox((0, 0), chunk, font=efont)
+    except Exception:
+        bx0, by0, bx1, by1 = 0, 0, w, int(native * 1.3)
+    # Pad negative bearings (e.g. Segoe UI Emoji has by0 < 0) so the top/head
+    # of the emoji is never clipped off by the (0, 0) canvas boundary.
+    pad_x = max(0, -bx0) + 4
+    pad_y = max(0, -by0) + 4
+    canvas_w = max(w, bx1) + pad_x + 4
+    canvas_h = max(int(native * 1.3), by1) + pad_y + 4
+    tmp = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
     d = ImageDraw.Draw(tmp)
     try:
-        d.text((0, 0), chunk, font=efont, embedded_color=True)
+        d.text((pad_x, pad_y), chunk, font=efont, embedded_color=True)
     except TypeError:
-        d.text((0, 0), chunk, font=efont, fill=fill)
-    if scale == 1.0:
-        return tmp
-    return tmp.resize((max(int(w * scale), 1), max(int(tmp.height * scale), 1)),
-                      Image.LANCZOS)
+        d.text((pad_x, pad_y), chunk, font=efont, fill=fill)
+    if scale != 1.0:
+        tmp = tmp.resize(
+            (max(int(round(canvas_w * scale)), 1), max(int(round(canvas_h * scale)), 1)),
+            Image.LANCZOS,
+        )
+    tmp.info["emj_origin_x"] = pad_x * scale
+    tmp.info["emj_center_y"] = (pad_y + (by0 + by1) / 2.0) * scale
+    return tmp
 
 
 def _draw_mixed(img, draw, xy, text, font, emoji_font, fill, outline=None):
@@ -156,12 +169,21 @@ def _draw_mixed(img, draw, xy, text, font, emoji_font, fill, outline=None):
     x, y = xy
     stroke_w = outline[1] if outline else 0
     stroke_fill = outline[0] if outline else None
+    try:
+        _, ty0, _, ty1 = draw.textbbox((0, 0), "Hx", font=font)
+        txt_center_y = (ty0 + ty1) / 2.0
+    except Exception:
+        txt_center_y = getattr(font, "size", 32) * 0.55
     for is_emoji, chunk in _split_emoji_runs(text):
         if is_emoji and emoji_font:
             scale = _emoji_scale(font, emoji_font)
             rendered = _render_emoji_chunk(chunk, emoji_font, scale, fill)
             if rendered is not None:
-                img.alpha_composite(rendered, (int(x), int(y)))
+                ox = rendered.info.get("emj_origin_x", 0.0)
+                emj_cy = rendered.info.get("emj_center_y", rendered.height / 2.0)
+                paste_x = max(0, int(round(x - ox)))
+                paste_y = max(0, int(round(y + txt_center_y - emj_cy)))
+                img.alpha_composite(rendered, (paste_x, paste_y))
                 x += draw.textlength(chunk, font=emoji_font[0]) * scale
         else:
             if stroke_w:

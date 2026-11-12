@@ -1089,7 +1089,7 @@ export default function ComedyTab({ onJobStarted }) {
 
               {/* 9:16 White Twitter/X Card Mockup */}
               <div
-                className="mx-auto w-[300px] max-w-full rounded-2xl border border-rule2 shadow-lg flex flex-col px-3.5 pt-6 pb-3.5 select-none"
+                className="mx-auto w-[300px] max-w-full rounded-2xl border border-rule2 shadow-lg flex flex-col px-3.5 pt-3 pb-8 select-none"
                 style={{ backgroundColor: '#FFFFFF', color: '#0F1419', height: '533px' }}
               >
                 {/* Profile Header */}

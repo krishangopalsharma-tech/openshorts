@@ -25,12 +25,12 @@ from hooks import (
 CANVAS_W = 1080
 CANVAS_H = 1920
 
-# Video window geometry matching the Twitter/X comedy reference card ("What I want")
+# Video window geometry matching the Twitter/X comedy reference card ("Needed this")
 BOX_W = 992
 BOX_X = (CANVAS_W - BOX_W) // 2  # 44 px white margin on left and right
-DEFAULT_BOX_Y = 418
-DEFAULT_BOX_H = 1436
-BOTTOM_MARGIN = 66
+DEFAULT_BOX_Y = 304
+DEFAULT_BOX_H = 1480
+BOTTOM_MARGIN = 136
 CORNER_RADIUS = 18
 
 # Colors
@@ -176,7 +176,7 @@ def render_card_overlay(
     draw = ImageDraw.Draw(card)
 
     header_x = 76
-    avatar_y = 148
+    avatar_y = 48
     avatar_size = 112
 
     # 1. Circular Profile Avatar
@@ -212,7 +212,7 @@ def render_card_overlay(
         draw.text((text_x, handle_y), clean_handle, font=handle_font, fill=TEXT_MUTED)
 
     # 3. POV / Comedy Caption Text below the profile header
-    pov_y = avatar_y + avatar_size + 38
+    pov_y = avatar_y + avatar_size + 30
     max_pov_w = CANVAS_W - header_x * 2
     pov_lines = _wrap_text(draw, pov_text, pov_font, pov_emoji_font, max_pov_w, max_lines=3)
     line_h = 56
@@ -229,9 +229,9 @@ def render_card_overlay(
 
     # 4. Rounded-corner square-ish (4:5) video window cutout
     if pov_lines:
-        box_y = pov_y + len(pov_lines) * line_h + 28
+        box_y = pov_y + len(pov_lines) * line_h + 24
     else:
-        box_y = avatar_y + avatar_size + 44
+        box_y = avatar_y + avatar_size + 38
     box_y = max(DEFAULT_BOX_Y, box_y)
     if box_y % 2 == 1:
         box_y += 1

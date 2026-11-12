@@ -24,9 +24,10 @@ def test_comedy_card_overlay_geometry_and_verified_badge(tmp_path):
 
     arr = np.array(img)
     x, y, w, h = box["x"], box["y"], box["w"], box["h"]
-    # Taller video window (~75% of canvas height, extending near bottom like "What I want")
+    # Upward-shifted header + taller video window ("Needed this" reference)
     assert 900 <= w <= 1020
-    assert 1380 <= h <= 1460
+    assert 280 <= y <= 340
+    assert 1380 <= h <= 1500
     assert abs((1080 - w) // 2 - x) <= 2
 
     # Outer canvas margin (top-left) is solid white
@@ -351,6 +352,34 @@ def test_comedy_card_keeps_canonical_clip_uncaptioned_for_subtitle_editor(tmp_pa
     stripped = app_mod._strip_burned_captions(str(tmp_path), subtitled_clip.name)
     assert stripped == "show_clip_1.mp4"
     assert app_mod._canonical_clip_file(str(tmp_path), "show", 0) == subtitled_clip.name
+
+
+def test_pov_text_and_emoji_vertical_alignment_without_head_clipping(tmp_path):
+    """Verify the POV text and emoji sit on the same vertical center line and
+    the top of the emoji is never clipped off."""
+    import comedy_card
+
+    out_png = tmp_path / "card_emoji.png"
+    comedy_card.render_card_overlay(
+        str(out_png),
+        channel_name="Mockingbirds",
+        handle="@Mockingbirds",
+        pov_text="Who needs Lawson? 😂",
+        verified=True,
+    )
+    arr = np.array(Image.open(out_png))
+    # POV line sits around y=180..260
+    txt_region = arr[180:260, 70:460, :3]
+    emj_region = arr[180:260, 470:560, :3]
+    txt_ys = np.where(txt_region.mean(axis=2) < 240)[0] + 180
+    emj_ys = np.where(emj_region.mean(axis=2) < 245)[0] + 180
+
+    txt_center = (txt_ys.min() + txt_ys.max()) / 2.0
+    emj_center = (emj_ys.min() + emj_ys.max()) / 2.0
+    assert abs(txt_center - emj_center) <= 2.0
+    # Full emoji height (~45px at font size 44), not clipped to 39px
+    assert (emj_ys.max() - emj_ys.min() + 1) >= 43
+
 
 
 
