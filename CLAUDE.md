@@ -699,11 +699,12 @@ in `get_viral_clips` (from `llm_backend.active()`, so it names the model that
 actually answered), `claude` in `manual_clips.load_manual_clips`. It cannot be
 reconstructed afterwards and it is the whole question the picker A/B asks, so
 it is stamped at the source. `metadata.json` is dumped wholesale and carries it
-for free; the ZIP's CSV and the webhook payload both project fields explicitly
-and each had to name it — and the CSV's `DictWriter` has an explicit
-`fieldnames`, which raises on an unknown row key rather than dropping it, so
-that list is part of the change. Clips made before this existed have no
-`picked_by`; both exports handle its absence rather than failing.
+for free; the webhook payload projects fields explicitly and names it. The
+ZIP's CSV deliberately does NOT (since `f779039`: it is the upload-sheet
+columns `id,title,description,tags` only), and its `DictWriter` has an
+explicit `fieldnames`, which raises on an unknown row key rather than
+dropping it, so rows are built to that list. Clips made before this existed
+have no `picked_by`; both exports handle its absence rather than failing.
 
 **Each profile claims nothing about the channel itself, on purpose.** The
 prose is prompt text: an invented line about the niche or the viewer steers

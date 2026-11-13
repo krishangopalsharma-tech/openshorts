@@ -1,9 +1,9 @@
-"""`picked_by` has to survive the two exports that project fields explicitly.
+"""`picked_by` in the exports that project fields explicitly.
 
-metadata.json is dumped wholesale so it rides along on its own, but the ZIP's
-CSV and the webhook payload both name their fields, so each needs the key added
-— and the CSV's DictWriter has an explicit `fieldnames`, which raises
-ValueError on an unknown row key rather than silently dropping it.
+metadata.json is dumped wholesale so it rides along on its own, and the
+webhook payload names it. The ZIP's CSV deliberately does not (f779039: it is
+the upload-sheet columns only), and its DictWriter has an explicit
+`fieldnames`, so a clip with or without the key must still export.
 """
 import asyncio
 import io
@@ -41,7 +41,10 @@ class TestZipExport:
         monkeypatch.setattr(app_module, "jobs", {})
         return TestClient(app_module.app)
 
-    def test_the_csv_names_who_picked_each_clip(self, client, tmp_path):
+    def test_the_csv_is_the_publishing_columns_only(self, client, tmp_path):
+        """The CSV is what gets pasted into an upload sheet, so since f779039 it
+        carries id/title/description/tags and no longer names the picker;
+        picked_by still rides in metadata.json and the webhook payload."""
         _job_on_disk(tmp_path)
         r = client.get(f"/api/jobs/{JOB}/download-all")
         assert r.status_code == 200, r.text
@@ -49,8 +52,10 @@ class TestZipExport:
             csv_name = next(n for n in z.namelist() if n.endswith(".csv"))
             text = z.read(csv_name).decode("utf-8-sig")
         header, row = text.splitlines()[0], text.splitlines()[1]
-        assert "picked_by" in header
-        assert "gemini:gemini-3.7-flash" in row
+        assert header.split(",") == ["id", "title", "description", "tags"]
+        assert "picked_by" not in header
+        assert "gemini:gemini-3.7-flash" not in row
+        assert "A title" in row
 
     def test_a_clip_with_no_picker_recorded_still_exports(self, client, tmp_path):
         """Clips generated before this existed have no picked_by. The CSV must

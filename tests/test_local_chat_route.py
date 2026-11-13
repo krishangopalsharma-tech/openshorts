@@ -638,13 +638,26 @@ class TestCancel:
             def poll(self):
                 return None
 
+            def terminate(self):
+                killed.setdefault("terminated", True)
+
+            def kill(self):
+                killed.setdefault("killed", True)
+
         monkeypatch.setitem(app_module._job_procs, job_id, FakeProc())
         monkeypatch.setattr(app_module.subprocess, "run",
                             lambda *a, **k: killed.setdefault("argv", a[0]))
+        # POSIX signals the process group. Never let that reach a real pid
+        # 4242 on the machine running the tests.
+        monkeypatch.setattr(app_module.os, "getpgid", lambda pid: pid, raising=False)
+        monkeypatch.setattr(app_module.os, "killpg",
+                            lambda pgid, sig: killed.setdefault("pgid", pgid), raising=False)
         r = local["client"].post(f"/api/job/{job_id}/cancel")
         assert r.json()["signalled"] is True
         if os.name == "nt":
             assert "/T" in killed["argv"], "the ffmpeg children must go too"
+        else:
+            assert killed["pgid"] == 4242, "the whole process group must go"
 
     def test_an_unknown_job_is_404_and_a_bad_id_is_400(self, local):
         assert local["client"].post(

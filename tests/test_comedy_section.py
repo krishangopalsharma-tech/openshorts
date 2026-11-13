@@ -288,6 +288,7 @@ def test_api_comedy_endpoints_hard_gate_and_prompt_build(tmp_path, monkeypatch):
     assert data["alignment"]["offset"] == 1.2
 
 
+@pytest.mark.skipif(__import__("shutil").which("ffmpeg") is None, reason="ffmpeg not on PATH")
 def test_apply_comedy_card_ffmpeg_end_to_end(tmp_path):
     import subprocess
     import cv2
