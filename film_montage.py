@@ -182,10 +182,20 @@ SUBTITLE LINES
 """
 
 
-def build_prompt(cues, duration, title, count=3):
+EDIT_STYLE_NOTE = """
+THIS CHANNEL POSTS MOVIE EDITS (action, thriller, mystery, underdog): every
+short builds tension through its scenes and pays it off in the ``climax``,
+which is REQUIRED here: {CX_MIN}-{CX_MAX} shots of the hero at full power, the
+reveal, the moment the underdog wins. Prefer scenes with a confrontation, a
+threat, a turn; the music is dark and driving (mood ``tense``, ``driving`` or
+``epic``), so a comedy beat only works as the setup the payoff answers.
+"""
+
+
+def build_prompt(cues, duration, title, count=3, climax_required=False):
     lines = line_index(cues)
     count = max(SHORTS_RANGE[0], min(SHORTS_RANGE[1], int(count) if count is not None else 3))
-    return PROMPT_SHORTS.format(
+    text = PROMPT_SHORTS.format(
         COUNT=count, TITLE=title or "the film", RUNTIME=fp.format_timestamp(duration, hours=True),
         CAP_WORDS=CAPTION_WORDS_MAX, SC_MIN=SCENES_RANGE[0], SC_MAX=SCENES_RANGE[1],
         T_MIN=TOTAL_SECONDS_RANGE[0], T_MAX=TOTAL_SECONDS_RANGE[1], TARGET=TARGET_SECONDS,
@@ -193,6 +203,10 @@ def build_prompt(cues, duration, title, count=3):
         CX_MIN=CLIMAX_SHOTS_RANGE[0], CX_MAX=CLIMAX_SHOTS_RANGE[1],
         CX_SMIN=CLIMAX_SHOT_SECONDS[0], CX_SMAX=CLIMAX_SHOT_SECONDS[1],
         LINES=lines_text(lines))
+    if climax_required:
+        note = EDIT_STYLE_NOTE.format(CX_MIN=CLIMAX_SHOTS_RANGE[0], CX_MAX=CLIMAX_SHOTS_RANGE[1])
+        return text.replace("\nRULES\n", note + "\nRULES\n", 1)
+    return text
 
 
 # --- models -----------------------------------------------------------------------
@@ -373,7 +387,8 @@ def total_seconds(segments):
 
 # --- validation -------------------------------------------------------------------
 
-def validate_shorts(data, cues, duration, *, total_range=TOTAL_SECONDS_RANGE, scenes_range=SCENES_RANGE):
+def validate_shorts(data, cues, duration, *, total_range=TOTAL_SECONDS_RANGE, scenes_range=SCENES_RANGE,
+                    climax_required=False):
     """``(plan, errors, warnings, previews)``. ``plan`` is None on schema
     errors (nothing to render). Rule errors can be forced by the caller;
     warnings are review items. ``previews`` has each short's segments,
@@ -415,6 +430,8 @@ def validate_shorts(data, cues, duration, *, total_range=TOTAL_SECONDS_RANGE, sc
                 elif e - s > EXTRA_RANGE_MAX:
                     warnings.append(_err("extra_long", f"extra range {rng.start}-{rng.end} is {e - s:.0f} s; cut to {EXTRA_RANGE_MAX:.0f}", short=si, scene=k))
         cx = climax_ranges(short, duration)
+        if climax_required and not short.climax:
+            errors.append(_err("climax_missing", f"a movie edit ends on a climax: add {CLIMAX_SHOTS_RANGE[0]}-{CLIMAX_SHOTS_RANGE[1]} flash shots", short=si))
         if short.climax:
             if len(cx) != len(short.climax):
                 errors.append(_err("climax_range", "a climax shot is not a time range inside the film", short=si))

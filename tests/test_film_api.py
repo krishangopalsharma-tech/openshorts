@@ -98,7 +98,7 @@ def test_session_rejects_missing_or_wrong_files_and_shorts(local):
     r = c.post("/api/film/session", json={"video_path": local["video"], "subtitle_path": local["video"]})
     assert r.status_code == 400 and ".srt" in r.json()["detail"]
     r = c.post("/api/film/session", json={"kind": "shorts", "video_path": local["video"], "subtitle_path": local["srt"]})
-    assert r.status_code == 400 and "clip maker" in r.json()["detail"]
+    assert r.status_code == 400 and "recap, edits" in r.json()["detail"]
 
 
 def test_offset_probe_runs_and_user_override_wins(local, monkeypatch):
@@ -652,3 +652,32 @@ def test_shorts_render_appends_the_climax_tail(local, monkeypatch, tmp_path):
     c.post(f"/api/movieshorts/render/{sid}", json={"index": 0})
     assert len(seen["segments"]) == 15
     assert c.post(f"/api/film/session/{sid}/settings", json={"shorts_grade": "nope"}).status_code == 400
+
+
+def test_edits_sessions_carry_the_movie_edit_defaults_and_require_a_climax(local):
+    c = local["client"]
+    r = c.post("/api/film/session", json={"kind": "edits", "video_path": local["video"], "subtitle_path": local["srt"],
+                                          "settings": {"watermark_text": "context plz"}, "probe_offset": False})
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert s["kind"] == "edits"
+    st = s["settings"]
+    assert st["shorts_grade"] == "gritty" and st["caption_preset"] == "neon_punch" and st["shorts_climax"] is True
+    assert st["watermark_text"] == "context plz"
+    sid = s["id"]
+    recap_sid = _session(local)["id"]
+    kinds = {x["id"]: x["kind"] for x in c.get("/api/film/sessions").json()["sessions"]}
+    assert kinds[sid] == "edits" and kinds[recap_sid] == "recap"
+
+    p = c.get(f"/api/movieshorts/prompt/{sid}").json()["prompt"]
+    assert "MOVIE EDITS" in p and p.index("MOVIE EDITS") < p.index("RULES")
+    assert "MOVIE EDITS" not in c.get(f"/api/movieshorts/prompt/{recap_sid}").json()["prompt"]
+
+    r = c.post(f"/api/movieshorts/plan/{sid}", json=_shorts_plan()).json()
+    assert r["ok"] is False and {e["code"] for e in r["errors"]} == {"climax_missing"}
+    assert c.post(f"/api/movieshorts/plan/{recap_sid}", json=_shorts_plan()).json()["ok"] is True
+
+    plan = _shorts_plan()
+    for short in plan["shorts"]:
+        short["climax"] = [{"start": 2001 + k * 40, "end": 2002 + k * 40} for k in range(3)]
+    assert c.post(f"/api/movieshorts/plan/{sid}", json=plan).json()["ok"] is True

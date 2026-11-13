@@ -85,7 +85,7 @@ export default function SessionSetup({ kind, session, onSession, settings, child
           <Stat label="film" value={session.title} mono={false} />
           <Stat label="runtime" value={fmtTime(session.duration)} />
           <Stat label="cues" value={session.cue_count?.toLocaleString()} />
-          <Stat label="wall (75%)" value={fmtTime(session.duration * 0.75)} />
+          {kind === 'recap' && <Stat label="wall (75%)" value={fmtTime(session.duration * 0.75)} />}
         </div>
         <div className="border border-rule rounded-card p-4 space-y-2">
           <div className="flex items-center gap-2 text-sm text-ink">

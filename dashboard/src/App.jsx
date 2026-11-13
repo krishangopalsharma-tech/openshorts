@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard, Lock, BookOpen, Smile } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard, Lock, BookOpen, Zap, Smile } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
 import CompilationTab from './components/CompilationTab';
 import MovieRecapTab from './components/MovieRecapTab';
+import MovieEditsTab from './components/MovieEditsTab';
 import ComedyTab from './components/ComedyTab';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
@@ -1469,6 +1470,7 @@ function App() {
     // Self-host only (it reads paths on the server's disk): hidden in cloud mode.
     ...(filmModules ? [
       { id: 'movierecap', ord: '09', icon: BookOpen, label: 'Movie Recap & Shorts', short: 'film' },
+      { id: 'movieedits', ord: '10', icon: Zap, label: 'Movie Edits', short: 'edits' },
     ] : []),
     ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
     { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
@@ -2058,6 +2060,9 @@ function App() {
           {activeTab === 'compilation' && <CompilationTab />}
           {activeTab === 'movierecap' && filmModules && (
             <MovieRecapTab onOpenJob={(id) => { setActiveTab('dashboard'); openJobById(null, id); }} />
+          )}
+          {activeTab === 'movieedits' && filmModules && (
+            <MovieEditsTab onOpenJob={(id) => { setActiveTab('dashboard'); openJobById(null, id); }} />
           )}
 
           {/* View: AI Agent */}

@@ -212,6 +212,14 @@ def _start_thread(target, *args):
 
 # --- sessions ---------------------------------------------------------------
 
+# ``recap``: the Movie Recap & Shorts tab. ``edits``: the Movie Edits tab
+# (14-nov-2026), the same film + SRT session and the same montage pipeline,
+# kept apart so each tab lists only its own films, with the movie-edit look
+# as defaults and a prompt that requires the climax tail.
+SESSION_KINDS = ("recap", "edits")
+EDITS_DEFAULTS = {"shorts_grade": "gritty", "caption_preset": "neon_punch", "shorts_climax": True,
+                  "shorts_climax_db": -3.0, "music_db": -16.0}
+
 class SessionRequest(BaseModel):
     kind: str = "recap"
     video_path: str
@@ -224,8 +232,8 @@ class SessionRequest(BaseModel):
 @router.post("/api/film/session")
 async def create_session(req: SessionRequest):
     _guard()
-    if req.kind != "recap":
-        raise HTTPException(status_code=400, detail="kind must be recap (movie shorts go through the clip maker)")
+    if req.kind not in SESSION_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {', '.join(SESSION_KINDS)}")
     video = _check_local_file(req.video_path, "video", _VIDEO_EXTS)
     subs = _check_local_file(req.subtitle_path, "subtitle file", fp.SUBTITLE_EXTENSIONS)
     try:
@@ -233,9 +241,10 @@ async def create_session(req: SessionRequest):
     except fp.SubtitleError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     duration = _probe_duration(video) or fp.transcript_duration(fp.cues_to_transcript(cues))
-    settings = {**RECAP_DEFAULTS, **{k: v for k, v in (req.settings or {}).items() if k in RECAP_DEFAULTS}}
+    base = {**RECAP_DEFAULTS, **(EDITS_DEFAULTS if req.kind == "edits" else {})}
+    settings = {**base, **{k: v for k, v in (req.settings or {}).items() if k in RECAP_DEFAULTS}}
     sess = {
-        "id": uuid.uuid4().hex, "kind": "recap", "created": time.time(),
+        "id": uuid.uuid4().hex, "kind": req.kind, "created": time.time(),
         "title": req.title or os.path.splitext(os.path.basename(video))[0],
         "video_path": video, "subtitle_path": subs,
         "duration": round(float(duration), 2), "cue_count": len(cues),
@@ -275,7 +284,7 @@ async def list_sessions():
                 s = json.load(fh)
         except (OSError, ValueError):
             continue
-        if s.get("kind") != "recap":
+        if s.get("kind", "recap") not in SESSION_KINDS:
             continue
         out.append({"id": s["id"], "kind": s["kind"], "title": s.get("title"),
                     "duration": s.get("duration"), "created": s.get("created"),
@@ -929,7 +938,8 @@ async def shorts_prompt(sid: str, request: Request):
     _guard()
     sess = _load(sid)
     count = int((sess.get("settings") or {}).get("shorts_count") or 3)
-    text = fm.build_prompt(_cues(sess), sess["duration"], sess.get("title"), count=count)
+    text = fm.build_prompt(_cues(sess), sess["duration"], sess.get("title"), count=count,
+                           climax_required=sess.get("kind") == "edits")
     if request.query_params.get("format") == "text":
         return PlainTextResponse(text)
     return {"prompt": text, "words": len(text.split()), "count": count}
@@ -945,7 +955,8 @@ async def shorts_plan(sid: str, request: Request):
     force = _force(body)
     data = _pasted(body)
     sess = _load(sid)
-    plan, errors, warnings, previews = fm.validate_shorts(data, _cues(sess), sess["duration"])
+    plan, errors, warnings, previews = fm.validate_shorts(data, _cues(sess), sess["duration"],
+                                                         climax_required=sess.get("kind") == "edits")
     if plan is None:
         return {"ok": False, "errors": errors, "warnings": [], "errors_text": fm.format_errors(errors),
                 "forceable": False, "previews": []}

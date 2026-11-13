@@ -29,7 +29,7 @@ const GRADES = [
   { value: 'bw', label: 'black & white' },
 ];
 
-export default function ShortsFlow({ session, onSession, renders, setRenders, onOpenJob }) {
+export default function ShortsFlow({ session, onSession, renders, setRenders, onOpenJob, planHint }) {
   const [error, setError] = useState('');
   const [tracks, setTracks] = useState([]);
   const [presets, setPresets] = useState([]);
@@ -38,7 +38,11 @@ export default function ShortsFlow({ session, onSession, renders, setRenders, on
 
   useEffect(() => {
     filmJson('/api/music').then((d) => setTracks(d.tracks || [])).catch(() => setTracks([]));
-    filmJson('/api/caption-styles').then((d) => setPresets(Object.keys(d.presets || {}))).catch(() => setPresets(['film_pop']));
+    // /api/caption-styles returns presets as a list of {id, label, ...};
+    // Object.keys on it listed the array indexes 0..N.
+    filmJson('/api/caption-styles')
+      .then((d) => setPresets((Array.isArray(d.presets) ? d.presets.map((p) => p.id) : Object.keys(d.presets || {})).filter(Boolean)))
+      .catch(() => setPresets(['film_pop']));
   }, []);
 
   const saveSetting = useCallback(async (patch) => {
@@ -117,9 +121,11 @@ export default function ShortsFlow({ session, onSession, renders, setRenders, on
           <label className="block space-y-1">
             <span className="text-xs text-muted flex items-center gap-1"><Zap size={12} /> climax tail</span>
             <div className="flex items-center gap-2 flex-wrap">
-              <SegmentedControl size="sm" value={settings.shorts_climax === false ? 'off' : 'on'}
-                onChange={(v) => saveSetting({ shorts_climax: v === 'on' })}
-                options={[{ value: 'on', label: 'on' }, { value: 'off', label: 'off' }]} />
+              <div className="w-32 shrink-0">
+                <SegmentedControl size="sm" value={settings.shorts_climax === false ? 'off' : 'on'}
+                  onChange={(v) => saveSetting({ shorts_climax: v === 'on' })}
+                  options={[{ value: 'on', label: 'on' }, { value: 'off', label: 'off' }]} />
+              </div>
               <input type="number" min={-40} max={0} step={1} value={settings.shorts_climax_db ?? -3}
                 disabled={settings.shorts_climax === false} aria-label="climax music level in dB"
                 onChange={(e) => saveSetting({ shorts_climax_db: Number(e.target.value) })}
@@ -140,7 +146,7 @@ export default function ShortsFlow({ session, onSession, renders, setRenders, on
 
       <PromptPastePanel
         title="Shorts plan · scenes as subtitle lines"
-        hint="The chat picks 4-9 scenes per short from anywhere in the film, in the order that tells the best mini-story, ending on the line that lands. It names LINES, never times."
+        hint={planHint || 'The chat picks 4-9 scenes per short from anywhere in the film, in the order that tells the best mini-story, ending on the line that lands. It names LINES, never times.'}
         promptName={`${session.title}-shorts.txt`}
         loadPrompt={() => filmJson(`/api/movieshorts/prompt/${session.id}`)}
         submit={(text, opts) => filmJson(`/api/movieshorts/plan/${session.id}`, { json: { text, force: !!opts?.force } })}

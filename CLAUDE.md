@@ -191,6 +191,14 @@ Library defaults keep `teaser` so the original tests keep their meaning;
   63.43 s EDL; the flash straddles the cut (old shot's last frame, new
   shot's first). Drop detection snaps forward only (`-0.15 s .. +half a
   beat`): the symmetric window picked the last kick before a real drop.
+- **Movie Edits tab (`MovieEditsTab.jsx`, sidebar 10, self-host only)**:
+  the climax-tail shorts on a page of their own. A film session of
+  `kind: "edits"` (`film_api.SESSION_KINDS`): same session shape and the
+  same `/api/movieshorts/*` routes, listed only on that page, created with
+  `EDITS_DEFAULTS` (gritty, neon_punch, climax on), and its prompt carries
+  `EDIT_STYLE_NOTE` while `validate_shorts(climax_required=True)` errors a
+  short with no climax. Movie Recap & Shorts keeps `kind: "recap"` and the
+  original optional-climax behaviour.
 - Sessions live under `output/film/<id>/session.json` and are skipped by
   BOTH output sweeps (the hourly one and the size cap): a recap is built over
   several sittings. Rendered parts serve at `/film/<id>/<file>` through
