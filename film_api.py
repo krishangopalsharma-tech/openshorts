@@ -1149,6 +1149,17 @@ def _render_short_job(sid, index):
             if track_path:
                 analysis = _music.analyze_track(track_path)
             cx_segs = recut.frame_align(fm.climax_segments(cx_ranges, analysis.get("beat_period")), fps)
+            # The cutter refuses a clip over MAX_TOTAL_SECONDS. Validation
+            # counts the climax, but a forced plan or a hand-trimmed EDL can
+            # still be near the cap: drop shots from the end rather than fail
+            # the whole render.
+            story_s = fm.total_seconds(segments)
+            dropped = 0
+            while cx_segs and story_s + fm.total_seconds(cx_segs) > recut.MAX_TOTAL_SECONDS - 0.05:
+                cx_segs = cx_segs[:-1]
+                dropped += 1
+            if dropped:
+                _log(sid, key, f"climax: {dropped} shot(s) dropped to stay under {recut.MAX_TOTAL_SECONDS:.0f} s")
             if cx_segs and len(segments) + len(cx_segs) <= recut.MAX_SEGMENTS:
                 climax_at = fm.total_seconds(segments)
                 segments = recut.normalize_segments(segments + cx_segs, sess["duration"])

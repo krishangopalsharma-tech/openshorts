@@ -189,7 +189,10 @@ Library defaults keep `teaser` so the original tests keep their meaning;
   flash and a 1.12x zoom that eases back, the frame size never changing.
   `/api/clip/look` keeps stored punches when the modal changes the grade.
   Settings: `shorts_climax`, `shorts_climax_db`, `shorts_grade` (`gritty`
-  is the movie-edit grade). Not built from the original plan: autonomous
+  is the movie-edit grade). The climax counts toward the 45-180 s limit in
+  `validate_shorts` (its unsnapped length, an upper bound), and the render
+  drops climax shots from the end rather than exceed
+  `recut.MAX_TOTAL_SECONDS` on a forced or hand-trimmed plan. Not built from the original plan: autonomous
   LLM/web research (the chat still plans), per-shot nose-lock, slow-mo,
   riser/thud SFX, per-line cycling neon caption with ghost-fade
   (`neon_punch` preset is the expressible part).

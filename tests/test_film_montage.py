@@ -303,3 +303,15 @@ def test_cut_times_are_on_the_output_timeline():
 def test_prompt_asks_for_the_climax():
     text = fm.build_prompt(CUES, DURATION, "x")
     assert "climax" in text and "3-6 picture-only flash shots" in text
+
+
+
+def test_the_climax_counts_toward_the_length_limit():
+    data = _ok_plan()                                              # 70.5 s of story
+    data["shorts"][0]["climax"] = _climax((3600, 3601.4), (3700, 3701.4), (3720, 3721.4))
+    _p, errors, _w, _pv = fm.validate_shorts(data, _long_cues(), DURATION, total_range=(45.0, 74.0))
+    assert [e["code"] for e in errors] == ["total"]
+    assert "70 s of footage + 4 s climax" in errors[0]["message"] and "in all" in errors[0]["message"]
+    # the same story without a climax fits
+    _p, errors, _w, _pv = fm.validate_shorts(_ok_plan(), _long_cues(), DURATION, total_range=(45.0, 74.0))
+    assert errors == []

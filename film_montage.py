@@ -131,7 +131,8 @@ time order. Skip reactions, filler and any line the caption cannot carry
 
 RULES
 - {COUNT} shorts, {SC_MIN}-{SC_MAX} scenes each, {T_MIN:.0f}-{T_MAX:.0f} s of kept footage per short
-  (each kept line costs roughly its own duration plus a second). Aim near {TARGET:.0f} s.
+  (each kept line costs roughly its own duration plus a second; a climax adds
+  about 1 s per shot and counts toward the limit). Aim near {TARGET:.0f} s.
 - Every short has a PREMISE its title states in plain words ("How a top spy
   babysat 3 kids", "The worst first date in cinema"), not the film's title,
   not "part 1", not "explained". The scenes prove the premise.
@@ -445,8 +446,16 @@ def validate_shorts(data, cues, duration, *, total_range=TOTAL_SECONDS_RANGE, sc
                     warnings.append(_err("climax_overlap", f"climax shot at {fp.format_timestamp(r['start'])} repeats a scene's line", short=si))
         segments, per_scene = short_segments(short, by_id, duration)
         total = total_seconds(segments)
-        if segments and not (total_range[0] <= total <= total_range[1]):
-            errors.append(_err("total", f"{total:.0f} s of footage; wanted {total_range[0]:.0f}-{total_range[1]:.0f}", short=si))
+        # The climax renders AFTER the story in the same clip, so it counts
+        # toward the cutter's 180 s cap: a 175 s story with a 6 s climax
+        # passed this check and then failed at render ("clip would exceed
+        # 180s"). The unsnapped climax length is an upper bound: the beat
+        # snap only ever shortens a shot.
+        cx_total = total_seconds(climax_segments(cx))
+        with_cx = round(total + cx_total, 2)
+        if segments and not (total_range[0] <= with_cx <= total_range[1]):
+            got = f"{total:.0f} s of footage + {cx_total:.0f} s climax" if cx_total else f"{total:.0f} s of footage"
+            errors.append(_err("total", f"{got}; wanted {total_range[0]:.0f}-{total_range[1]:.0f} in all", short=si))
         elif not segments:
             errors.append(_err("empty", "no usable lines", short=si))
         for sc in per_scene:

@@ -681,3 +681,28 @@ def test_edits_sessions_carry_the_movie_edit_defaults_and_require_a_climax(local
     for short in plan["shorts"]:
         short["climax"] = [{"start": 2001 + k * 40, "end": 2002 + k * 40} for k in range(3)]
     assert c.post(f"/api/movieshorts/plan/{sid}", json=plan).json()["ok"] is True
+
+
+
+def test_render_drops_climax_shots_that_would_pass_the_cutters_cap(local, monkeypatch, tmp_path):
+    import recut
+    c = local["client"]
+    sid = _session(local)["id"]
+    plan = _shorts_plan()
+    plan["shorts"][0]["climax"] = [{"start": 2001.0 + 40 * k, "end": 2002.0 + 40 * k} for k in range(3)]
+    assert c.post(f"/api/movieshorts/plan/{sid}", json=plan).json()["ok"]
+    monkeypatch.setattr(recut, "MAX_TOTAL_SECONDS", 57.6)           # 55.5 s story: room for 2 one-second shots
+    monkeypatch.setattr(recut, "probe_fps", lambda p, timeout=30: None)
+    seen = {}
+
+    def fake_recut(*, input_path, segments, output_dir, clean_name, **kw):
+        seen["segments"] = segments
+        name = f"recut_1_abc_{clean_name}"
+        open(os.path.join(output_dir, name), "wb").write(b"\x02" * 8)
+        return name, name
+    monkeypatch.setattr(recut, "perform_recut", fake_recut)
+    c.post(f"/api/movieshorts/render/{sid}", json={"index": 0})
+    st = c.get(f"/api/film/status/{sid}").json()["renders"]["shorts-0"]
+    assert st["status"] == "completed", st
+    assert sum(1 for s in seen["segments"] if s.get("mute")) == 2
+    assert any("1 shot(s) dropped" in line for line in st["logs"])
