@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, AlertCircle, AlertTriangle, Download, Sparkles, Scissors, ExternalLink, Music, Film } from 'lucide-react';
+import { Loader2, AlertCircle, AlertTriangle, Download, Sparkles, Scissors, ExternalLink, Music, Film, Zap } from 'lucide-react';
 import SegmentedControl from '../ui/SegmentedControl';
 import PromptPastePanel from './PromptPastePanel';
 import { filmJson, fmtTime } from './filmApi';
@@ -15,6 +15,20 @@ import { getApiUrl } from '../../config';
  * an EDL (one cut per run of lines, silences gone by construction) and
  * shows it here as a scene table before anything renders.
  */
+// cinematic.COLOR_GRADES, in the order a movie edit would reach for them.
+const GRADES = [
+  { value: 'none', label: 'no grade' },
+  { value: 'gritty', label: 'gritty · movie edit' },
+  { value: 'teal_orange', label: 'teal & orange' },
+  { value: 'cold', label: 'cold' },
+  { value: 'washed', label: 'washed' },
+  { value: 'warm', label: 'warm' },
+  { value: 'cool', label: 'cool' },
+  { value: 'vibrant', label: 'vibrant' },
+  { value: 'vintage', label: 'vintage' },
+  { value: 'bw', label: 'black & white' },
+];
+
 export default function ShortsFlow({ session, onSession, renders, setRenders, onOpenJob }) {
   const [error, setError] = useState('');
   const [tracks, setTracks] = useState([]);
@@ -100,6 +114,27 @@ export default function ShortsFlow({ session, onSession, renders, setRenders, on
               {(presets.length ? presets : ['film_pop']).map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </label>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted flex items-center gap-1"><Zap size={12} /> climax tail</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <SegmentedControl size="sm" value={settings.shorts_climax === false ? 'off' : 'on'}
+                onChange={(v) => saveSetting({ shorts_climax: v === 'on' })}
+                options={[{ value: 'on', label: 'on' }, { value: 'off', label: 'off' }]} />
+              <input type="number" min={-40} max={0} step={1} value={settings.shorts_climax_db ?? -3}
+                disabled={settings.shorts_climax === false} aria-label="climax music level in dB"
+                onChange={(e) => saveSetting({ shorts_climax_db: Number(e.target.value) })}
+                className="w-24 bg-paper3 border border-rule rounded-lg px-3 py-1.5 font-mono text-sm text-ink disabled:opacity-40" />
+              <span className="text-xs text-muted">dB at the drop</span>
+            </div>
+            <span className="readout">the chat&apos;s flash shots after the last scene: film audio muted, the bed&apos;s drop on the first cut, a white flash and zoom on every cut. Only when the plan has a climax.</span>
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted">colour grade (change later from the clip card)</span>
+            <select value={settings.shorts_grade || 'none'} onChange={(e) => saveSetting({ shorts_grade: e.target.value })}
+              className="w-full bg-paper3 border border-rule rounded-lg px-3 py-1.5 text-sm text-ink">
+              {GRADES.map((g) => <option key={g.value} value={g.value}>{g.label}</option>)}
+            </select>
+          </label>
         </div>
       </div>
 
@@ -180,6 +215,15 @@ function ShortCard({ index, preview, render, onRender, onOpenJob }) {
           ))}
         </tbody>
       </table>
+
+      {(preview.climax || []).length > 0 && (
+        <p className="text-xs text-ink2 flex items-start gap-2"><Zap size={14} className="mt-0.5 shrink-0 text-brass" />
+          <span>
+            climax · {preview.climax.length} flash shots · ~{preview.climax_seconds}s after the story, cut to the bed&apos;s beat at render ·{' '}
+            <span className="text-muted">{preview.climax.map((c) => `${fmtTime(c.start)}${c.note ? ` ${c.note}` : ''}`).join(' · ')}</span>
+          </span>
+        </p>
+      )}
 
       {longRuns.length > 0 && (
         <p className="text-xs text-warn flex items-start gap-2"><AlertTriangle size={14} className="mt-0.5 shrink-0" />
