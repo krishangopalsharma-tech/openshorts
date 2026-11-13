@@ -111,6 +111,21 @@ Library defaults keep `teaser` so the original tests keep their meaning;
   (`FILM_PROBE_WHISPER_MODEL`), to find the SRT offset by matching word TEXT
   against the cues: an SRT for another release runs 2-25 s out and every
   chunk inherits the error. The user can override it.
+  **Since 14-nov-2026 the check runs at five points** (`fp.probe_sync`,
+  10/30/50/70/90%, 45 s each) and fits a model to the points that heard
+  enough words: `constant`, `linear` (offset + drift: an SRT timed for
+  25 fps on a 23.976 fps file is ~5 s out by the end and one probe cannot
+  see it) or `piecewise` (a jump where another cut removed a scene; the
+  switch sits midway between the two probes). `film_api._cues` applies it
+  per cue unless the user typed an offset (`offset_set_by_user` wins;
+  `POST /api/film/session/{id}/sync` re-runs the check and drops the typed
+  one). The setup shows the five points as a table.
+  **The SRT is optional**: without one, `_transcribe_film_job` runs the
+  whole film through whisper (default model) in the background
+  (`session.transcribing`), writes `whisper.srt` in the session dir and sets
+  `transcript_source: "whisper"`, so every later step reads it exactly like
+  a real SRT; prompts answer 409 until it is done. Both jobs call
+  `transcribe_backends.release_models()` after, like every in-process ASR.
 - **The model plans chunks in a chat window; nothing here calls an LLM.**
   Three prompts are emitted (spoiler map, structure, per-part chunks), JSON
   is pasted back, `movierecap.validate_*` return a structured error list the

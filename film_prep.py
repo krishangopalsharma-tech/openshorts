@@ -327,6 +327,9 @@ def _norm(word):
     return _WORD_NORM_RE.sub("", str(word)).lower()
 
 
+ANCHOR_MIN = 5
+
+
 def detect_offset(cues, asr_words, window_start, window_end,
                   bin_seconds=PROBE_BIN_SECONDS, max_offset=PROBE_MAX_OFFSET,
                   min_word_len=3):
@@ -351,14 +354,16 @@ def detect_offset(cues, asr_words, window_start, window_end,
     transcript = cues_to_transcript(band)
     cue_index = {}
     for seg in transcript["segments"]:
-        for w in seg["words"]:
+        for k, w in enumerate(seg["words"]):
             key = _norm(w["word"])
             if len(key) >= min_word_len:
-                cue_index.setdefault(key, []).append(w["start"])
+                # k == 0: the cue's first word starts exactly at the cue
+                # start; later words only have the even spread's guess.
+                cue_index.setdefault(key, []).append((w["start"], k == 0))
 
     votes = []
     matched = 0
-    for w in asr_words:
+    for wi, w in enumerate(asr_words):
         key = _norm(w.get("word", ""))
         if len(key) < min_word_len or key not in cue_index:
             continue
@@ -367,22 +372,37 @@ def detect_offset(cues, asr_words, window_start, window_end,
         except (KeyError, TypeError, ValueError):
             continue
         matched += 1
-        for ct in cue_index[key]:
+        for ct, first in cue_index[key]:
             # offset = shift applied to the SRT: srt + offset == video.
             d = t - ct
             if abs(d) <= max_offset:
-                votes.append(d)
+                votes.append((d, wi, first))
 
     if not votes:
         return {"offset": 0.0, "confidence": 0.0, "matches": matched, "votes": 0}
 
-    bins = Counter(int(math.floor(d / bin_seconds)) for d in votes)
+    # A cue's first word carries its true time; the spread guesses the
+    # rest, so a first-word vote counts three times when picking the bin.
+    bins = Counter()
+    for d, _, first in votes:
+        bins[int(math.floor(d / bin_seconds))] += 3 if first else 1
     best_bin, _ = max(bins.items(), key=lambda kv: (kv[1], -abs(kv[0])))
-    near = [d for d in votes
-            if best_bin - 1 <= int(math.floor(d / bin_seconds)) <= best_bin + 1]
-    offset = sum(near) / len(near)
+    near = [v for v in votes
+            if best_bin - 1 <= int(math.floor(v[0] / bin_seconds)) <= best_bin + 1]
+    # The even spread puts a cue's later words late, which biased every
+    # offset ~0.25 s early on real audio (14-nov-2026); a cue's first word
+    # has its true time, so it decides whenever enough of them matched.
+    anchors = [d for d, _, first in near if first]
+    pick = anchors if len(anchors) >= ANCHOR_MIN else [d for d, _, _ in near]
+    offset = sum(pick) / len(pick)
     confidence = len(near) / float(len(votes))
+    # Share of the HEARD words that agree. ``confidence`` divides by every
+    # candidate vote, and a common word ("that", "the") votes once per
+    # occurrence in the band, so a correct offset scored 0.3-0.45 on real
+    # speech. Agreement per word is what says the offset is real.
+    support = len({wi for _, wi, _ in near}) / float(matched) if matched else 0.0
     return {"offset": round(offset, 2), "confidence": round(confidence, 3),
+            "support": round(support, 3), "anchors": len(anchors),
             "matches": matched, "votes": len(votes)}
 
 
@@ -455,6 +475,216 @@ def probe_offset(video_path, cues, duration, transcriber=None, workdir=None,
     result = detect_offset(cues, words, start, end)
     result["window"] = [start, end]
     return result
+
+
+# --- sync over the whole film (14-nov-2026) ---------------------------------
+#
+# One 60 s probe at 25% finds a constant offset and nothing else. Two real
+# failures it cannot see: DRIFT (an SRT timed for a 25 fps release on a
+# 23.976 fps file runs 4% fast: 0 s out at the start, ~5 s by the end of a
+# two-hour film) and a JUMP (an SRT from another cut is right until a removed
+# scene, then off by that scene's length). So the same probe runs at five
+# points and a model is fitted to the points that heard enough words:
+# constant, linear (offset + drift) or piecewise (straight lines between the
+# points, for a jump). ``apply_sync`` moves every cue by the model's offset at
+# that cue's time.
+
+SYNC_FRACTIONS = (0.1, 0.3, 0.5, 0.7, 0.9)
+SYNC_MIN_SUPPORT = 0.4        # share of heard words agreeing with the offset
+SYNC_JUMP_SECONDS = 1.0       # two neighbouring points this far apart = a jump to locate
+SYNC_BISECT_STEPS = 3         # probes spent narrowing each jump
+SYNC_BISECT_SECONDS = 30.0
+SYNC_SECONDS = 45.0
+SYNC_MIN_MATCHES = 8
+SYNC_MIN_CONFIDENCE = 0.5
+SYNC_CONSTANT_SPAN = 0.25     # a linear fit moving less than this over the film is constant
+SYNC_LINEAR_RESIDUAL = 0.35   # worst point further than this from the line -> piecewise
+
+
+def _point_ok(r):
+    return (not r.get("error") and r.get("matches", 0) >= SYNC_MIN_MATCHES
+            and (r.get("confidence", 0) >= SYNC_MIN_CONFIDENCE or r.get("support", 0) >= SYNC_MIN_SUPPORT))
+
+
+def fit_sync(points, duration):
+    """Model from probe points ``[{"t", "offset", "ok"}]`` (``t`` in SRT time).
+
+    ``{"kind": "none"|"constant"|"linear"|"piecewise", "offset", "rate",
+    "knots": [[t, offset]], "residual"}``. ``offset`` is the offset at t=0
+    (constant/linear), ``rate`` seconds of offset per second of film."""
+    good = sorted(((float(p["t"]), float(p["offset"])) for p in points if p.get("ok")), key=lambda x: x[0])
+    if not good:
+        return {"kind": "none", "offset": 0.0, "rate": 0.0, "knots": [], "residual": None}
+    if len(good) == 1:
+        return {"kind": "constant", "offset": round(good[0][1], 3), "rate": 0.0,
+                "knots": [[round(good[0][0], 2), round(good[0][1], 3)]], "residual": 0.0}
+    n = len(good)
+    mt = sum(t for t, _ in good) / n
+    mo = sum(o for _, o in good) / n
+    var = sum((t - mt) ** 2 for t, _ in good)
+    rate = sum((t - mt) * (o - mo) for t, o in good) / var if var > 0 else 0.0
+    a = mo - rate * mt
+    residual = max(abs(o - (a + rate * t)) for t, o in good)
+    knots = [[round(t, 2), round(o, 3)] for t, o in good]
+    span = abs(rate) * max(1.0, float(duration))
+    if residual <= SYNC_LINEAR_RESIDUAL and span < SYNC_CONSTANT_SPAN:
+        med = sorted(o for _, o in good)[n // 2] if n % 2 else sum(sorted(o for _, o in good)[n // 2 - 1:n // 2 + 1]) / 2
+        return {"kind": "constant", "offset": round(med, 3), "rate": 0.0, "knots": knots,
+                "residual": round(max(abs(o - med) for _, o in good), 3)}
+    if residual <= SYNC_LINEAR_RESIDUAL:
+        return {"kind": "linear", "offset": round(a, 3), "rate": round(rate, 7), "knots": knots,
+                "residual": round(residual, 3)}
+    return {"kind": "piecewise", "offset": round(good[0][1], 3), "rate": 0.0, "knots": knots,
+            "residual": round(residual, 3)}
+
+
+def sync_offset_at(sync, t):
+    """The model's offset (seconds to ADD) at SRT time ``t``."""
+    kind = (sync or {}).get("kind")
+    if kind == "linear":
+        return sync["offset"] + sync["rate"] * t
+    if kind == "piecewise":
+        knots = sync["knots"]
+        if t <= knots[0][0]:
+            return knots[0][1]
+        for (t0, o0), (t1, o1) in zip(knots, knots[1:]):
+            if t <= t1:
+                # A jump is a step at one place, not a ramp: hold the earlier
+                # offset until the midpoint between the two probes, then switch.
+                return o0 if t < (t0 + t1) / 2 else o1
+        return knots[-1][1]
+    if kind == "constant":
+        return sync["offset"]
+    return 0.0
+
+
+def apply_sync(cues, sync):
+    """Cues moved by the model's offset at each cue's start, clamped at 0."""
+    if not sync or sync.get("kind") in (None, "none"):
+        return [dict(c) for c in cues]
+    out = []
+    for c in cues:
+        off = sync_offset_at(sync, c["start"])
+        start = max(0.0, c["start"] + off)
+        end = max(start, c["end"] + off)
+        if end > start:
+            out.append({**c, "start": round(start, 3), "end": round(end, 3)})
+    return out
+
+
+def probe_sync(video_path, cues, duration, transcriber=None, fractions=SYNC_FRACTIONS,
+               probe_seconds=SYNC_SECONDS, on_point=None):
+    """Run ``probe_offset`` at every fraction and fit the model. Never raises.
+
+    ``{"points": [{"at", "t", "offset", "confidence", "matches", "ok",
+    "error"?}], "model": fit_sync(...)}``; ``at`` is the probe's centre in
+    video time, ``t`` the same moment in SRT time (``at - offset``), which is
+    what the model is a function of. ``on_point(i, point)`` reports progress."""
+    duration = float(duration)
+
+    def probe_at(frac, seconds):
+        r = probe_offset(video_path, cues, duration, transcriber=transcriber,
+                         probe_seconds=seconds, at=frac)
+        w0, w1 = r.get("window") or (0.0, 0.0)
+        at = (w0 + w1) / 2.0
+        point = {"at": round(at, 2), "t": round(at - float(r.get("offset") or 0.0), 2),
+                 "offset": r.get("offset", 0.0), "confidence": r.get("confidence", 0.0),
+                 "support": r.get("support", 0.0),
+                 "matches": r.get("matches", 0), "ok": _point_ok(r)}
+        if r.get("error"):
+            point["error"] = r["error"]
+        points.append(point)
+        if on_point:
+            on_point(len(points) - 1, point)
+        return point
+
+    points = []
+    for frac in fractions:
+        probe_at(frac, probe_seconds)
+
+    # A jump between two neighbouring good points is somewhere in the gap;
+    # the piecewise model would switch at the midpoint and leave everything
+    # between the midpoint and the real cut off by the jump (3 s on a live
+    # test, 14-nov-2026). Halve the gap a few times to put the switch near
+    # where the cut really is.
+    if duration > 0 and fit_sync(points, duration)["kind"] == "piecewise":
+        good = sorted((p for p in points if p["ok"]), key=lambda p: p["at"])
+        for a, b in zip(good, good[1:]):
+            if abs(b["offset"] - a["offset"]) < SYNC_JUMP_SECONDS:
+                continue
+            lo, hi = a, b
+            for _ in range(SYNC_BISECT_STEPS):
+                if hi["at"] - lo["at"] < 2 * SYNC_BISECT_SECONDS:
+                    break
+                mid = probe_at(((lo["at"] + hi["at"]) / 2.0 - SYNC_BISECT_SECONDS / 2.0) / duration,
+                               SYNC_BISECT_SECONDS)
+                mid["refine"] = True
+                if not mid["ok"]:
+                    break
+                if abs(mid["offset"] - lo["offset"]) < abs(mid["offset"] - hi["offset"]):
+                    lo = mid
+                else:
+                    hi = mid
+    points.sort(key=lambda p: p["at"])
+    return {"points": points, "model": fit_sync(points, duration)}
+
+
+# --- transcript from the audio when there is no SRT ---------------------------
+
+WHISPER_CUE_MAX_WORDS = 10
+WHISPER_CUE_MAX_SECONDS = 5.0
+
+
+def transcript_to_cues(transcript, max_words=WHISPER_CUE_MAX_WORDS, max_seconds=WHISPER_CUE_MAX_SECONDS):
+    """Whisper segments -> subtitle-sized cues, split on word timings so a
+    long segment becomes several lines a caption can carry."""
+    cues = []
+    for seg in (transcript or {}).get("segments", []) or []:
+        words = [w for w in (seg.get("words") or []) if str(w.get("word", "")).strip()]
+        if not words:
+            text = " ".join(str(seg.get("text") or "").split())
+            if text and float(seg.get("end", 0)) > float(seg.get("start", 0)):
+                cues.append({"start": round(float(seg["start"]), 3), "end": round(float(seg["end"]), 3), "text": text})
+            continue
+        cur = []
+        for w in words:
+            if cur and (len(cur) >= max_words or float(w["end"]) - float(cur[0]["start"]) > max_seconds):
+                cues.append(_cue_from_words(cur))
+                cur = []
+            cur.append(w)
+        if cur:
+            cues.append(_cue_from_words(cur))
+    return [c for c in cues if c["end"] > c["start"] and c["text"]]
+
+
+def _cue_from_words(words):
+    text = " ".join(" ".join(str(w["word"]).strip() for w in words).split())
+    return {"start": round(float(words[0]["start"]), 3), "end": round(float(words[-1]["end"]), 3), "text": text}
+
+
+def write_srt(cues, path):
+    def ts(t):
+        ms = int(round(float(t) * 1000))
+        h, rem = divmod(ms, 3600000)
+        m, rem = divmod(rem, 60000)
+        sec, ms = divmod(rem, 1000)
+        return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+    rows = []
+    for i, c in enumerate(cues, 1):
+        rows += [str(i), f"{ts(c['start'])} --> {ts(c['end'])}", c["text"], ""]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(rows))
+    return path
+
+
+def transcribe_film(video_path, transcriber=None):
+    """The whole film through whisper (the pipeline's default model), as
+    cues. Slow on purpose-built hardware too: ~1/10 of the runtime on an
+    8 GB card; the caller runs it in the background."""
+    if transcriber is None:
+        from transcribe_backends import transcribe_media
+        transcriber = transcribe_media
+    return transcript_to_cues(transcriber(video_path))
 
 
 # --- speed ------------------------------------------------------------------

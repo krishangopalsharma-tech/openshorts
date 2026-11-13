@@ -133,10 +133,22 @@ def _update(sid, fn):
 
 
 def _cues(sess):
+    """The session's cues on the VIDEO's clock: a hand-typed offset wins,
+    else the sync model fitted over the film (``fp.probe_sync``), else the
+    stored constant offset. A whisper-made transcript is already on it."""
+    tr = sess.get("transcribing") or {}
+    if tr.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="the film is still being transcribed")
+    if not sess.get("subtitle_path"):
+        raise HTTPException(status_code=409, detail=f"no transcript: {tr.get('error') or 'transcription did not finish'}")
     try:
         cues = fp.parse_subtitles(sess["subtitle_path"])
     except (fp.SubtitleError, OSError) as exc:
         raise HTTPException(status_code=400, detail=f"subtitles unreadable: {exc}")
+    if sess.get("transcript_source") == "whisper":
+        return cues
+    if not sess.get("offset_set_by_user") and (sess.get("sync") or {}).get("model", {}).get("kind") not in (None, "none"):
+        return fp.apply_sync(cues, sess["sync"]["model"])
     return fp.shift_cues(cues, float(sess.get("offset") or 0.0))
 
 
@@ -223,7 +235,9 @@ EDITS_DEFAULTS = {"shorts_grade": "gritty", "caption_preset": "neon_punch", "sho
 class SessionRequest(BaseModel):
     kind: str = "recap"
     video_path: str
-    subtitle_path: str
+    # Optional: without one the film is transcribed by whisper in the
+    # background (``transcribing`` on the session) and the cues come from it.
+    subtitle_path: Optional[str] = None
     settings: Dict[str, Any] = {}
     probe_offset: bool = True
     title: Optional[str] = None
@@ -235,12 +249,16 @@ async def create_session(req: SessionRequest):
     if req.kind not in SESSION_KINDS:
         raise HTTPException(status_code=400, detail=f"kind must be one of {', '.join(SESSION_KINDS)}")
     video = _check_local_file(req.video_path, "video", _VIDEO_EXTS)
-    subs = _check_local_file(req.subtitle_path, "subtitle file", fp.SUBTITLE_EXTENSIONS)
-    try:
-        cues = fp.parse_subtitles(subs)
-    except fp.SubtitleError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    duration = _probe_duration(video) or fp.transcript_duration(fp.cues_to_transcript(cues))
+    subs, cues = None, []
+    if (req.subtitle_path or "").strip():
+        subs = _check_local_file(req.subtitle_path, "subtitle file", fp.SUBTITLE_EXTENSIONS)
+        try:
+            cues = fp.parse_subtitles(subs)
+        except fp.SubtitleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    duration = _probe_duration(video) or (fp.transcript_duration(fp.cues_to_transcript(cues)) if cues else 0.0)
+    if not duration:
+        raise HTTPException(status_code=400, detail="could not read the film's duration")
     base = {**RECAP_DEFAULTS, **(EDITS_DEFAULTS if req.kind == "edits" else {})}
     settings = {**base, **{k: v for k, v in (req.settings or {}).items() if k in RECAP_DEFAULTS}}
     sess = {
@@ -252,23 +270,103 @@ async def create_session(req: SessionRequest):
         "recap": {"spoilers": None, "manual_excluded": [], "protected": None,
                   "structure": None, "plans": {}, "budget": None},
         "shorts": {"plan": None, "previews": []},
+        "transcript_source": "srt" if subs else "whisper",
+        "sync": None,
+        "transcribing": None if subs else {"status": "queued", "started": time.time()},
     }
     _save(sess)
-    if req.probe_offset:
+    if not subs:
+        _start_thread(_transcribe_film_job, sess["id"])
+    elif req.probe_offset:
         _start_thread(_probe_offset_job, sess["id"])
     return _public(sess)
 
 
+def _release_asr():
+    """The API process keeps no ASR model resident (CLAUDE.md, concurrency)."""
+    try:
+        import transcribe_backends
+        transcribe_backends.release_models()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _transcribe_film_job(sid):
+    """No SRT: the whole film through whisper, written as ``whisper.srt`` in
+    the session dir so every later step reads it exactly like a real SRT."""
+    _update(sid, lambda s: s.update(transcribing={**(s.get("transcribing") or {}), "status": "running",
+                                                   "started": time.time()}))
+    sess = _load(sid)
+    try:
+        cues = fp.transcribe_film(sess["video_path"])
+        if not cues:
+            raise RuntimeError("whisper heard no speech in the film")
+        path = fp.write_srt(cues, os.path.join(_session_dir(sid), "whisper.srt"))
+
+        def done(s):
+            s["subtitle_path"] = path
+            s["cue_count"] = len(cues)
+            s["offset"] = 0.0
+            s["offset_probe"] = {"offset": 0.0, "confidence": 1.0, "matches": len(cues), "votes": 0,
+                                 "source": "whisper"}
+            s["transcribing"] = {**(s.get("transcribing") or {}), "status": "done", "finished": time.time()}
+        _update(sid, done)
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)[:300]
+        _update(sid, lambda s: s.update(transcribing={**(s.get("transcribing") or {}), "status": "failed",
+                                                       "error": msg, "finished": time.time()}))
+    finally:
+        _release_asr()
+
+
 def _probe_offset_job(sid):
+    """Check the SRT against the audio at five points (``fp.probe_sync``) and
+    store the fitted model; ``offset_probe`` keeps its old one-number shape
+    (the model's offset at mid-film) for anything that reads it."""
     sess = _load(sid)
     cues = fp.parse_subtitles(sess["subtitle_path"])
-    result = fp.probe_offset(sess["video_path"], cues, sess["duration"])
+
+    def progress(i, point):
+        def fn(s):
+            sync = s.get("sync") or {"points": [], "model": None, "status": "running"}
+            sync["points"] = (sync.get("points") or [])[:i] + [point]
+            s["sync"] = sync
+        _update(sid, fn)
+
+    _update(sid, lambda s: s.update(sync={"points": [], "model": None, "status": "running"}))
+    try:
+        result = fp.probe_sync(sess["video_path"], cues, sess["duration"], on_point=progress)
+    finally:
+        _release_asr()
+    model = result["model"]
+    ok = [p for p in result["points"] if p.get("ok")]
+    mid = round(fp.sync_offset_at(model, sess["duration"] / 2.0), 2) if model["kind"] != "none" else 0.0
+    summary = {"offset": mid, "matches": sum(p.get("matches", 0) for p in result["points"]),
+               "confidence": round(sum(p.get("confidence", 0) for p in ok) / len(ok), 3) if ok else 0.0,
+               "votes": 0, "points_ok": len(ok), "points": len(result["points"]), "kind": model["kind"]}
+    errors = [p["error"] for p in result["points"] if p.get("error")]
+    if errors and not ok:
+        summary["error"] = errors[0]
 
     def fn(s):
-        s["offset_probe"] = result
-        if result.get("confidence", 0) >= 0.5 and result.get("matches", 0) >= 8 and not s.get("offset_set_by_user"):
-            s["offset"] = result["offset"]
+        s["sync"] = {**result, "status": "done"}
+        s["offset_probe"] = summary
+        if model["kind"] != "none" and not s.get("offset_set_by_user"):
+            s["offset"] = mid
     _update(sid, fn)
+
+
+@router.post("/api/film/session/{sid}/sync")
+async def resync(sid: str):
+    """Run the five-point check again (and drop a hand-typed offset)."""
+    _guard()
+    sess = _load(sid)
+    if sess.get("transcript_source") == "whisper" or not sess.get("subtitle_path"):
+        raise HTTPException(status_code=400, detail="this film's transcript came from whisper; there is no SRT to sync")
+    _update(sid, lambda s: s.update(offset_set_by_user=False, offset_probe=None,
+                                    sync={"points": [], "model": None, "status": "running"}))
+    _start_thread(_probe_offset_job, sid)
+    return _public(_load(sid))
 
 
 @router.get("/api/film/sessions")
@@ -365,7 +463,8 @@ async def status(sid: str):
     _guard()
     sess = _load(sid)
     return {"id": sid, "renders": sess.get("renders", {}), "offset": sess.get("offset"),
-            "offset_probe": sess.get("offset_probe")}
+            "offset_probe": sess.get("offset_probe"), "sync": sess.get("sync"),
+            "transcribing": sess.get("transcribing")}
 
 
 # --- movie recap ------------------------------------------------------------
