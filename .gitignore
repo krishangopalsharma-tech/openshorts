@@ -65,3 +65,6 @@ plan/behind_example.ass
 # Instrucciones locales con datos de infra (repo público)
 CLAUDE.local.md
 graphify-out/
+
+# per-track tempo/drop cache written by music.analyze_track
+assets/music/.analysis.json
