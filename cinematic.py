@@ -28,7 +28,22 @@ COLOR_GRADES = {
     # more than cleverness.
     "washed": "eq=saturation=0.78:contrast=1.04:brightness=0.03",
     "cold": "eq=saturation=0.95:gamma_b=1.08:gamma_r=0.95",
+    # The "crunchy" movie-edit look (Movie Shorts climax plan, 14-nov-2026):
+    # light temporal denoise so the sharpening does not lift grain, a hard
+    # luma unsharp, then teal/orange. Expensive next to the others (hqdn3d).
+    "gritty": ("hqdn3d=3:2:4:3,unsharp=5:5:1.4:5:5:0.0,"
+               "colorbalance=rs=0.10:bs=-0.10:rm=0.08:bm=-0.08:rh=-0.04:bh=0.08,"
+               "eq=contrast=1.18:saturation=1.22:brightness=-0.03"),
 }
+
+# Beat punches (film_montage climax tail): at each time a white flash over
+# two frames and a zoom that starts at PUNCH_ZOOM and eases back to 1 over
+# PUNCH_SECONDS. Not a DEFAULTS key: it is a list of times, set by the
+# montage render, not a toggle the look modal offers.
+PUNCH_ZOOM = 1.12
+PUNCH_SECONDS = 0.28
+FLASH_FRAMES = ((0.0, 0.034, 0.85), (0.034, 0.075, 0.4))   # (from, to, white alpha)
+MAX_PUNCHES = 12
 
 DEFAULTS = dict(
     color_grade="none",
@@ -57,6 +72,9 @@ def normalize(effects):
     out = dict(DEFAULTS)
     if not isinstance(effects, dict):
         return out
+    punches = _punch_times(effects.get("punches"))
+    if punches:
+        out["punches"] = punches
     for key in DEFAULTS:
         if key not in effects or effects[key] is None:
             continue
@@ -73,9 +91,43 @@ def normalize(effects):
     return out
 
 
+def _punch_times(value):
+    if not isinstance(value, (list, tuple)):
+        return []
+    times = []
+    for v in value[:MAX_PUNCHES]:
+        try:
+            t = float(v)
+        except (TypeError, ValueError):
+            continue
+        if t >= 0 and t == t:
+            times.append(round(t, 3))
+    return sorted(set(times))
+
+
+def punch_filters(times, width, height, zoom=PUNCH_ZOOM, seconds=PUNCH_SECONDS):
+    """Comma-joined filters for zoom punches + white flashes at ``times``.
+
+    The zoom is a per-frame ``scale`` (eval=frame) by a factor that is
+    ``zoom`` at a punch and eases linearly to 1, then a centre crop back to
+    the frame, so the output size never changes."""
+    if not times:
+        return ""
+    terms = "+".join(f"{zoom - 1.0:.4f}*clip(1-(t-{t:.3f})/{seconds:.3f},0,1)*gte(t,{t:.3f})"
+                     for t in times)
+    factor = f"(1+{terms})"
+    parts = [f"scale=w='2*trunc(iw*{factor}/2)':h='2*trunc(ih*{factor}/2)':eval=frame",
+             f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2"]
+    for t in times:
+        for a, b, alpha in FLASH_FRAMES:
+            parts.append(f"drawbox=x=0:y=0:w={width}:h={height}:color=white@{alpha}:t=fill"
+                         f":enable='between(t,{t + a:.3f},{t + b:.3f})'")
+    return ",".join(parts)
+
+
 def is_noop(effects):
     e = normalize(effects)
-    return (e["color_grade"] == "none" and not e["glow"] and not e["grain"]
+    return (e["color_grade"] == "none" and not e.get("punches") and not e["glow"] and not e["grain"]
             and not e["vignette"] and not e["bottom_gradient"]
             and not e["top_gradient"] and not e["letterbox"])
 
@@ -153,6 +205,9 @@ def build_filter_complex(effects, width, height):
         bands = _gradient_bands(0, band_h, width, height,
                                 e["top_gradient_strength"], edge_at_bottom=False)
         cur = emit(",".join(bands))
+
+    if e.get("punches"):
+        cur = emit(punch_filters(e["punches"], width, height))
 
     if e["letterbox"]:
         bar_h = max(1, int(height * (0.05 + e["letterbox_size"] * 0.09)))  # 5%-14% of height

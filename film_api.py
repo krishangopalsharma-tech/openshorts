@@ -64,6 +64,9 @@ RECAP_DEFAULTS = {
     # resting level and duck, the channel watermark and the caption preset.
     "shorts_count": 3, "shorts_ratio": "9:16", "music_track": None,
     "music_db": -16.0, "music_duck": 70.0, "watermark_text": "", "caption_preset": "film_pop",
+    # Climax tail (film_montage.climax_segments): render the chat's flash
+    # shots after the story, the bed's level there, and the short's grade.
+    "shorts_climax": True, "shorts_climax_db": -3.0, "shorts_grade": "none",
 }
 
 
@@ -329,6 +332,10 @@ async def set_settings(sid: str, request: Request):
         import music as _music
         if not _music.resolve_track(clean["music_track"]):
             raise HTTPException(status_code=400, detail=f"music track not found: {clean['music_track']}")
+    if "shorts_grade" in clean:
+        import cinematic
+        if clean["shorts_grade"] not in cinematic.COLOR_GRADES:
+            raise HTTPException(status_code=400, detail=f"unknown grade {clean['shorts_grade']}")
     if "caption_preset" in clean:
         import caption_styles
         if clean["caption_preset"] not in caption_styles.STYLE_PRESETS:
@@ -1007,7 +1014,8 @@ def _render_short_job(sid, index):
             raise film_render.RenderError(f"short {index + 1} has no plan")
         preview = previews[index]
         short = fm.ShortsPlan.model_validate(_shorts(sess)["plan"]).shorts[preview["index"]]
-        segments = recut.normalize_segments(preview["segments"], sess["duration"])
+        fps = recut.probe_fps(sess["video_path"])
+        segments = recut.normalize_segments(recut.frame_align(preview["segments"], fps), sess["duration"])
         fmt = _RATIO_TO_FORMAT.get(st.get("shorts_ratio"), "vertical")
 
         job_id = str(uuid.uuid4())
@@ -1017,11 +1025,40 @@ def _render_short_job(sid, index):
         clean_name = f"{base}_clip_1.mp4"
         _log(sid, key, f"🎬 {len(segments)} cuts, {fm.total_seconds(segments):.0f} s → job {job_id[:8]}")
 
+        track = st.get("music_track") or (fm.pick_track(short.mood, _music.list_tracks()) or {}).get("file")
+        music_raw = {"track": track, "volume_db": st.get("music_db", -16.0),
+                     "duck": st.get("music_duck", 70.0), "profile": "dialogue"}
+
+        # Climax tail: picture-only shots after the story, cut to the bed's
+        # beat, the drop solved onto the first one, a punch on every cut.
+        climax_info, punches = None, []
+        cx_ranges = preview.get("climax") or []
+        if cx_ranges and st.get("shorts_climax", True):
+            analysis = {}
+            track_path = _music.resolve_track(track) if track else None
+            if track_path:
+                analysis = _music.analyze_track(track_path)
+            cx_segs = recut.frame_align(fm.climax_segments(cx_ranges, analysis.get("beat_period")), fps)
+            if cx_segs and len(segments) + len(cx_segs) <= recut.MAX_SEGMENTS:
+                climax_at = fm.total_seconds(segments)
+                segments = recut.normalize_segments(segments + cx_segs, sess["duration"])
+                punches = fm.cut_times(cx_segs, climax_at)
+                music_raw.update(climax_at=climax_at, climax_db=st.get("shorts_climax_db", -3.0),
+                                 drop_at=analysis.get("drop_at"))
+                climax_info = {"at": climax_at, "shots": cx_segs, "punches": punches,
+                               "bpm": analysis.get("bpm"), "drop_at": analysis.get("drop_at")}
+                _log(sid, key, f"⚡ climax: {len(cx_segs)} shots at {climax_at:.1f} s"
+                     + (f", {analysis['bpm']:.0f} bpm" if analysis.get("bpm") else "")
+                     + (f", drop {analysis['drop_at']:.1f} s into the track" if analysis.get("drop_at") is not None else ", no drop found"))
+            elif cx_segs:
+                _log(sid, key, f"climax skipped: {len(segments)} cuts already, max {recut.MAX_SEGMENTS}")
+
         transcript = fp.cues_to_transcript(_cues(sess))
         v_transcript = recut.virtual_transcript(transcript, segments)
-        track = st.get("music_track") or (fm.pick_track(short.mood, _music.list_tracks()) or {}).get("file")
-        music_spec = _music.normalize({"track": track, "volume_db": st.get("music_db", -16.0),
-                                       "duck": st.get("music_duck", 70.0), "profile": "dialogue"}) if track else None
+        music_spec = _music.normalize(music_raw) if track else None
+        look = {"color_grade": st.get("shorts_grade") or "none"}
+        if punches:
+            look["punches"] = punches
         clip = {
             "start": min(s["start"] for s in segments), "end": max(s["end"] for s in segments),
             "video_title_for_youtube_short": short.title[:100], "viral_hook_text": short.hook or short.title,
@@ -1033,7 +1070,9 @@ def _render_short_job(sid, index):
                                            "end": max(s["end"] for s in segments)}},
             "output_format": fmt, "music": music_spec, "overlays": fm.watermark(st.get("watermark_text")),
             "caption_style": fm.caption_style(st.get("caption_preset") or "film_pop"),
-            "film_session": sid, "montage": {"mood": short.mood, "scenes": preview.get("scenes") or []},
+            "cinematic": look if (look["color_grade"] != "none" or punches) else None,
+            "film_session": sid, "montage": {"mood": short.mood, "scenes": preview.get("scenes") or [],
+                                             "climax": climax_info},
         }
         data = {"shorts": [clip], "transcript": transcript, "source_video": os.path.basename(sess["video_path"]),
                 "source_path": sess["video_path"], "output_format": fmt, "film_session": sid,

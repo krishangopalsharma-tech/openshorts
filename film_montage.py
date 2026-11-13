@@ -50,6 +50,18 @@ MIN_SEGMENT_SECONDS = 0.5
 MIN_CUT_GAP_SECONDS = 0.5            # two cuts closer than this on the source are one cut
 CAPTION_WORDS_MAX = 9                # a line longer than this will wrap; warn
 
+# Climax tail (14-nov-2026): after the story's last line, 3-6 picture-only
+# flash shots from anywhere in the film, the film's audio muted, the bed at
+# full level with its drop on the first shot, a white flash and a zoom punch
+# on every cut. It is the one fast-cut stretch, a few seconds long, AFTER the
+# story: the removed crop-ladder design (0c58b66) cut the whole short to the
+# beat and that is what read as a vibrating picture. Shots keep the film's
+# own framing (reframe TRACK like the rest), no per-shot crop.
+CLIMAX_SHOTS_RANGE = (3, 6)
+CLIMAX_SHOT_SECONDS = (0.5, 2.0)     # what the chat may name per shot
+CLIMAX_SHOT_TARGET = (0.6, 1.4)      # what a beat-snapped shot is cut to
+CLIMAX_TOTAL_MAX = 9.0
+
 MOODS = ("funny", "tense", "epic", "heartfelt", "eerie", "driving", "romantic")
 
 # Track picking is by filename keywords: the library is what the user dropped
@@ -57,10 +69,10 @@ MOODS = ("funny", "tense", "epic", "heartfelt", "eerie", "driving", "romantic")
 # first track alphabetically is the fallback.
 MOOD_TRACK_WORDS = {
     "funny": ("upbeat", "fun", "quirky", "comedy", "happy", "bounce", "ukulele"),
-    "driving": ("percussion", "fast", "dynamic", "drive", "beat", "energy"),
-    "epic": ("epic", "force", "trailer", "power", "orchestra"),
-    "tense": ("shadow", "dark", "tension", "cinematic", "suspense", "thriller"),
-    "eerie": ("eerie", "horror", "creep", "ambient", "shadow", "dark"),
+    "driving": ("phonk", "percussion", "fast", "dynamic", "drive", "beat", "energy"),
+    "epic": ("epic", "force", "trailer", "power", "orchestra", "phonk"),
+    "tense": ("synthwave", "shadow", "dark", "tension", "cinematic", "suspense", "thriller"),
+    "eerie": ("eerie", "horror", "creep", "synthwave", "ambient", "shadow", "dark"),
     "heartfelt": ("emotional", "piano", "soft", "warm", "hope", "inspir"),
     "romantic": ("romantic", "love", "piano", "soft", "acoustic"),
 }
@@ -140,6 +152,13 @@ RULES
 - ``mood`` is one of: {MOODS}. It picks the music bed.
 - ``hook`` is the first caption the viewer reads before any dialogue: 3-8
   words, a question or a dare, no film title.
+- ``climax`` (optional, recommended for action, thriller, mystery and
+  underdog films): {CX_MIN}-{CX_MAX} picture-only flash shots played AFTER the last
+  scene, on the music's drop, with no dialogue: the hero at full power, the
+  reveal, the payoff the short promised. Name each by time, {CX_SMIN}-{CX_SMAX:.0f} s,
+  from anywhere in the film (a shot must not overlap a scene's lines). Pick
+  shots that read in one glance with no sound. Omit ``climax`` (or leave it
+  empty) for a comedy that ends on its punchline.
 
 Return ONLY this JSON:
 {{
@@ -149,6 +168,7 @@ Return ONLY this JSON:
       "hook": "He fought dictators. Then came breakfast.",
       "mood": "funny",
       "ending": "the ally he trusted pulls a gun; the short ends on 'Good work'",
+      "climax": [{{"start": "1:21:04", "end": "1:21:05.5", "note": "he kicks the door in"}}],
       "scenes": [
         {{"lines": [412, 413], "hold_after": 2.0, "extra": [{{"start": "44:41", "end": "44:47"}}], "note": "breakfast, toast catches fire"}},
         {{"lines": [388, 389, 391], "hold_after": 0, "extra": [], "note": "bathroom door"}}
@@ -170,6 +190,8 @@ def build_prompt(cues, duration, title, count=3):
         CAP_WORDS=CAPTION_WORDS_MAX, SC_MIN=SCENES_RANGE[0], SC_MAX=SCENES_RANGE[1],
         T_MIN=TOTAL_SECONDS_RANGE[0], T_MAX=TOTAL_SECONDS_RANGE[1], TARGET=TARGET_SECONDS,
         HOLD_MAX=HOLD_AFTER_MAX, EXTRA_MAX=EXTRA_RANGE_MAX, MOODS=", ".join(MOODS),
+        CX_MIN=CLIMAX_SHOTS_RANGE[0], CX_MAX=CLIMAX_SHOTS_RANGE[1],
+        CX_SMIN=CLIMAX_SHOT_SECONDS[0], CX_SMAX=CLIMAX_SHOT_SECONDS[1],
         LINES=lines_text(lines))
 
 
@@ -183,6 +205,10 @@ class ExtraRange(BaseModel):
 
     def seconds(self):
         return fp.parse_timestamp(str(self.start)), fp.parse_timestamp(str(self.end))
+
+
+class ClimaxShot(ExtraRange):
+    note: str = ""
 
 
 class Scene(BaseModel):
@@ -202,6 +228,7 @@ class Short(BaseModel):
     hook: str = ""
     mood: str = "funny"
     ending: str = ""
+    climax: List[ClimaxShot] = Field(default_factory=list, max_length=CLIMAX_SHOTS_RANGE[1] + 2)
     scenes: List[Scene] = Field(min_length=1, max_length=SCENES_RANGE[1] + 6)
 
     @field_validator("mood")
@@ -291,6 +318,55 @@ def short_segments(short, by_id, duration, **kw):
     return all_segments, per_scene
 
 
+def climax_ranges(short, duration):
+    """The chat's climax shots as ``[{start, end, note}]`` on the film, in
+    the chat's order, unusable ones dropped (validation reports them)."""
+    out = []
+    for shot in short.climax:
+        try:
+            s, e = shot.seconds()
+        except (fp.SubtitleError, ValueError):
+            continue
+        s, e = max(0.0, s), min(float(duration), e)
+        if e - s >= MIN_SEGMENT_SECONDS:
+            out.append({"start": round(s, 3), "end": round(e, 3), "note": shot.note})
+    return out
+
+
+def climax_segments(ranges, beat_period=None, *, target=CLIMAX_SHOT_TARGET, total_max=CLIMAX_TOTAL_MAX):
+    """Picture-only (``mute``) EDL segments for the climax tail.
+
+    With the bed's ``beat_period`` every shot is cut to the largest whole
+    number of beats that fits ``target`` (at least one), so each cut, and
+    the flash on it, lands on a beat once the drop is aligned to the first
+    shot. Without it a shot keeps the chat's length clipped to ``target``.
+    A shot never runs past the chat's own end: that frame may be the next
+    shot of the film. Stops adding at ``total_max``."""
+    out, total = [], 0.0
+    for r in ranges:
+        avail = r["end"] - r["start"]
+        if beat_period and beat_period > 0:
+            k = max(1, int(target[1] / beat_period))
+            length = min(avail, k * beat_period)
+        else:
+            length = min(avail, target[1])
+        length = round(max(MIN_SEGMENT_SECONDS, length), 3)
+        if total + length > total_max:
+            break
+        out.append({"start": r["start"], "end": round(r["start"] + length, 3), "mute": True})
+        total += length
+    return out
+
+
+def cut_times(segments, offset=0.0):
+    """Output-timeline second at which each segment starts."""
+    t, out = float(offset), []
+    for s in segments:
+        out.append(round(t, 3))
+        t += s["end"] - s["start"]
+    return out
+
+
 def total_seconds(segments):
     return round(sum(s["end"] - s["start"] for s in segments), 2)
 
@@ -338,6 +414,18 @@ def validate_shorts(data, cues, duration, *, total_range=TOTAL_SECONDS_RANGE, sc
                     errors.append(_err("extra_range", f"extra range {rng.start}-{rng.end} is empty or outside the film", short=si, scene=k))
                 elif e - s > EXTRA_RANGE_MAX:
                     warnings.append(_err("extra_long", f"extra range {rng.start}-{rng.end} is {e - s:.0f} s; cut to {EXTRA_RANGE_MAX:.0f}", short=si, scene=k))
+        cx = climax_ranges(short, duration)
+        if short.climax:
+            if len(cx) != len(short.climax):
+                errors.append(_err("climax_range", "a climax shot is not a time range inside the film", short=si))
+            if not (CLIMAX_SHOTS_RANGE[0] <= len(short.climax) <= CLIMAX_SHOTS_RANGE[1]):
+                warnings.append(_err("climax_count", f"{len(short.climax)} climax shots; {CLIMAX_SHOTS_RANGE[0]}-{CLIMAX_SHOTS_RANGE[1]} reads best", short=si))
+            own = [by_id[i] for sc in short.scenes for i in sc.lines if i in by_id]
+            for r in cx:
+                if r["end"] - r["start"] > CLIMAX_SHOT_SECONDS[1] + 0.01:
+                    warnings.append(_err("climax_long", f"climax shot at {fp.format_timestamp(r['start'])} is {r['end'] - r['start']:.1f} s; it is cut to {CLIMAX_SHOT_TARGET[1]:.1f}", short=si))
+                if any(ln["start"] < r["end"] and ln["end"] > r["start"] for ln in own):
+                    warnings.append(_err("climax_overlap", f"climax shot at {fp.format_timestamp(r['start'])} repeats a scene's line", short=si))
         segments, per_scene = short_segments(short, by_id, duration)
         total = total_seconds(segments)
         if segments and not (total_range[0] <= total <= total_range[1]):
@@ -349,7 +437,8 @@ def validate_shorts(data, cues, duration, *, total_range=TOTAL_SECONDS_RANGE, sc
                 warnings.append(_err("long_run", f"a {secs} s continuous run; over {MAX_RUN_SECONDS:.0f} s of one stretch is what fingerprinting catches", short=si, scene=sc["index"]))
         previews.append({"index": si, "title": short.title, "hook": short.hook, "mood": short.mood,
                          "ending": short.ending, "segments": segments, "scenes": per_scene,
-                         "seconds": total, "cuts": len(segments)})
+                         "seconds": total, "cuts": len(segments),
+                         "climax": cx, "climax_seconds": total_seconds(climax_segments(cx))})
     return plan, errors, warnings, previews
 
 

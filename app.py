@@ -5505,8 +5505,13 @@ async def _look_locked(req: LookRequest, request: Request, job, target_fmt):
     current_fmt = _clip_output_format(clip, data)
     target_fmt = target_fmt or current_fmt
     rerender = target_fmt != current_fmt
-    effects = cinematic.normalize(req.cinematic if req.cinematic is not None
-                                  else (clip.get('cinematic') or {}))
+    requested = req.cinematic if req.cinematic is not None else (clip.get('cinematic') or {})
+    # A Movie Shorts climax stores its beat punches in the look; the modal
+    # never sends them, so a grade change must not drop them.
+    stored_punches = (clip.get('cinematic') or {}).get('punches')
+    if stored_punches and isinstance(requested, dict) and 'punches' not in requested:
+        requested = {**requested, 'punches': stored_punches}
+    effects = cinematic.normalize(requested)
     has_look = not cinematic.is_noop(effects)
 
     base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')

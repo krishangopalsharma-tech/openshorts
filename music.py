@@ -14,6 +14,7 @@ see app.py's layer chain): the video stream is copied, only the audio is
 re-encoded, so a music change costs a couple of seconds per clip and never
 touches the pixels under the captions.
 """
+import json
 import os
 import re
 import shutil
@@ -196,7 +197,41 @@ def normalize(spec):
     profile = str(spec.get("profile") or "").strip()
     if profile in MIX_PROFILES and profile != "voice":
         out["profile"] = profile
+    # Climax tail (film_montage): from ``climax_at`` seconds into the clip the
+    # clip's own audio is muted and the bed rises to ``climax_db``; with
+    # ``drop_at`` (seconds into the TRACK, from analyze_track) the start
+    # offset is solved so the drop lands on ``climax_at``.
+    try:
+        climax_at = float(spec.get("climax_at")) if spec.get("climax_at") is not None else None
+    except (TypeError, ValueError):
+        climax_at = None
+    if climax_at is not None and climax_at > 0:
+        out["climax_at"] = round(climax_at, 3)
+        try:
+            cdb = float(spec.get("climax_db", CLIMAX_DB_DEFAULT))
+        except (TypeError, ValueError):
+            cdb = CLIMAX_DB_DEFAULT
+        out["climax_db"] = round(min(VOLUME_DB_RANGE[1], max(out["volume_db"], cdb)), 1)
+        try:
+            drop = float(spec["drop_at"]) if spec.get("drop_at") is not None else None
+        except (TypeError, ValueError):
+            drop = None
+        if drop is not None and drop >= 0:
+            out["drop_at"] = round(drop, 3)
     return out
+
+
+CLIMAX_DB_DEFAULT = -3.0
+CLIMAX_RAMP_SECONDS = 0.35   # the bed swells over this, ending on the drop
+
+
+def aligned_start(drop_at, climax_at, track_duration):
+    """Seconds into the track to start at so ``drop_at`` plays at clip time
+    ``climax_at``. The track loops (``-stream_loop -1``), so a drop earlier
+    in the track than the climax is in the clip wraps around."""
+    if not track_duration or track_duration <= 0:
+        return max(0.0, drop_at - climax_at)
+    return round((drop_at - climax_at) % track_duration, 3)
 
 
 # Sidechain shapes. ``voice`` is the reels mix a talking head wants: the
@@ -225,14 +260,26 @@ def build_audio_graph(spec, duration, voice=True, profile="voice"):
     fade = spec["fade_out"]
     fade_chain = (f",afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}"
                   if fade > 0 and duration > fade else "")
+    climax_at = spec.get("climax_at")
+    swell = ""
+    mute = ""
+    if climax_at is not None and 0 < climax_at < duration:
+        # Linear gain from 1 to the climax level over the ramp that ENDS on
+        # climax_at, then held. Single quotes keep the commas inside the
+        # expression out of the filtergraph parser.
+        gain = 10 ** ((spec.get("climax_db", CLIMAX_DB_DEFAULT) - spec["volume_db"]) / 20.0)
+        r = CLIMAX_RAMP_SECONDS
+        swell = (f",volume='1+{gain - 1.0:.4f}*clip((t-{climax_at - r:.3f})/{r:.3f},0,1)'"
+                 f":eval=frame")
+        mute = f"volume=0:enable='gte(t,{climax_at:.3f})',"
     music = f"[1:a]volume={spec['volume_db']:.1f}dB,aresample=async=1[__m]"
     if not voice:
-        return f"{music};[__m]atrim=0:{duration:.3f}{fade_chain}[aout]"
+        return f"{music};[__m]atrim=0:{duration:.3f}{swell}{fade_chain}[aout]"
     return (
-        f"[0:a]asplit=2[__v1][__v2];{music};"
+        f"[0:a]{mute}asplit=2[__v1][__v2];{music};"
         f"[__m][__v2]sidechaincompress=threshold={p['threshold']}:ratio={ratio:.2f}"
         f":attack={p['attack']}:release={p['release']}[__md];"
-        f"[__md]atrim=0:{duration:.3f}{fade_chain}[__mf];"
+        f"[__md]atrim=0:{duration:.3f}{swell}{fade_chain}[__mf];"
         f"[__v1][__mf]amix=inputs=2:duration=first:normalize=0[aout]"
     )
 
@@ -257,7 +304,10 @@ def apply_music(video_path, spec, output_path, music_dir=None, profile="voice",
         return False
     voice = has_audio_stream(video_path)
     graph = build_audio_graph(spec, duration, voice=voice, profile=profile)
-    seek = ["-ss", f"{spec['start']:.2f}"] if spec["start"] > 0 else []
+    start = spec["start"]
+    if spec.get("climax_at") is not None and spec.get("drop_at") is not None:
+        start = aligned_start(spec["drop_at"], spec["climax_at"], probe_duration(track))
+    seek = ["-ss", f"{start:.3f}"] if start > 0 else []
     tmp = output_path + ".tmp.mp4"
     cmd = ["ffmpeg", "-y", "-loglevel", "error",
            "-i", video_path,
@@ -276,6 +326,124 @@ def apply_music(video_path, spec, output_path, music_dir=None, profile="voice",
     if os.path.exists(tmp):
         os.remove(tmp)
     return False
+
+
+# --- beat / drop analysis ---------------------------------------------------------
+#
+# No librosa: the two numbers the climax tail needs (where the drop is, how
+# long a beat is) come from an energy envelope in numpy. Cached per file
+# (name + size + mtime) in ``<music dir>/.analysis.json`` so a track is
+# decoded once.
+
+ANALYSIS_SR = 11025
+ANALYSIS_HOP = 256            # ~23 ms frames
+TEMPO_RANGE_BPM = (70.0, 180.0)
+_analysis_lock = threading.Lock()
+
+
+def _decode_mono(path, sr=ANALYSIS_SR, max_seconds=600):
+    import numpy as np
+    cmd = ["ffmpeg", "-v", "error", "-i", path, "-t", str(max_seconds), "-ac", "1", "-ar", str(sr),
+           "-f", "f32le", "-"]
+    raw = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=300).stdout
+    return np.frombuffer(raw, dtype=np.float32)
+
+
+def analyze_samples(y, sr=ANALYSIS_SR, hop=ANALYSIS_HOP):
+    """``{"duration", "beat_period", "bpm", "drop_at"}`` from mono samples.
+
+    beat period: autocorrelation of the onset envelope (positive difference
+    of log frame energy) over 70-180 bpm. drop: the frame where the mean
+    energy of the next 2 s most exceeds the previous 4 s, searched away from
+    the first and last 4 s, then snapped to the strongest onset within one
+    beat. Either value is None when the audio is too short or flat."""
+    import numpy as np
+    duration = len(y) / float(sr)
+    out = {"duration": round(duration, 3), "beat_period": None, "bpm": None, "drop_at": None}
+    n = len(y) // hop
+    if n < 64:
+        return out
+    frames = y[: n * hop].reshape(n, hop)
+    energy = np.sqrt((frames.astype(np.float64) ** 2).mean(axis=1)) + 1e-6
+    loge = np.log(energy)
+    onset = np.maximum(0.0, np.diff(loge, prepend=loge[0]))
+    onset = onset - onset.mean()
+    fps = sr / float(hop)
+
+    lo = int(fps * 60.0 / TEMPO_RANGE_BPM[1])
+    hi = int(fps * 60.0 / TEMPO_RANGE_BPM[0])
+    if n > hi * 4:
+        ac = np.correlate(onset, onset, mode="full")[n - 1: n - 1 + hi + 1]
+        if ac[0] > 0:
+            lag = lo + int(np.argmax(ac[lo: hi + 1]))
+            frac = 0.0
+            if 0 < lag < len(ac) - 1:
+                # Parabolic peak: a 23 ms hop quantises the lag ~2%, which
+                # drifts a beat by a frame every few cuts.
+                a, b, c = ac[lag - 1], ac[lag], ac[lag + 1]
+                den = a - 2 * b + c
+                if den < 0:
+                    frac = max(-0.5, min(0.5, 0.5 * (a - c) / den))
+            period = float((lag + frac) / fps)
+            out["beat_period"] = round(period, 4)
+            out["bpm"] = round(60.0 / period, 1)
+
+    pre, post, edge = int(4 * fps), int(2 * fps), int(4 * fps)
+    if n > pre + post + 2 * edge:
+        c = np.concatenate([[0.0], np.cumsum(energy)])
+        idx = np.arange(max(pre, edge), n - max(post, edge))
+        before = (c[idx] - c[idx - pre]) / pre
+        after = (c[idx + post] - c[idx]) / post
+        ratio = after / before
+        if ratio.size and float(ratio.max()) > 1.25:
+            f = int(idx[int(np.argmax(ratio))])
+            # Snap to the hit that starts the step, never back a beat: a
+            # symmetric +-1 beat window picked the last pre-drop kick on a
+            # real phonk track (60.1 s where the bed jumped at 60.5 s).
+            w = int((out["beat_period"] or 0.5) * fps)
+            a, b = max(0, f - int(0.15 * fps)), min(n, f + w // 2 + 1)
+            f = a + int(np.argmax(onset[a:b]))
+            out["drop_at"] = round(f / fps, 3)
+    return out
+
+
+def analyze_track(path):
+    """Cached :func:`analyze_samples` for a track file; ``{}`` on failure."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    cache_path = os.path.join(os.path.dirname(path), ".analysis.json")
+    key = f"{os.path.basename(path)}|{st.st_size}|{int(st.st_mtime)}"
+    with _analysis_lock:
+        try:
+            with open(cache_path, encoding="utf-8") as fh:
+                cache = json.load(fh)
+        except (OSError, ValueError):
+            cache = {}
+        if key in cache:
+            return cache[key]
+    try:
+        result = analyze_samples(_decode_mono(path))
+    except Exception as exc:  # noqa: BLE001
+        print(f"   ⚠️ Track analysis failed for {path}: {exc}")
+        return {}
+    with _analysis_lock:
+        try:
+            with open(cache_path, encoding="utf-8") as fh:
+                cache = json.load(fh)
+        except (OSError, ValueError):
+            cache = {}
+        cache = {k: v for k, v in cache.items() if not k.startswith(os.path.basename(path) + "|")}
+        cache[key] = result
+        try:
+            tmp = cache_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(cache, fh, indent=1)
+            os.replace(tmp, cache_path)
+        except OSError:
+            pass
+    return result
 
 
 def derived_name(clean_name):

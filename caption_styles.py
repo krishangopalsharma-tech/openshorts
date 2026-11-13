@@ -120,6 +120,13 @@ STYLE_PRESETS = {
                    uppercase=False, highlight_color="#FFA000", font_size=58,
                    outline=4, shadow=0, max_lines=2, max_chars=32,
                    glow_enabled=True, glow_color="#000000", glow_intensity=6),
+    # Movie-edit "neon" line: white core over a coloured glow, spoken word
+    # punched with ``pop``. The plan's per-line cycling aura and downward
+    # ghost-fade are not expressible as a preset (one glow colour per style).
+    "neon_punch": _P("Neon Punch", font_family="Montserrat", animation="pop",
+                     uppercase=True, primary_color="#FFFFFF", highlight_color="#FFE600",
+                     font_size=60, outline=2, shadow=0, max_lines=2, max_chars=22,
+                     glow_enabled=True, glow_color="#FF2BD6", glow_intensity=10),
 }
 
 DEFAULT_PRESET = "bold_white"

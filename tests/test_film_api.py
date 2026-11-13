@@ -598,3 +598,57 @@ def test_short_runner_logs_cuts_and_the_reframe_handover(local, monkeypatch):
     cuts = [l for l in logs if "cut " in l]
     assert [l.split("cut ")[1] for l in cuts] == ["1/12", "5/12", "10/12", "12/12"]
     assert any("joining 12 cuts" in l for l in logs)
+
+
+def test_shorts_render_appends_the_climax_tail(local, monkeypatch, tmp_path):
+    import recut
+    c = local["client"]
+    sid = _session(local, shorts_grade="gritty", shorts_climax_db=-2)["id"]
+    plan = _shorts_plan()
+    plan["shorts"][0]["climax"] = [{"start": 2001.0, "end": 2002.8, "note": "door"},
+                                   {"start": "35:01", "end": "35:02", "note": "roar"},
+                                   {"start": 2201.0, "end": 2203.0, "note": "reveal"}]
+    r = c.post(f"/api/movieshorts/plan/{sid}", json=plan).json()
+    assert r["ok"], r
+    assert len(r["previews"][0]["climax"]) == 3
+
+    lib = tmp_path / "music"
+    lib.mkdir()
+    (lib / "dark-phonk.mp3").write_bytes(b"\x00" * 16)
+    import music as _music
+    monkeypatch.setattr(_music, "MUSIC_DIR", str(lib))
+    monkeypatch.setattr(_music, "probe_duration", lambda p, timeout=30: 90.0)
+    monkeypatch.setattr(_music, "analyze_track", lambda p: {"beat_period": 0.5, "bpm": 120.0, "drop_at": 18.0})
+
+    seen = {}
+
+    def fake_recut(*, input_path, segments, output_dir, clean_name, **kw):
+        seen.update(segments=segments, transcript=kw["captions_transcript"])
+        name = f"recut_1_abc_{clean_name}"
+        open(os.path.join(output_dir, name), "wb").write(b"\x02" * 8)
+        return name, name
+    monkeypatch.setattr(recut, "perform_recut", fake_recut)
+
+    c.post(f"/api/movieshorts/render/{sid}", json={"index": 0})
+    st = c.get(f"/api/film/status/{sid}").json()["renders"]["shorts-0"]
+    assert st["status"] == "completed", st
+    assert any("climax: 3 shots" in line and "120 bpm" in line for line in st["logs"])
+
+    segs = seen["segments"]
+    assert len(segs) == 18 and [s.get("mute", False) for s in segs[-3:]] == [True, True, True]
+    assert [round(s["end"] - s["start"], 3) for s in segs[-3:]] == [1.0, 1.0, 1.0]
+    assert seen["transcript"]["segments"][-1]["words"] == []          # no captions in the tail
+
+    clip = c.get(f"/api/status/{st['job_id']}").json()["result"]["clips"][0]
+    story = 55.5
+    assert clip["music"]["climax_at"] == story and clip["music"]["drop_at"] == 18.0
+    assert clip["music"]["climax_db"] == -2.0 and clip["music"]["track"] == "dark-phonk.mp3"
+    assert clip["cinematic"] == {"color_grade": "gritty", "punches": [story, story + 1.0, story + 2.0]}
+    assert clip["montage"]["climax"]["at"] == story
+    assert [s.get("mute", False) for s in clip["recipe"]["segments"][-3:]] == [True, True, True]
+
+    # switched off: the same plan renders the story only
+    c.post(f"/api/film/session/{sid}/settings", json={"shorts_climax": False})
+    c.post(f"/api/movieshorts/render/{sid}", json={"index": 0})
+    assert len(seen["segments"]) == 15
+    assert c.post(f"/api/film/session/{sid}/settings", json={"shorts_grade": "nope"}).status_code == 400

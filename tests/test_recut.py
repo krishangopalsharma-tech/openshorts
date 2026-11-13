@@ -174,11 +174,25 @@ class TestFfmpegCommands:
         commands = recut.cut_commands("in.mp4", [_seg(10, 20), _seg(30, 35)],
                                       ["p0.mp4", "p1.mp4"])
         assert commands[0] == ["ffmpeg", "-y", "-ss", "10", "-to", "20",
-                               "-i", "in.mp4", "-c:v", "test", "-c:a", "test",
+                               "-i", "in.mp4", "-t", "10.000",
+                               "-c:v", "test", "-c:a", "test",
                                *recut.METADATA_SCRUB,
                                "-movflags", "+faststart",
                                "p0.mp4"]
         assert commands[1][3] == "30" and commands[1][-1] == "p1.mp4"
+        assert commands[1][commands[1].index("-t") + 1] == "5.000"
+
+    def test_concat_list_pins_each_part_to_its_edl_length(self, tmp_path):
+        seen = {}
+
+        def runner(cmd):
+            if "concat" in cmd:
+                seen["list"] = open(cmd[cmd.index("-i") + 1]).read()
+        recut.run_cut_concat("in.mp4", [_seg(10, 20.5), _seg(30, 35)], str(tmp_path / "o.mp4"),
+                             str(tmp_path), runner=runner)
+        lines = seen["list"].splitlines()
+        assert lines[1] == "duration 10.500000" and lines[3] == "duration 5.000000"
+        assert lines[0].startswith("file '") and lines[2].startswith("file '")
 
     def test_concat_command_stream_copies(self):
         cmd = recut.concat_command("list.txt", "out.mp4")

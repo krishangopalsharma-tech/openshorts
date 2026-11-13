@@ -72,11 +72,56 @@ def normalize_segments(segments, source_duration=None):
         if end - start < MIN_SEGMENT_SECONDS:
             raise RecutError(
                 f"segment {i + 1} is shorter than {MIN_SEGMENT_SECONDS}s")
-        normalized.append({"start": round(start, 3), "end": round(end, 3)})
+        item = {"start": round(start, 3), "end": round(end, 3)}
+        # ``mute``: picture-only segment (a montage's climax tail). Its words
+        # stay out of every caption pass; the music layer mutes its audio.
+        if seg.get("mute"):
+            item["mute"] = True
+        normalized.append(item)
 
     if total_duration(normalized) > MAX_TOTAL_SECONDS:
         raise RecutError(f"clip would exceed {MAX_TOTAL_SECONDS:.0f}s")
     return normalized
+
+
+def probe_fps(path, timeout=30):
+    """The video stream's frame rate as a float, or None."""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+             "-of", "csv=p=0", path], stderr=subprocess.DEVNULL, timeout=timeout).decode().split()
+    except Exception:  # noqa: BLE001
+        return None
+    for field in ",".join(out).split(","):
+        try:
+            num, _, den = field.partition("/")
+            fps = float(num) / float(den or 1)
+        except (ValueError, ZeroDivisionError):
+            continue
+        if 1.0 < fps < 241.0:
+            return fps
+    return None
+
+
+def frame_align(segments, fps):
+    """Start every segment on a source frame and make it a whole number of
+    frames long. A montage of many short cuts otherwise joins mid-frame: each
+    part's video is rounded up a frame while the concat ``duration`` puts the
+    next part at the exact EDL time, and the reframe pass, which reads at a
+    constant rate, pads those overlaps with whole frames (measured
+    14-nov-2026: +6 frames over 8 joins, the climax flashes 6 frames ahead of
+    the real cuts). Keeps ``mute``."""
+    if not fps or fps <= 0:
+        return [dict(seg) for seg in segments]
+    out = []
+    for seg in segments:
+        start = round(round(float(seg["start"]) * fps) / fps, 3)
+        frames = max(1, round((float(seg["end"]) - float(seg["start"])) * fps))
+        item = dict(seg)
+        item["start"] = start
+        item["end"] = round(start + frames / fps, 3)
+        out.append(item)
+    return out
 
 
 def total_duration(segments):
@@ -122,7 +167,10 @@ def snap_segments(segments, transcript, source_duration):
         start, end = snap_clip_to_words(
             seg["start"], seg["end"], words, source_duration,
             min_duration=MIN_SEGMENT_SECONDS, max_duration=MAX_TOTAL_SECONDS)
-        snapped.append({"start": start, "end": end})
+        item = {"start": start, "end": end}
+        if seg.get("mute"):
+            item["mute"] = True
+        snapped.append(item)
     return snapped
 
 
@@ -158,7 +206,7 @@ def virtual_transcript(transcript, segments):
         seg_start, seg_end = float(seg["start"]), float(seg["end"])
         seg_duration = seg_end - seg_start
         words = []
-        for w in transcript_words(transcript):
+        for w in ([] if seg.get("mute") else transcript_words(transcript)):
             if w["e"] <= seg_start or w["s"] >= seg_end:
                 continue
             words.append({
@@ -193,6 +241,11 @@ def cut_commands(input_path, segments, part_paths):
             "-ss", str(seg["start"]),
             "-to", str(seg["end"]),
             "-i", input_path,
+            # Clamp both streams to the EDL length: AAC padding and the
+            # loudnorm resample leave the audio up to ~0.07 s long, and the
+            # concat demuxer starts the next part where the LONGER stream
+            # ended, so every join pushed the rest of the montage late.
+            "-t", f"{float(seg['end']) - float(seg['start']):.3f}",
             *video_encode_args(QUALITY_FAST),
             *audio_encode_args(),
             # Every final-artifact producer in the repo scrubs source metadata
@@ -235,10 +288,16 @@ def run_cut_concat(input_path, segments, out_path, workdir, runner=None):
         for command in cut_commands(input_path, segments, part_paths):
             run(command)
         with open(list_path, "w") as f:
-            for part in part_paths:
+            for part, seg in zip(part_paths, segments):
                 # Absolute paths: the concat demuxer resolves relative entries
                 # against the LIST FILE's directory, not the process cwd.
                 f.write(f"file '{os.path.abspath(part)}'\n")
+                # Each part starts at its exact EDL time, not where the
+                # previous part's frame-rounded stream happened to end.
+                # Measured 14-nov-2026: a 9-segment montage ran 1.09 s long
+                # (~0.1 s per join), so captions and the climax flashes,
+                # which are placed by EDL arithmetic, landed early.
+                f.write(f"duration {float(seg['end']) - float(seg['start']):.6f}\n")
         run(concat_command(list_path, out_path))
     finally:
         for path in part_paths + [list_path]:

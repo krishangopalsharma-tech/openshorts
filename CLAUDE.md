@@ -159,6 +159,38 @@ Library defaults keep `teaser` so the original tests keep their meaning;
   leaves the source stretch continuous for fingerprinting. `MAX_SEGMENTS`
   is 40 for the same reason; `_locate_source` honours `source_path` in
   metadata (self-host only) so the film is never copied into `uploads/`.
+- **Climax tail (14-nov-2026)**: a short may carry `climax`, 3-6
+  time-named picture-only flash shots played AFTER the story on the bed's
+  drop. It is the only fast-cut stretch and it is a few seconds long; the
+  removed design cut the whole short to the beat. Pieces, each in the layer
+  that already owned the job: `film_montage.climax_segments` cuts each shot
+  to whole beats and marks it `mute` (recut keeps the flag;
+  `virtual_transcript` gives a muted segment no words, so no caption path
+  captions the tail); `music.analyze_track` finds tempo and drop in numpy
+  (no librosa, cached in `assets/music/.analysis.json`) and the music spec's
+  `climax_at`/`climax_db`/`drop_at` mute the clip's audio, swell the bed
+  and solve the loop start so the drop lands on the first shot;
+  `cinematic`'s `punches` (list of output seconds) add a two-frame white
+  flash and a 1.12x zoom that eases back, the frame size never changing.
+  `/api/clip/look` keeps stored punches when the modal changes the grade.
+  Settings: `shorts_climax`, `shorts_climax_db`, `shorts_grade` (`gritty`
+  is the movie-edit grade). Not built from the original plan: autonomous
+  LLM/web research (the chat still plans), per-shot nose-lock, slow-mo,
+  riser/thud SFX, per-line cycling neon caption with ghost-fade
+  (`neon_punch` preset is the expressible part).
+  **Montage timing, found by the first live render (14-nov-2026):** a
+  9-cut montage ran 1.09 s long, so captions and flashes (placed by EDL
+  arithmetic) drifted ~0.1 s per join. Two causes, two fixes. Each part's
+  audio ran ~0.07 s long (AAC padding + loudnorm) and the concat demuxer
+  starts the next part where the LONGER stream ended: `cut_commands` now
+  clamps with output `-t` and `run_cut_concat` writes a `duration` line per
+  part. Then the reframe pass, reading at a constant rate, padded mid-frame
+  joins with whole frames (+6 over 8 joins): the shorts render now runs
+  `recut.frame_align` (whole source frames, `probe_fps`) before cutting.
+  Measured after: every join within one frame, video 63.47 s for a
+  63.43 s EDL; the flash straddles the cut (old shot's last frame, new
+  shot's first). Drop detection snaps forward only (`-0.15 s .. +half a
+  beat`): the symmetric window picked the last kick before a real drop.
 - Sessions live under `output/film/<id>/session.json` and are skipped by
   BOTH output sweeps (the hourly one and the size cap): a recap is built over
   several sittings. Rendered parts serve at `/film/<id>/<file>` through

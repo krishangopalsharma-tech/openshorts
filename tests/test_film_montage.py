@@ -242,3 +242,64 @@ def test_watermark_is_a_text_overlay_or_nothing():
     assert fm.watermark("  ") == []
     item = fm.watermark("made by sona darus")[0]
     assert item["type"] == "text" and item["y"] > 0.9 and item["text"] == "made by sona darus"
+
+
+# --- climax tail --------------------------------------------------------------------
+
+def _climax(*ranges):
+    return [{"start": s, "end": e, "note": f"shot {i}"} for i, (s, e) in enumerate(ranges)]
+
+
+def test_climax_is_optional_and_reported_in_the_preview():
+    plan, errors, warnings, previews = fm.validate_shorts(_ok_plan(), _long_cues(), DURATION)
+    assert previews[0]["climax"] == [] and previews[0]["climax_seconds"] == 0
+
+    data = _ok_plan()
+    data["shorts"][0]["climax"] = _climax(("1:00:00", "1:00:01.5"), (3700, 3701), ("1:02:00", "1:02:03"))
+    plan, errors, warnings, previews = fm.validate_shorts(data, _long_cues(), DURATION)
+    assert errors == [] and plan.shorts[0].climax[0].note == "shot 0"
+    cx = previews[0]["climax"]
+    assert [c["start"] for c in cx] == [3600.0, 3700.0, 3720.0]
+    assert any(w["code"] == "climax_long" for w in warnings)        # the 3 s shot
+    assert previews[0]["seconds"] == 70.5                           # story footage unchanged
+
+
+def test_climax_errors_and_warnings():
+    data = _ok_plan()
+    data["shorts"][0]["climax"] = _climax(("nope", "1:00"), (9000, 9001))
+    _p, errors, warnings, _pv = fm.validate_shorts(data, _long_cues(), DURATION)
+    assert any(e["code"] == "climax_range" for e in errors)
+    assert any(w["code"] == "climax_count" for w in warnings)
+
+    data = _ok_plan()
+    first = _long_cues()[0]
+    data["shorts"][0]["climax"] = _climax((first["start"], first["start"] + 1), (3600, 3601), (3700, 3701))
+    _p, errors, warnings, _pv = fm.validate_shorts(data, _long_cues(), DURATION)
+    assert errors == [] and any(w["code"] == "climax_overlap" for w in warnings)
+
+
+def test_climax_segments_snap_to_whole_beats_and_are_muted():
+    ranges = [{"start": 10.0, "end": 12.0}, {"start": 20.0, "end": 20.7}, {"start": 30.0, "end": 31.9}]
+    segs = fm.climax_segments(ranges, beat_period=0.5)
+    assert all(s["mute"] for s in segs)
+    assert [round(s["end"] - s["start"], 3) for s in segs] == [1.0, 0.7, 1.0]   # 2 beats; capped by the chat's end
+    slow = fm.climax_segments(ranges, beat_period=0.9)
+    assert [round(s["end"] - s["start"], 3) for s in slow] == [0.9, 0.7, 0.9]
+    free = fm.climax_segments(ranges)
+    assert [round(s["end"] - s["start"], 3) for s in free] == [1.4, 0.7, 1.4]
+
+
+def test_climax_segments_stop_at_the_total_cap():
+    ranges = [{"start": float(i * 10), "end": float(i * 10 + 2)} for i in range(10)]
+    segs = fm.climax_segments(ranges, total_max=4.0)
+    assert len(segs) == 2
+
+
+def test_cut_times_are_on_the_output_timeline():
+    segs = [{"start": 100, "end": 101}, {"start": 50, "end": 50.5}, {"start": 7, "end": 8}]
+    assert fm.cut_times(segs, offset=60.0) == [60.0, 61.0, 61.5]
+
+
+def test_prompt_asks_for_the_climax():
+    text = fm.build_prompt(CUES, DURATION, "x")
+    assert "climax" in text and "3-6 picture-only flash shots" in text

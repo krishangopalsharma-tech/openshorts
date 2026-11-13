@@ -27,6 +27,7 @@ const GRADE_OPTIONS = [
     { value: 'vintage', label: 'Vintage' },
     { value: 'vibrant', label: 'Vibrant' },
     { value: 'bw', label: 'Black & White' },
+    { value: 'gritty', label: 'Gritty (movie edit)' },
 ];
 
 const TOGGLES = [
