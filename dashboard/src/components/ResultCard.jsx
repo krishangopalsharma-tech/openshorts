@@ -1261,6 +1261,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 isOpen={showLookModal}
                 onClose={() => setShowLookModal(false)}
                 clip={{ ...clip, output_format: outputFormat }}
+                jobId={jobId}
+                clipIndex={index}
                 clipCount={clipCount}
                 bulkProgress={bulkLookProgress}
                 isProcessing={isLooking || (bulkLookProgress?.running ?? false)}

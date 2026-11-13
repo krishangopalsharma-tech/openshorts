@@ -286,6 +286,51 @@ def build_filter_complex(effects, width, height):
     return ";".join(graph)
 
 
+def probe_duration(video_path):
+    """Seconds, or None when ffprobe cannot read the file."""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", video_path],
+            stderr=subprocess.STDOUT, timeout=30,
+        ).decode().strip()
+        return float(out)
+    except Exception:
+        return None
+
+
+def preview_frame(video_path, effects, at_seconds, max_height=960):
+    """One frame of ``video_path`` at ``at_seconds`` with the look applied, as
+    JPEG bytes, or None on failure. The look modal calls this on every change,
+    so it is a single-frame ffmpeg run (input seek, one output frame) rather
+    than a graded copy of the clip: about a third of a second on a 1080x1920
+    clip. A no-op look returns the plain frame, which is the "before" image.
+    The frame is scaled down to ``max_height`` after grading, so what the
+    user sees is the full-resolution result, only smaller."""
+    try:
+        probe = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", video_path],
+            stderr=subprocess.STDOUT, timeout=30,
+        ).decode().strip().split("x")
+        width, height = int(probe[0]), int(probe[1])
+    except Exception:
+        return None
+    graph = build_filter_complex(effects, width, height) or "[0:v]copy[fx]"
+    graph = graph.replace("[fx]", "[fxfull]") + \
+        f";[fxfull]scale=-2:'min({int(max_height)},ih)'[fx]"
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{max(0.0, float(at_seconds)):.3f}",
+           "-i", video_path, "-filter_complex", graph, "-map", "[fx]",
+           "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1"]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except Exception:
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return result.stdout
+
+
 def apply_cinematic_effects(video_path, effects, output_path=None):
     """Burns the cinematic look into ``video_path``. Returns True on success,
     False (input kept untouched) on any failure — matches apply_watermark's

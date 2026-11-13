@@ -380,3 +380,57 @@ class TestStyledSubtitleEndpoint:
         r = _request("POST", "/api/subtitle", {"job_id": JOB_ID, "clip_index": 0, "style": "classic"})
         assert r.status_code == 200, r.text
         assert _meta(job)["shorts"][0]["caption_style"] is None
+
+
+# ---- /api/clip/look/preview -------------------------------------------------
+
+@pytest.fixture()
+def fake_preview(monkeypatch):
+    calls = []
+
+    def fake_frame(path, effects, at):
+        calls.append((os.path.basename(path), effects, at))
+        return b"\xff\xd8jpeg"
+
+    monkeypatch.setattr(cinematic, "preview_frame", fake_frame)
+    monkeypatch.setattr(cinematic, "probe_duration", lambda path: 30.0)
+    return calls
+
+
+def test_preview_grades_the_bare_render_not_the_current_layer(job, fake_preview):
+    # The clip currently serves a graded copy: the preview must start from
+    # the clean render underneath it, like the real apply does, or a new
+    # grade would be previewed on top of the old one.
+    graded = f"fx_abc123_{CLEAN}"
+    (job["dir"] / graded).write_bytes(b"graded")
+    url = f"/videos/{JOB_ID}/{graded}"
+    meta = _meta(job)
+    meta["shorts"][0]["video_url"] = url
+    job["meta_path"].write_text(json.dumps(meta))
+    app_module.jobs[JOB_ID]["result"]["clips"][0]["video_url"] = url
+
+    res = _request("POST", "/api/clip/look/preview", {
+        "job_id": JOB_ID, "clip_index": 0,
+        "cinematic": {"color_grade": "film_print", "sharpen": "crisp"}, "position": 0.5})
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/jpeg"
+    assert res.content.startswith(b"\xff\xd8")
+    name, effects, at = fake_preview[0]
+    assert name == CLEAN
+    assert effects["color_grade"] == "film_print" and effects["sharpen"] == "crisp"
+    assert at == pytest.approx(15.0)
+
+
+def test_preview_without_a_look_is_the_original_frame(job, fake_preview):
+    res = _request("POST", "/api/clip/look/preview", {"job_id": JOB_ID, "clip_index": 0})
+    assert res.status_code == 200
+    assert cinematic.is_noop(fake_preview[0][1])
+
+
+def test_preview_clamps_position_and_rejects_unknown_clip(job, fake_preview):
+    res = _request("POST", "/api/clip/look/preview",
+                   {"job_id": JOB_ID, "clip_index": 0, "position": 7})
+    assert res.status_code == 200
+    assert fake_preview[0][2] == pytest.approx(29.9)
+    assert _request("POST", "/api/clip/look/preview",
+                    {"job_id": JOB_ID, "clip_index": 5}).status_code == 404

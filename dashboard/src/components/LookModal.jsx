@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
+import LookPreview from './LookPreview';
 import { FALLBACK_LOOK_OPTIONS, fetchLookOptions } from '../lib/lookOptions';
 
 /**
@@ -53,7 +54,7 @@ function sameLook(a, b) {
     return Object.keys(a).every((k) => a[k] === b[k]);
 }
 
-export default function LookModal({ isOpen, onClose, clip, clipCount = 1, bulkProgress, isProcessing, onApply, onApplyAll }) {
+export default function LookModal({ isOpen, onClose, clip, jobId, clipIndex, clipCount = 1, bulkProgress, isProcessing, onApply, onApplyAll }) {
     const currentFormat = clip?.output_format || 'vertical';
     const currentLook = normaliseLook(clip?.cinematic);
 
@@ -103,7 +104,7 @@ export default function LookModal({ isOpen, onClose, clip, clipCount = 1, bulkPr
         <Modal
             isOpen={isOpen}
             onClose={onClose}
-            size="md"
+            size={jobId ? 'lg' : 'md'}
             eyebrow="FORMAT & LOOK"
             title="format & look"
             footer={
@@ -137,7 +138,11 @@ export default function LookModal({ isOpen, onClose, clip, clipCount = 1, bulkPr
                 </div>
             }
         >
-            <div className="space-y-5">
+            <div className={jobId ? 'grid gap-5 sm:grid-cols-[220px_minmax(0,1fr)]' : ''}>
+            {jobId && (
+                <LookPreview jobId={jobId} clipIndex={clipIndex} look={look} isOpen={isOpen} />
+            )}
+            <div className="space-y-5 min-w-0">
                 <div>
                     <p className="eyebrow mb-2">Output format</p>
                     <SegmentedControl
@@ -220,6 +225,7 @@ export default function LookModal({ isOpen, onClose, clip, clipCount = 1, bulkPr
                         This is what the clip has now. Change something to apply.
                     </p>
                 )}
+            </div>
             </div>
         </Modal>
     );

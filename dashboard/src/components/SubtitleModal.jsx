@@ -14,6 +14,9 @@ import SegmentedControl from './ui/SegmentedControl';
  */
 
 const STORAGE_KEY = 'os_caption_style_v1';
+// Drag snap distance to the frame's centre lines, in percent of the frame
+// (the logo editor's 0.015 as a fraction).
+const SNAP_PCT = 1.5;
 
 const TABS = [
     { id: 'presets', label: 'presets' },
@@ -571,10 +574,18 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     // Pointer capture keeps move/up on the block even when the pointer leaves
     // it, so no window listeners to clean up. The video underneath never gets
     // the pointerdown: the wrapper is pointer-events-none, only the block opts in.
-    const dragPoint = (d, e) => ({
-        x: clampNum(d.cx + ((e.clientX - d.px) / d.w) * 100, 0, 100),
-        y: clampNum(d.cy + ((e.clientY - d.py) / d.h) * 100, 0, 100),
-    });
+    // Snaps to the frame's centre lines within SNAP_PCT, the same feel as the
+    // logo editor, and reports which line caught it so the guide can show.
+    // Alt places freely.
+    const dragPoint = (d, e) => {
+        let x = clampNum(d.cx + ((e.clientX - d.px) / d.w) * 100, 0, 100);
+        let y = clampNum(d.cy + ((e.clientY - d.py) / d.h) * 100, 0, 100);
+        const snapV = !e.altKey && Math.abs(x - 50) < SNAP_PCT;
+        const snapH = !e.altKey && Math.abs(y - 50) < SNAP_PCT;
+        if (snapV) x = 50;
+        if (snapH) y = 50;
+        return { x, y, snapV, snapH };
+    };
     const startDrag = (e) => {
         if (isProcessing || e.button !== 0) return;
         const box = boxRef.current;
@@ -594,7 +605,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
             h: b.height,
         };
         dragRef.current = d;
-        setDrag({ x: d.cx, y: d.cy });
+        setDrag({ x: d.cx, y: d.cy, snapV: false, snapH: false });
     };
     const moveDrag = (e) => {
         const d = dragRef.current;
@@ -676,6 +687,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 playsInline
                             />
                         )}
+                        {drag?.snapV && <div className="absolute top-0 bottom-0 left-1/2 w-px bg-[var(--color-accent)] pointer-events-none z-10" />}
+                        {drag?.snapH && <div className="absolute left-0 right-0 top-1/2 h-px bg-[var(--color-accent)] pointer-events-none z-10" />}
                         {hookText && (
                             <div className={`absolute left-0 right-0 flex justify-center pointer-events-none ${hookAtBottom ? 'bottom-[3%]' : 'top-[3%]'}`}>
                                 <span className="max-w-[80%] truncate rounded px-2 py-0.5 text-[10px] font-bold bg-white/85 text-black">{hookText}</span>
@@ -719,7 +732,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                         )}
                     </div>
                     <p className="readout">{preset.label}{hasOverrides ? ' · edited' : ''}</p>
-                    <p className="text-[11px] text-muted lowercase -mt-1">drag the caption to place it</p>
+                    <p className="text-[11px] text-muted lowercase -mt-1">drag the caption to place it · snaps to centre, hold alt to place freely</p>
                 </div>
 
                 {/* Right: controls */}

@@ -66,6 +66,9 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 if (cfg && cfg.youtubeUrlEnabled === false) {
                     setYoutubeUrlEnabled(false);
                     setMode('file');
+                    // A link carried over from the landing hero would
+                    // otherwise reopen the URL panel the switch just hid.
+                    setUrl('');
                 }
             })
             .catch(() => {});

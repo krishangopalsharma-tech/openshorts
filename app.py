@@ -5451,6 +5451,61 @@ class LookRequest(BaseModel):
     reapply_captions: bool = True
 
 
+class LookPreviewRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    # Keys as cinematic.DEFAULTS; None or all-off returns the plain frame.
+    cinematic: Optional[Dict[str, Any]] = None
+    # Where in the clip, as a fraction of its length (0..1).
+    position: float = 0.35
+
+
+@app.post("/api/clip/look/preview")
+async def preview_clip_look(req: LookPreviewRequest, request: Request):
+    """One JPEG frame of the clip with a look applied, so the format & look
+    modal can show a grade before anything is rendered. Read-only: it grades
+    a single frame of the bare render (every layer stripped, the same file
+    /api/clip/look grades) and writes nothing, so it takes no job lock and
+    costs nothing to call on every change."""
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if req.clip_index < 0 or req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip = clips[req.clip_index]
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    current_file = _current_clip_file(output_dir, base_name, clip, job, req.clip_index)
+    bare = _strip_all_layers(output_dir, current_file)
+    src = os.path.join(output_dir, bare)
+    if not os.path.exists(src):
+        raise HTTPException(status_code=404, detail="Clip file not found")
+
+    effects = cinematic.normalize(req.cinematic or {})
+    position = max(0.0, min(1.0, float(req.position)))
+
+    def _render():
+        duration = cinematic.probe_duration(src) or 0.0
+        at = max(0.0, min(duration - 0.1, duration * position)) if duration else 0.0
+        return cinematic.preview_frame(src, effects, at)
+
+    data_bytes = await asyncio.to_thread(_render)
+    if not data_bytes:
+        raise HTTPException(status_code=500, detail="Could not render a preview frame.")
+    return Response(content=data_bytes, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.post("/api/clip/look")
 async def set_clip_look(req: LookRequest, request: Request):
     """Change a finished clip's output format and/or cinematic look.

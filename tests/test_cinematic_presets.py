@@ -107,3 +107,16 @@ def test_look_options_endpoint(lut_dir):
     body = res.json()
     assert "film_print" in [g["value"] for g in body["grades"]]
     assert body["luts"] == ["Warm Test"]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not on PATH")
+def test_preview_frame_is_a_jpeg_and_the_look_changes_it(tmp_path):
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=s=360x640:r=10:d=2", "-pix_fmt", "yuv420p", str(src)], check=True)
+    plain = cinematic.preview_frame(str(src), {}, 1.0)
+    graded = cinematic.preview_frame(str(src), {"color_grade": "moody_cinema"}, 1.0)
+    assert plain[:2] == b"\xff\xd8" and graded[:2] == b"\xff\xd8"
+    assert plain != graded
+    assert cinematic.probe_duration(str(src)) == pytest.approx(2.0, abs=0.2)
+    assert cinematic.preview_frame(str(tmp_path / "missing.mp4"), {}, 0) is None
