@@ -1469,6 +1469,10 @@ def _enforce_uploads_size_cap():
             pass
 
 
+# Mirrors comedy_studio.CHANNELS_SUBDIR without importing it at module load.
+COMEDY_CHANNELS_SUBDIR = ".comedy_channels"
+
+
 def _enforce_output_size_cap():
     """Delete the oldest job dirs while OUTPUT_DIR is over OUTPUT_MAX_GB."""
     cap = OUTPUT_MAX_GB * 1024 ** 3
@@ -1477,7 +1481,7 @@ def _enforce_output_size_cap():
     used = _dir_size(OUTPUT_DIR)
     if used <= cap:
         return
-    skip = {os.path.basename(THUMBNAILS_DIR), film_api.FILM_SUBDIR}
+    skip = {os.path.basename(THUMBNAILS_DIR), film_api.FILM_SUBDIR, COMEDY_CHANNELS_SUBDIR}
     candidates = []
     for job_id in os.listdir(OUTPUT_DIR):
         if job_id in skip:
@@ -1545,7 +1549,10 @@ async def cleanup_jobs():
                 # Not a job: the thumbnails dir backs a StaticFiles mount, so
                 # deleting it would 500 every /thumbnails request until reboot.
                 # Film sessions (output/film) are multi-sitting work, not jobs.
-                if job_id in (os.path.basename(THUMBNAILS_DIR), film_api.FILM_SUBDIR):
+                # Saved Twitter/X channels (output/.comedy_channels) are a
+                # library, not a job.
+                if job_id in (os.path.basename(THUMBNAILS_DIR), film_api.FILM_SUBDIR,
+                              COMEDY_CHANNELS_SUBDIR):
                     continue
                 job_path = os.path.join(OUTPUT_DIR, job_id)
                 if os.path.isdir(job_path):
@@ -3246,12 +3253,22 @@ async def process_local_endpoint(request: Request):
         env["CLIP_MAX_SECONDS"] = str(comedy_studio.SHORT_MAX_SECONDS)
     if body.get("comedy_card"):
         import comedy_studio
-        prof = comedy_studio.load_profile(OUTPUT_DIR)
-        override = body.get("comedy_card_config") or {}
-        if isinstance(override, dict):
-            for k in ("channel_name", "handle", "verified", "burn_subtitles"):
-                if k in override and override[k] is not None:
-                    prof[k] = override[k]
+        channel_id = str(body.get("comedy_channel_id") or "").strip()
+        if channel_id:
+            # A saved channel is the whole header: no per-request overrides,
+            # so what the picker showed is exactly what gets burned.
+            try:
+                prof = comedy_studio.channel_card_config(OUTPUT_DIR, channel_id)
+            except (KeyError, ValueError):
+                raise HTTPException(status_code=400,
+                                    detail=f"Unknown channel: {channel_id}")
+        else:
+            prof = comedy_studio.load_profile(OUTPUT_DIR)
+            override = body.get("comedy_card_config") or {}
+            if isinstance(override, dict):
+                for k in ("channel_name", "handle", "verified", "burn_subtitles"):
+                    if k in override and override[k] is not None:
+                        prof[k] = override[k]
         env["COMEDY_CARD"] = "1"
         env["COMEDY_CARD_CONFIG"] = json.dumps(prof)
         env["AUTO_CAPTIONS"] = "1" if prof.get("burn_subtitles") else "0"
@@ -3373,6 +3390,105 @@ async def local_brief(job_id: str):
             "text": text, "bytes": len(text.encode("utf-8")), **info}
 
 
+def _channel_public(ch):
+    return {
+        "id": ch["id"],
+        "channel_name": ch["channel_name"],
+        "handle": ch["handle"],
+        "verified": bool(ch.get("verified", True)),
+        "burn_subtitles": bool(ch.get("burn_subtitles", False)),
+        "categories": ch.get("categories") or ["comedy"],
+        "has_avatar": bool(ch.get("has_avatar")),
+        "avatar_url": (f"/api/comedy/channels/{ch['id']}/avatar"
+                       if ch.get("has_avatar") else None),
+    }
+
+
+def _comedy_local_only():
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+@app.get("/api/comedy/channels")
+async def list_comedy_channels():
+    """Saved Twitter/X channels (name, handle, avatar, default short types)."""
+    _comedy_local_only()
+    import comedy_studio
+    return {"channels": [_channel_public(c) for c in comedy_studio.list_channels(OUTPUT_DIR)]}
+
+
+@app.post("/api/comedy/channels")
+async def create_comedy_channel(request: Request):
+    _comedy_local_only()
+    import comedy_studio
+    body = await request.json() if await request.body() else {}
+    try:
+        ch = comedy_studio.create_channel(OUTPUT_DIR, body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _channel_public(ch)
+
+
+@app.patch("/api/comedy/channels/{channel_id}")
+async def update_comedy_channel(channel_id: str, request: Request):
+    _comedy_local_only()
+    import comedy_studio
+    body = await request.json() if await request.body() else {}
+    try:
+        ch = comedy_studio.update_channel(OUTPUT_DIR, channel_id, body)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such channel")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _channel_public(ch)
+
+
+@app.delete("/api/comedy/channels/{channel_id}")
+async def delete_comedy_channel(channel_id: str):
+    _comedy_local_only()
+    import comedy_studio
+    try:
+        comedy_studio.delete_channel(OUTPUT_DIR, channel_id)
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=404, detail="No such channel")
+    return {"deleted": channel_id}
+
+
+@app.post("/api/comedy/channels/{channel_id}/avatar")
+async def upload_comedy_channel_avatar(channel_id: str, file: UploadFile = File(...)):
+    _comedy_local_only()
+    import comedy_studio
+    from PIL import Image
+    import io
+    try:
+        comedy_studio.get_channel(OUTPUT_DIR, channel_id)
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=404, detail="No such channel")
+    raw = await file.read()
+    try:
+        im = Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image file: {e}")
+    im.save(comedy_studio.channel_avatar_path(OUTPUT_DIR, channel_id), "PNG")
+    return _channel_public(comedy_studio.get_channel(OUTPUT_DIR, channel_id))
+
+
+@app.get("/api/comedy/channels/{channel_id}/avatar")
+async def serve_comedy_channel_avatar(channel_id: str):
+    _comedy_local_only()
+    import comedy_studio
+    try:
+        path = comedy_studio.channel_avatar_path(OUTPUT_DIR, channel_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="No such channel")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No avatar for this channel")
+    with open(path, "rb") as f:
+        data = f.read()
+    return Response(content=data, media_type="image/png",
+                    headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/comedy/profile")
 async def get_comedy_profile():
     if BILLING_ENABLED:
@@ -3445,6 +3561,7 @@ async def preview_comedy_card(
     channel_name: Optional[str] = None,
     handle: Optional[str] = None,
     verified: Optional[bool] = None,
+    channel_id: Optional[str] = None,
 ):
     if BILLING_ENABLED:
         raise HTTPException(status_code=404, detail="Not found")
@@ -3452,7 +3569,13 @@ async def preview_comedy_card(
     import comedy_studio
     import tempfile
 
-    prof = comedy_studio.load_profile(OUTPUT_DIR)
+    if channel_id:
+        try:
+            prof = comedy_studio.channel_card_config(OUTPUT_DIR, channel_id)
+        except (KeyError, ValueError):
+            raise HTTPException(status_code=404, detail="No such channel")
+    else:
+        prof = comedy_studio.load_profile(OUTPUT_DIR)
     fd, tmp_png = tempfile.mkstemp(suffix=".png")
     os.close(fd)
     try:

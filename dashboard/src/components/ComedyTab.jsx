@@ -15,6 +15,9 @@ import {
   X,
   Eye,
   ShieldCheck,
+  Plus,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import LocalFileBrowser from './LocalFileBrowser';
 import { thumbUrl } from '../lib/localBrowser';
@@ -70,21 +73,23 @@ const parsePastedClips = (raw) => {
 };
 
 export default function ComedyTab({ onJobStarted }) {
-  // Channel Profile State (Twitter/X Header)
-  const [channelName, setChannelName] = useState(
-    () => localStorage.getItem('os_comedy_channel_name') || 'Cheerful Videos'
+  // Saved channels (Twitter/X header). The fields below show the selected
+  // channel read-only; they only unlock in edit / new mode, so a render can
+  // never go out under a half-edited header.
+  const [channels, setChannels] = useState([]);
+  const [channelsLoaded, setChannelsLoaded] = useState(false);
+  const [activeChannelId, setActiveChannelId] = useState(
+    () => localStorage.getItem('os_comedy_channel_id') || ''
   );
-  const [handle, setHandle] = useState(
-    () => localStorage.getItem('os_comedy_handle') || '@Cheerfulvids'
-  );
-  const [verified, setVerified] = useState(
-    () => (localStorage.getItem('os_comedy_verified') ?? '1') !== '0'
-  );
-  const [burnSubtitles, setBurnSubtitles] = useState(
-    () => localStorage.getItem('os_comedy_burn_subs') === '1'
-  );
+  const [channelMode, setChannelMode] = useState('view'); // 'view' | 'edit' | 'new'
+  const [channelBusy, setChannelBusy] = useState(false);
+  const [channelName, setChannelName] = useState('');
+  const [handle, setHandle] = useState('');
+  const [verified, setVerified] = useState(true);
+  const [burnSubtitles, setBurnSubtitles] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState(null);
-  const [profileSaved, setProfileSaved] = useState(false);
+  const [pendingAvatar, setPendingAvatar] = useState(null); // File, uploaded on save
+  const [defaultsSaved, setDefaultsSaved] = useState(false);
   const [previewPov, setPreviewPov] = useState('Zero survival instinct 😂');
 
   // Video & Transcript State
@@ -169,27 +174,72 @@ export default function ComedyTab({ onJobStarted }) {
   const [editableClips, setEditableClips] = useState([]);
   const [renderBusy, setRenderBusy] = useState(false);
 
-  // Load saved profile from backend on mount
+  const activeChannel = useMemo(
+    () => channels.find((c) => c.id === activeChannelId) || null,
+    [channels, activeChannelId]
+  );
+
+  // Show a channel in the (locked) fields.
+  const showChannel = useCallback((ch) => {
+    setChannelName(ch?.channel_name || '');
+    setHandle(ch?.handle || '');
+    setVerified(ch ? Boolean(ch.verified) : true);
+    setBurnSubtitles(ch ? Boolean(ch.burn_subtitles) : false);
+    setAvatarUrl(ch?.avatar_url ? `${getApiUrl(ch.avatar_url)}?t=${Date.now()}` : null);
+    setPendingAvatar(null);
+  }, []);
+
+  const selectChannel = useCallback(
+    (ch) => {
+      setActiveChannelId(ch?.id || '');
+      try {
+        localStorage.setItem('os_comedy_channel_id', ch?.id || '');
+      } catch {
+        /* ignore */
+      }
+      setChannelMode(ch ? 'view' : 'new');
+      showChannel(ch);
+      if (ch && Array.isArray(ch.categories) && ch.categories.length) {
+        setCategories(ch.categories);
+        try {
+          localStorage.setItem('os_comedy_categories', JSON.stringify(ch.categories));
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [showChannel]
+  );
+
+  const loadChannels = useCallback(
+    async (preferId) => {
+      const res = await apiFetch('/api/comedy/channels');
+      if (!res.ok) throw new Error(`Could not load channels (${res.status})`);
+      const data = await res.json();
+      const list = Array.isArray(data.channels) ? data.channels : [];
+      setChannels(list);
+      setChannelsLoaded(true);
+      const want = preferId || localStorage.getItem('os_comedy_channel_id') || '';
+      selectChannel(list.find((c) => c.id === want) || list[0] || null);
+      return list;
+    },
+    [selectChannel]
+  );
+
+  // Load saved channels from backend on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiFetch('/api/comedy/profile');
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        if (data.channel_name) setChannelName(data.channel_name);
-        if (data.handle) setHandle(data.handle);
-        if (typeof data.verified === 'boolean') setVerified(data.verified);
-        if (typeof data.burn_subtitles === 'boolean') setBurnSubtitles(data.burn_subtitles);
-        if (data.avatar_url) setAvatarUrl(`${getApiUrl(data.avatar_url)}?t=${Date.now()}`);
-      } catch {
-        /* ignore */
+        if (!cancelled) await loadChannels();
+      } catch (e) {
+        if (!cancelled) setError(e.message);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadChannels]);
 
   // Category list from the backend (single source of truth); keep only ids it knows.
   useEffect(() => {
@@ -300,46 +350,113 @@ export default function ComedyTab({ onJobStarted }) {
     };
   }, [contentType, title, season, episode, categories]);
 
-  const saveProfile = useCallback(async () => {
-    try {
-      localStorage.setItem('os_comedy_channel_name', channelName);
-      localStorage.setItem('os_comedy_handle', handle);
-      localStorage.setItem('os_comedy_verified', verified ? '1' : '0');
-      localStorage.setItem('os_comedy_burn_subs', burnSubtitles ? '1' : '0');
-    } catch {
-      /* ignore */
-    }
-    try {
-      await apiFetch('/api/comedy/profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          channel_name: channelName,
-          handle,
-          verified,
-          burn_subtitles: burnSubtitles,
-        }),
-      });
-      setProfileSaved(true);
-      setTimeout(() => setProfileSaved(false), 2000);
-    } catch (e) {
-      setError(`Could not save profile: ${e.message}`);
-    }
-  }, [channelName, handle, verified, burnSubtitles]);
+  const channelEditable = channelMode !== 'view';
 
-  const handleAvatarUpload = async (file) => {
-    if (!file) return;
+  const startNewChannel = () => {
     setError('');
-    const fd = new FormData();
-    fd.append('file', file);
+    setChannelMode('new');
+    showChannel(null);
+  };
+
+  const startEditChannel = () => {
+    if (!activeChannel) return;
+    setError('');
+    setChannelMode('edit');
+  };
+
+  const cancelChannelEdit = () => {
+    setError('');
+    if (activeChannel) {
+      setChannelMode('view');
+      showChannel(activeChannel);
+    } else {
+      showChannel(null);
+    }
+  };
+
+  const pickAvatar = (file) => {
+    if (!file) return;
+    setPendingAvatar(file);
+    setAvatarUrl(URL.createObjectURL(file));
+  };
+
+  const saveChannel = async () => {
+    setError('');
+    if (!channelName.trim() || !handle.trim()) {
+      setError('Channel name and @handle are required.');
+      return;
+    }
+    setChannelBusy(true);
     try {
-      const res = await apiFetch('/api/comedy/avatar', {
-        method: 'POST',
-        body: fd,
+      const payload = {
+        channel_name: channelName.trim(),
+        handle: handle.trim(),
+        verified,
+        burn_subtitles: burnSubtitles,
+        ...(channelMode === 'new' ? { categories } : {}),
+      };
+      const isNew = channelMode === 'new';
+      const res = await apiFetch(
+        isNew ? '/api/comedy/channels' : `/api/comedy/channels/${activeChannelId}`,
+        {
+          method: isNew ? 'POST' : 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Could not save channel (${res.status})`);
+      if (pendingAvatar) {
+        const fd = new FormData();
+        fd.append('file', pendingAvatar);
+        const aRes = await apiFetch(`/api/comedy/channels/${data.id}/avatar`, {
+          method: 'POST',
+          body: fd,
+        });
+        const aData = await aRes.json().catch(() => ({}));
+        if (!aRes.ok) throw new Error(aData.detail || 'Avatar upload failed');
+      }
+      await loadChannels(data.id);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setChannelBusy(false);
+    }
+  };
+
+  const deleteChannel = async () => {
+    if (!activeChannel) return;
+    if (!window.confirm(`Delete channel ${activeChannel.handle}? Clips already rendered keep their header.`)) {
+      return;
+    }
+    setError('');
+    setChannelBusy(true);
+    try {
+      const res = await apiFetch(`/api/comedy/channels/${activeChannel.id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`Could not delete channel (${res.status})`);
+      localStorage.removeItem('os_comedy_channel_id');
+      await loadChannels();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setChannelBusy(false);
+    }
+  };
+
+  const saveTypesAsChannelDefault = async () => {
+    if (!activeChannel || !categories.length) return;
+    setError('');
+    try {
+      const res = await apiFetch(`/api/comedy/channels/${activeChannel.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ categories }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Avatar upload failed');
-      setAvatarUrl(`${getApiUrl(data.avatar_url)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Could not save defaults');
+      setChannels((prev) => prev.map((c) => (c.id === data.id ? data : c)));
+      setDefaultsSaved(true);
+      setTimeout(() => setDefaultsSaved(false), 2000);
     } catch (e) {
       setError(e.message);
     }
@@ -461,10 +578,17 @@ export default function ComedyTab({ onJobStarted }) {
       setError('Select the video and paste the AI JSON reply before rendering.');
       return;
     }
+    if (!activeChannel || channelMode !== 'view') {
+      setError(
+        channelMode !== 'view'
+          ? 'Save or cancel the channel you are editing before rendering.'
+          : 'Pick (or create) the channel these shorts are for.'
+      );
+      return;
+    }
 
     setRenderBusy(true);
     try {
-      await saveProfile();
       const requestedLayouts = [layout];
       if (punchIn) requestedLayouts.push('punch_in');
       const rawTranscript = transcriptFile?.text || pastedTranscript.trim() || null;
@@ -475,12 +599,7 @@ export default function ComedyTab({ onJobStarted }) {
         language,
         layouts: requestedLayouts,
         comedy_card: true,
-        comedy_card_config: {
-          channel_name: channelName.trim() || 'Cheerful Videos',
-          handle: handle.trim() || '@Cheerfulvids',
-          verified,
-          burn_subtitles: burnSubtitles,
-        },
+        comedy_channel_id: activeChannel.id,
         ...(look.color_grade !== 'none' || look.sharpen !== 'none' || look.lut !== 'none'
           ? { cinematic: { ...look } }
           : {}),
@@ -568,27 +687,71 @@ export default function ComedyTab({ onJobStarted }) {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left 7 cols: Channel Header & Workflow Steps */}
           <div className="lg:col-span-7 space-y-5">
-            {/* Card 1: Twitter/X Channel Header Style */}
+            {/* Card 1: Saved Twitter/X channels */}
             <div className="card p-5 space-y-4">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div>
-                  <p className="eyebrow">STYLE · TWITTER/X HEADER</p>
-                  <h2 className="text-base font-medium text-ink">Channel Profile &amp; Frame Options</h2>
+                  <p className="eyebrow">CHANNEL · TWITTER/X HEADER</p>
+                  <h2 className="text-base font-medium text-ink">Which channel are these shorts for?</h2>
                 </div>
-                <button
-                  type="button"
-                  onClick={saveProfile}
-                  className={profileSaved ? 'badge-ok px-3 py-1.5' : 'btn-quiet text-xs px-3 py-1.5'}
-                >
-                  {profileSaved ? (
-                    <>
-                      <Check size={12} /> Saved as default
-                    </>
-                  ) : (
-                    'Save as default'
-                  )}
-                </button>
+                {channelMode === 'view' && activeChannel && (
+                  <span className="badge-ok">
+                    <Check size={12} /> {activeChannel.handle}
+                  </span>
+                )}
               </div>
+
+              {/* Channel picker */}
+              <div className="flex flex-wrap gap-2">
+                {channels.map((ch) => {
+                  const on = ch.id === activeChannelId && channelMode !== 'new';
+                  return (
+                    <button
+                      key={ch.id}
+                      type="button"
+                      disabled={channelMode !== 'view' || channelBusy}
+                      onClick={() => selectChannel(ch)}
+                      className={`flex items-center gap-2 rounded-full border pl-1 pr-3 py-1 text-xs transition-colors disabled:opacity-50 ${
+                        on ? 'border-brass bg-paper3 text-ink' : 'border-rule text-muted hover:text-ink'
+                      }`}
+                    >
+                      <span className="w-6 h-6 rounded-full overflow-hidden bg-paper3 border border-rule flex items-center justify-center shrink-0">
+                        {ch.avatar_url ? (
+                          <img src={getApiUrl(ch.avatar_url)} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="text-[10px] font-bold text-brass">
+                            {ch.channel_name.slice(0, 1).toUpperCase()}
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-medium">{ch.channel_name}</span>
+                      <span className="text-muted">{ch.handle}</span>
+                    </button>
+                  );
+                })}
+                {channelMode === 'view' && (
+                  <button
+                    type="button"
+                    onClick={startNewChannel}
+                    disabled={channelBusy}
+                    className="btn-quiet text-xs px-3 py-1 rounded-full inline-flex items-center gap-1"
+                  >
+                    <Plus size={12} /> new channel
+                  </button>
+                )}
+              </div>
+
+              {channelsLoaded && channels.length === 0 && channelMode === 'new' && (
+                <p className="text-xs text-muted">
+                  No channels yet. Create your first one: it is saved, and next time you just pick it.
+                </p>
+              )}
+
+              {channelMode !== 'view' && (
+                <p className="text-xs text-brass">
+                  {channelMode === 'new' ? 'New channel' : `Editing ${activeChannel?.handle || ''}`} — save to use it.
+                </p>
+              )}
 
               <div className="flex items-center gap-4 flex-wrap">
                 <div className="relative w-14 h-14 rounded-full overflow-hidden border border-rule bg-paper3 flex items-center justify-center shrink-0">
@@ -596,24 +759,45 @@ export default function ComedyTab({ onJobStarted }) {
                     <img src={avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
                   ) : (
                     <span className="font-bold text-lg text-brass">
-                      {(channelName || 'C').trim().slice(0, 1).toUpperCase()}
+                      {(channelName || '?').trim().slice(0, 1).toUpperCase()}
                     </span>
                   )}
                 </div>
-                <div className="space-y-1">
-                  <label className="btn-quiet text-xs cursor-pointer inline-flex items-center gap-1.5">
-                    <Upload size={13} /> Upload Avatar
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      className="hidden"
-                      onChange={(e) => handleAvatarUpload(e.target.files?.[0])}
-                    />
-                  </label>
-                  <p className="text-[11px] text-muted">
-                    Top-left circular profile image on the white comedy card.
-                  </p>
-                </div>
+                {channelEditable ? (
+                  <div className="space-y-1">
+                    <label className="btn-quiet text-xs cursor-pointer inline-flex items-center gap-1.5">
+                      <Upload size={13} /> {avatarUrl ? 'Change avatar' : 'Upload avatar'}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        className="hidden"
+                        onChange={(e) => pickAvatar(e.target.files?.[0])}
+                      />
+                    </label>
+                    <p className="text-[11px] text-muted">
+                      Top-left circular profile image on the white card.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={startEditChannel}
+                      disabled={!activeChannel || channelBusy}
+                      className="btn-quiet text-xs px-3 py-1.5 inline-flex items-center gap-1"
+                    >
+                      <Pencil size={12} /> edit channel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={deleteChannel}
+                      disabled={!activeChannel || channelBusy}
+                      className="btn-quiet text-xs px-3 py-1.5 inline-flex items-center gap-1 hover:text-warn"
+                    >
+                      <Trash2 size={12} /> delete
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -622,9 +806,10 @@ export default function ComedyTab({ onJobStarted }) {
                   <input
                     type="text"
                     value={channelName}
+                    readOnly={!channelEditable}
                     onChange={(e) => setChannelName(e.target.value)}
                     placeholder="Cheerful Videos"
-                    className="input-field text-sm"
+                    className={`input-field text-sm ${channelEditable ? '' : 'opacity-70 cursor-not-allowed'}`}
                   />
                 </label>
                 <label className="space-y-1 block">
@@ -632,9 +817,10 @@ export default function ComedyTab({ onJobStarted }) {
                   <input
                     type="text"
                     value={handle}
+                    readOnly={!channelEditable}
                     onChange={(e) => setHandle(e.target.value)}
                     placeholder="@Cheerfulvids"
-                    className="input-field text-sm"
+                    className={`input-field text-sm ${channelEditable ? '' : 'opacity-70 cursor-not-allowed'}`}
                   />
                 </label>
               </div>
@@ -650,6 +836,7 @@ export default function ComedyTab({ onJobStarted }) {
                   <input
                     type="checkbox"
                     checked={verified}
+                    disabled={!channelEditable}
                     onChange={(e) => setVerified(e.target.checked)}
                     className="accent-[var(--color-accent)]"
                   />
@@ -660,11 +847,36 @@ export default function ComedyTab({ onJobStarted }) {
                   <input
                     type="checkbox"
                     checked={burnSubtitles}
+                    disabled={!channelEditable}
                     onChange={(e) => setBurnSubtitles(e.target.checked)}
                     className="accent-[var(--color-accent)]"
                   />
                 </label>
               </div>
+
+              {channelEditable && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={saveChannel}
+                    disabled={channelBusy}
+                    className="btn-primary text-xs px-4 py-1.5 inline-flex items-center gap-1.5"
+                  >
+                    {channelBusy ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                    {channelMode === 'new' ? 'Create channel' : 'Save changes'}
+                  </button>
+                  {(channels.length > 0 || channelMode === 'edit') && (
+                    <button
+                      type="button"
+                      onClick={cancelChannelEdit}
+                      disabled={channelBusy}
+                      className="btn-quiet text-xs px-3 py-1.5"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Card 2: Step 1 — Video & Whisper Transcript Verification */}
@@ -1007,6 +1219,17 @@ export default function ComedyTab({ onJobStarted }) {
                   </span>
                   <span className="text-xs font-mono text-brass">{categories.length} selected</span>
                 </div>
+                {activeChannel && channelMode === 'view' && categories.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={saveTypesAsChannelDefault}
+                    className="text-[11px] text-muted hover:text-ink underline-offset-2 hover:underline"
+                  >
+                    {defaultsSaved
+                      ? `✓ saved as ${activeChannel.handle}'s default types`
+                      : `save these types as ${activeChannel.handle}'s default`}
+                  </button>
+                )}
                 <div className="grid grid-cols-2 gap-1.5">
                   {categoryOptions.map((c) => {
                     const on = categories.includes(c.id);
@@ -1275,17 +1498,34 @@ export default function ComedyTab({ onJobStarted }) {
                   !metadataValidation.valid ||
                   !videoPath.trim() ||
                   !clipsText.trim() ||
+                  !activeChannel ||
+                  channelMode !== 'view' ||
                   renderBusy
                 }
-                className="w-full btn-primary py-2.5 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-full btn-primary py-2.5 text-sm disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
               >
                 {renderBusy ? (
                   <>
-                    <Loader2 size={15} className="animate-spin" /> Starting Comedy Render…
+                    <Loader2 size={15} className="animate-spin" /> Starting render…
                   </>
                 ) : (
                   <>
-                    <Sparkles size={16} /> Render Comedy Clips in Twitter/X Frame
+                    <Sparkles size={16} />
+                    {activeChannel && channelMode === 'view' ? (
+                      <>
+                        Render {editableClips.length || ''} short{editableClips.length === 1 ? '' : 's'} for
+                        {activeChannel.avatar_url && (
+                          <img
+                            src={getApiUrl(activeChannel.avatar_url)}
+                            alt=""
+                            className="w-5 h-5 rounded-full object-cover"
+                          />
+                        )}
+                        <span className="font-semibold">{activeChannel.handle}</span>
+                      </>
+                    ) : (
+                      'Pick a saved channel to render'
+                    )}
                   </>
                 )}
               </button>

@@ -2233,6 +2233,7 @@ if __name__ == '__main__':
                                 "pov_text": pov_text,
                                 "verified": bool(cfg.get("verified", True)),
                                 "avatar_path": cfg.get("avatar_path"),
+                                "channel_id": cfg.get("channel_id"),
                             }
                             print(f"   🐦 Applied Twitter/X comedy card: {pov_text!r}")
                         except Exception as e:

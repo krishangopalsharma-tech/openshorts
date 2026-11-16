@@ -4,6 +4,9 @@ Twitter/X comedy card job launcher.
 """
 import json
 import os
+import re
+import shutil
+import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -484,6 +487,184 @@ def load_profile(output_root: str) -> Dict[str, Any]:
     prof["has_avatar"] = os.path.exists(avatar_path)
     prof["avatar_path"] = avatar_path if prof["has_avatar"] else None
     return prof
+
+
+# ---------------------------------------------------------------------------
+# Saved channels. One person runs several Twitter/X-style channels; retyping
+# the name and re-uploading the avatar before every render is how a short
+# goes out under the wrong header. Each channel is a folder under
+# output/.comedy_channels/<id>/ (profile.json + avatar.png), so its avatar
+# path is stable: a clip that records it re-renders with the same face even
+# after another channel is edited. Lives under output/ because that is the
+# volume Docker keeps; both output sweeps skip it (see app.py).
+# ---------------------------------------------------------------------------
+CHANNELS_SUBDIR = ".comedy_channels"
+CHANNEL_FIELDS = ("channel_name", "handle", "verified", "burn_subtitles", "categories")
+_CHANNEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def channels_dir(output_root: str) -> str:
+    return os.path.join(output_root, CHANNELS_SUBDIR)
+
+
+def _channel_path(output_root: str, channel_id: str) -> str:
+    if not isinstance(channel_id, str) or not _CHANNEL_ID_RE.match(channel_id):
+        raise ValueError("Invalid channel id")
+    return os.path.join(channels_dir(output_root), channel_id)
+
+
+def _clean_handle(handle: str) -> str:
+    h = str(handle or "").strip().replace(" ", "")
+    if h and not h.startswith("@"):
+        h = "@" + h
+    return h
+
+
+def _normalize_channel(data: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    out = dict(base or {})
+    if "channel_name" in data and data["channel_name"] is not None:
+        out["channel_name"] = str(data["channel_name"]).strip()[:60]
+    if "handle" in data and data["handle"] is not None:
+        out["handle"] = _clean_handle(data["handle"])[:40]
+    for k in ("verified", "burn_subtitles"):
+        if k in data and data[k] is not None:
+            out[k] = bool(data[k])
+    if "categories" in data:
+        out["categories"] = normalize_categories(data["categories"])
+    out.setdefault("verified", True)
+    out.setdefault("burn_subtitles", False)
+    out.setdefault("categories", list(DEFAULT_CATEGORIES))
+    if not out.get("channel_name"):
+        raise ValueError("Channel name is required")
+    if not out.get("handle") or out["handle"] == "@":
+        raise ValueError("@handle is required")
+    return out
+
+
+def _new_channel_id(output_root: str, handle: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", handle.lower().lstrip("@")).strip("-")[:40] or "channel"
+    cid, n = slug, 2
+    while os.path.exists(os.path.join(channels_dir(output_root), cid)):
+        cid, n = f"{slug}-{n}", n + 1
+    return cid
+
+
+def _read_channel(output_root: str, channel_id: str) -> Optional[Dict[str, Any]]:
+    path = _channel_path(output_root, channel_id)
+    try:
+        with open(os.path.join(path, "profile.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    avatar = os.path.join(path, "avatar.png")
+    data["id"] = channel_id
+    data["has_avatar"] = os.path.isfile(avatar)
+    data["avatar_path"] = avatar if data["has_avatar"] else None
+    return data
+
+
+def _write_channel(output_root: str, channel_id: str, data: Dict[str, Any]) -> None:
+    path = _channel_path(output_root, channel_id)
+    os.makedirs(path, exist_ok=True)
+    keep = {k: data[k] for k in CHANNEL_FIELDS if k in data}
+    keep["created"] = data.get("created") or time.time()
+    jsonfile.dump_atomic(os.path.join(path, "profile.json"), keep, indent=2)
+
+
+def _migrate_legacy_profile(output_root: str) -> None:
+    """First run: turn the single saved profile (+ avatar) into channel #1."""
+    d = channels_dir(output_root)
+    if os.path.isdir(d):
+        return
+    os.makedirs(d, exist_ok=True)
+    legacy_file = os.path.join(output_root, COMEDY_PROFILE_FILE)
+    legacy_avatar = os.path.join(output_root, COMEDY_AVATAR_FILE)
+    if not (os.path.exists(legacy_file) or os.path.exists(legacy_avatar)):
+        return
+    prof = load_profile(output_root)
+    try:
+        data = _normalize_channel(prof)
+    except ValueError:
+        return
+    cid = _new_channel_id(output_root, data["handle"])
+    _write_channel(output_root, cid, data)
+    if os.path.isfile(legacy_avatar):
+        shutil.copyfile(legacy_avatar, os.path.join(_channel_path(output_root, cid), "avatar.png"))
+
+
+def list_channels(output_root: str) -> list:
+    _migrate_legacy_profile(output_root)
+    out = []
+    for name in sorted(os.listdir(channels_dir(output_root))):
+        if _CHANNEL_ID_RE.match(name):
+            ch = _read_channel(output_root, name)
+            if ch:
+                out.append(ch)
+    out.sort(key=lambda c: (c.get("created") or 0, c["id"]))
+    return out
+
+
+def get_channel(output_root: str, channel_id: str) -> Dict[str, Any]:
+    _migrate_legacy_profile(output_root)
+    ch = _read_channel(output_root, channel_id)
+    if not ch:
+        raise KeyError(channel_id)
+    return ch
+
+
+def create_channel(output_root: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    _migrate_legacy_profile(output_root)
+    clean = _normalize_channel(data)
+    handles = {c["handle"].lower() for c in list_channels(output_root)}
+    if clean["handle"].lower() in handles:
+        raise ValueError(f"A channel with handle {clean['handle']} already exists")
+    cid = _new_channel_id(output_root, clean["handle"])
+    _write_channel(output_root, cid, clean)
+    return get_channel(output_root, cid)
+
+
+def update_channel(output_root: str, channel_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    current = get_channel(output_root, channel_id)
+    clean = _normalize_channel(patch, base=current)
+    for other in list_channels(output_root):
+        if other["id"] != channel_id and other["handle"].lower() == clean["handle"].lower():
+            raise ValueError(f"A channel with handle {clean['handle']} already exists")
+    _write_channel(output_root, channel_id, clean)
+    return get_channel(output_root, channel_id)
+
+
+def delete_channel(output_root: str, channel_id: str) -> None:
+    """Remove a channel's profile. Its avatar.png stays in the folder (which
+    no longer lists, and whose id is never reused) so clips already rendered
+    for it still re-render with that face."""
+    get_channel(output_root, channel_id)
+    path = _channel_path(output_root, channel_id)
+    os.remove(os.path.join(path, "profile.json"))
+    if not os.path.exists(os.path.join(path, "avatar.png")):
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+
+def channel_avatar_path(output_root: str, channel_id: str) -> str:
+    return os.path.join(_channel_path(output_root, channel_id), "avatar.png")
+
+
+def channel_card_config(output_root: str, channel_id: str) -> Dict[str, Any]:
+    """What the render puts in COMEDY_CARD_CONFIG for this channel."""
+    ch = get_channel(output_root, channel_id)
+    return {
+        "channel_id": ch["id"],
+        "channel_name": ch["channel_name"],
+        "handle": ch["handle"],
+        "verified": bool(ch.get("verified", True)),
+        "burn_subtitles": bool(ch.get("burn_subtitles", False)),
+        "avatar_path": ch["avatar_path"],
+        "has_avatar": ch["has_avatar"],
+    }
 
 
 def save_profile(output_root: str, patch: Dict[str, Any]) -> Dict[str, Any]:
