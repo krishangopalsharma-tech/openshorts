@@ -1007,7 +1007,7 @@ export default function ComedyTab({ onJobStarted }) {
                   </span>
                   <span className="text-xs font-mono text-brass">{categories.length} selected</span>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                <div className="grid grid-cols-2 gap-1.5">
                   {categoryOptions.map((c) => {
                     const on = categories.includes(c.id);
                     return (
@@ -1025,7 +1025,7 @@ export default function ComedyTab({ onJobStarted }) {
                           className="accent-current"
                         />
                         <span>{c.emoji}</span>
-                        <span className="truncate">{c.label}</span>
+                        <span className="leading-tight">{c.label}</span>
                       </label>
                     );
                   })}
