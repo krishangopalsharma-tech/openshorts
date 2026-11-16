@@ -51,7 +51,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
-| `cinematic.py` | Cinematic look (grade/glow/grain/vignette/gradients/letterbox): one ffmpeg pass, applied per clip after generation (`/api/clip/look`) or at render for API callers |
+| `cinematic.py` | Cinematic look (grade/sharpen/LUT/glow/grain/vignette/gradients/letterbox): one ffmpeg pass, applied per clip after generation (`/api/clip/look`) or at render for API callers. Order: denoise → LUT → grade → sharpen (CAS) → glow → grain. `.cube` LUTs live in `assets/luts/` and only listed names are accepted. `GET /api/look-options` is the dashboard's list |
 | `caption_styles.py` | Caption looks: 23 presets (19 ported from ClipForge, `film_pop` for the film modules), 5 theme bundles, the override schema and the bundled font registry (`fonts/`) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |
@@ -757,11 +757,12 @@ in `get_viral_clips` (from `llm_backend.active()`, so it names the model that
 actually answered), `claude` in `manual_clips.load_manual_clips`. It cannot be
 reconstructed afterwards and it is the whole question the picker A/B asks, so
 it is stamped at the source. `metadata.json` is dumped wholesale and carries it
-for free; the ZIP's CSV and the webhook payload both project fields explicitly
-and each had to name it — and the CSV's `DictWriter` has an explicit
-`fieldnames`, which raises on an unknown row key rather than dropping it, so
-that list is part of the change. Clips made before this existed have no
-`picked_by`; both exports handle its absence rather than failing.
+for free; the webhook payload projects fields explicitly and names it. The
+ZIP's CSV deliberately does NOT (since `f779039`: it is the upload-sheet
+columns `id,title,description,tags` only), and its `DictWriter` has an
+explicit `fieldnames`, which raises on an unknown row key rather than
+dropping it, so rows are built to that list. Clips made before this existed
+have no `picked_by`; both exports handle its absence rather than failing.
 
 **Each profile claims nothing about the channel itself, on purpose.** The
 prose is prompt text: an invented line about the niche or the viewer steers
