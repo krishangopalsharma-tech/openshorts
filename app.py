@@ -3241,6 +3241,9 @@ async def process_local_endpoint(request: Request):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         env["COMEDY_METADATA"] = json.dumps(validated_meta)
+        # Twitter/X shorts stay under a minute: the snap and the hard trim in
+        # manual_clips read this, so a 75 s pick comes out at 59 s.
+        env["CLIP_MAX_SECONDS"] = str(comedy_studio.SHORT_MAX_SECONDS)
     if body.get("comedy_card"):
         import comedy_studio
         prof = comedy_studio.load_profile(OUTPUT_DIR)
@@ -3466,6 +3469,23 @@ async def preview_comedy_card(
                 pass
 
 
+@app.get("/api/comedy/categories")
+async def get_comedy_categories():
+    """Short types the Twitter/X studio can ask the chat model for."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    import comedy_studio
+    return {
+        "categories": [
+            {"id": cid, "label": c["label"], "emoji": c["emoji"], "hint": c["look_for"]}
+            for cid, c in comedy_studio.CATEGORIES.items()
+        ],
+        "default": comedy_studio.DEFAULT_CATEGORIES,
+        "max_shorts": comedy_studio.MAX_SHORTS,
+        "max_seconds": comedy_studio.SHORT_MAX_SECONDS,
+    }
+
+
 @app.post("/api/comedy/build-prompt")
 async def build_comedy_prompt_endpoint(request: Request):
     """Verify/align transcript (or start Whisper transcription) and build the
@@ -3522,7 +3542,9 @@ async def build_comedy_prompt_endpoint(request: Request):
             prompt_text = f.read()
 
         segments = aligned_transcript.get("segments") or []
-        min_clips, max_clips = manual_clips.chat_clip_counts(aligned_transcript, duration)
+        min_clips, max_clips = comedy_studio.shorts_count_band(
+            manual_clips.chat_clip_counts(aligned_transcript, duration),
+            duration, len(validated_meta["categories"]))
         jobs[job_id] = {
             "status": "completed",
             "logs": ["✅ Whisper audio verification & comedy prompt ready."],
@@ -4389,7 +4411,12 @@ async def download_all_clips(job_id: str, request: Request):
                         tag_parts.append(c)
                 words_clean = [w for w in re.findall(r"[A-Za-z0-9']+", title) if len(w) > 3]
                 tag_parts.extend(words_clean[:4])
-                tag_parts.extend(["comedy", "funny moments", "sitcom", "shorts", "viral"])
+                type_tags = ["comedy", "funny moments", "sitcom"]
+                if clip.get("category"):
+                    import comedy_studio
+                    if clip["category"] in comedy_studio.CATEGORIES:
+                        type_tags = comedy_studio.category_tags([clip["category"]])
+                tag_parts.extend(type_tags + ["shorts", "viral"])
                 seen_tags = set()
                 deduped_tags = []
                 for t in tag_parts:

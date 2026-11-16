@@ -21,6 +21,32 @@ import { thumbUrl } from '../lib/localBrowser';
 import { apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
 
+// Used until /api/comedy/categories answers (same ids as comedy_studio.CATEGORIES).
+const FALLBACK_CATEGORIES = [
+  { id: 'comedy', label: 'Comedy', emoji: '😂' },
+  { id: 'inspirational', label: 'Inspirational', emoji: '✨' },
+  { id: 'motivational', label: 'Motivational', emoji: '🔥' },
+  { id: 'quote', label: 'Quotes', emoji: '💬' },
+  { id: 'life_lesson', label: 'Life Lessons', emoji: '🧠' },
+  { id: 'emotional', label: 'Emotional', emoji: '😢' },
+  { id: 'wholesome', label: 'Wholesome', emoji: '🥹' },
+  { id: 'romance', label: 'Romance', emoji: '❤️' },
+  { id: 'mystery', label: 'Mystery', emoji: '🕵️' },
+  { id: 'suspense', label: 'Suspense / Thriller', emoji: '😱' },
+  { id: 'plot_twist', label: 'Plot Twist / Reveal', emoji: '🤯' },
+  { id: 'action', label: 'Action / Thrill', emoji: '💥' },
+  { id: 'confrontation', label: 'Confrontation / Savage', emoji: '😤' },
+  { id: 'iconic', label: 'Iconic Scene', emoji: '🎬' },
+  { id: 'true_story', label: 'True Story / Real Life', emoji: '📜' },
+  { id: 'horror', label: 'Horror / Creepy', emoji: '👻' },
+];
+
+const clipLength = (clip) => {
+  const s = Number(clip.start);
+  const e = Number(clip.end);
+  return Number.isFinite(s) && Number.isFinite(e) ? e - s : null;
+};
+
 const parsePastedClips = (raw) => {
   if (!raw || !raw.trim()) return [];
   try {
@@ -88,6 +114,31 @@ export default function ComedyTab({ onJobStarted }) {
   const [year, setYear] = useState('');
   const [notes, setNotes] = useState('');
 
+  // Which kinds of shorts to extract (comedy, inspirational, quotes, ...).
+  const [categoryOptions, setCategoryOptions] = useState(FALLBACK_CATEGORIES);
+  const [categories, setCategories] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('os_comedy_categories') || '[]');
+      if (Array.isArray(saved) && saved.length) return saved;
+    } catch {
+      /* ignore */
+    }
+    return ['comedy'];
+  });
+
+  const toggleCategory = (id) => {
+    setCategories((prev) => {
+      const next = prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id];
+      try {
+        localStorage.setItem('os_comedy_categories', JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+    setBrief(null);
+  };
+
   // Prompt & Whisper Alignment State
   const [promptBusy, setPromptBusy] = useState(false);
   const [transcribeJobId, setTranscribeJobId] = useState('');
@@ -116,6 +167,31 @@ export default function ComedyTab({ onJobStarted }) {
         if (data.avatar_url) setAvatarUrl(`${getApiUrl(data.avatar_url)}?t=${Date.now()}`);
       } catch {
         /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Category list from the backend (single source of truth); keep only ids it knows.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/comedy/categories');
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (Array.isArray(data.categories) && data.categories.length) {
+          setCategoryOptions(data.categories);
+          const known = new Set(data.categories.map((c) => c.id));
+          setCategories((prev) => {
+            const kept = prev.filter((c) => known.has(c));
+            return kept.length ? kept : data.default || ['comedy'];
+          });
+        }
+      } catch {
+        /* keep fallback list */
       }
     })();
     return () => {
@@ -174,6 +250,13 @@ export default function ComedyTab({ onJobStarted }) {
 
   // Hard Metadata Gate Validation
   const metadataValidation = useMemo(() => {
+    if (categories.length === 0) {
+      return {
+        valid: false,
+        missing: ['Short types'],
+        message: 'Required to unlock prompt: tick at least one short type',
+      };
+    }
     const cleanTitle = title.trim();
     const cleanSeason = season.trim();
     const cleanEpisode = episode.trim();
@@ -198,7 +281,7 @@ export default function ComedyTab({ onJobStarted }) {
         ? 'Movie metadata complete'
         : 'Required to unlock prompt: enter Movie Title',
     };
-  }, [contentType, title, season, episode]);
+  }, [contentType, title, season, episode, categories]);
 
   const saveProfile = useCallback(async () => {
     try {
@@ -281,6 +364,7 @@ export default function ComedyTab({ onJobStarted }) {
       episode_title: episodeTitle.trim(),
       year: year.trim(),
       notes: notes.trim(),
+      categories,
     };
 
     try {
@@ -388,6 +472,7 @@ export default function ComedyTab({ onJobStarted }) {
           episode_title: episodeTitle.trim(),
           year: year.trim(),
           notes: notes.trim(),
+          categories,
         },
         ...(transcribeJobId
           ? { transcript_job: transcribeJobId }
@@ -878,6 +963,39 @@ export default function ComedyTab({ onJobStarted }) {
                 </div>
               )}
 
+              {/* Short types to extract */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted">
+                    Short types to extract (tick several for more shorts, max 20, each under 60 s)
+                  </span>
+                  <span className="text-xs font-mono text-brass">{categories.length} selected</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                  {categoryOptions.map((c) => {
+                    const on = categories.includes(c.id);
+                    return (
+                      <label
+                        key={c.id}
+                        title={c.hint || c.label}
+                        className={`flex items-center gap-2 rounded-input border px-2.5 py-1.5 text-xs cursor-pointer transition-colors ${
+                          on ? 'border-brass bg-paper3 text-ink' : 'border-rule text-muted hover:text-ink'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggleCategory(c.id)}
+                          className="accent-current"
+                        />
+                        <span>{c.emoji}</span>
+                        <span className="truncate">{c.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
               {!metadataValidation.valid && (
                 <div className="rounded-input border border-warn/50 bg-paper3 px-3 py-2 text-xs text-warn flex items-center gap-2">
                   <AlertTriangle size={14} className="shrink-0" />
@@ -992,12 +1110,17 @@ export default function ComedyTab({ onJobStarted }) {
               {editableClips.length > 0 && (
                 <div className="space-y-2.5">
                   <p className="text-xs font-medium text-ink2">
-                    {editableClips.length} comedy clip{editableClips.length === 1 ? '' : 's'} ready — edit any clip&apos;s POV caption below:
+                    {editableClips.length} short{editableClips.length === 1 ? '' : 's'} ready — edit any clip&apos;s POV caption below:
+                    {editableClips.length > 20 && (
+                      <span className="text-warn"> (more than 20: consider removing the weakest)</span>
+                    )}
                   </p>
                   <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar pr-1">
                     {editableClips.map((clip, idx) => {
                       const pov =
                         clip.pov_text ?? clip.viral_hook_text ?? clip.hook ?? clip.title ?? '';
+                      const len = clipLength(clip);
+                      const cat = categoryOptions.find((c) => c.id === clip.category);
                       return (
                         <div
                           key={idx}
@@ -1006,6 +1129,12 @@ export default function ComedyTab({ onJobStarted }) {
                           <div className="flex items-center justify-between gap-2 text-xs">
                             <span className="font-mono text-brass">
                               #{idx + 1} · {clip.start}s – {clip.end}s
+                              {len !== null && (
+                                <span className={len >= 60 ? ' text-warn' : ' text-muted'}>
+                                  {' '}({len.toFixed(1)}s{len >= 60 ? ', trimmed to 59s' : ''})
+                                </span>
+                              )}
+                              {cat && <span className="text-muted"> · {cat.emoji} {cat.label}</span>}
                             </span>
                             <button
                               type="button"

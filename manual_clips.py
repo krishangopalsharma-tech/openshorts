@@ -128,11 +128,17 @@ def load_manual_clips(path, transcript, duration):
         if words:
             start, end = snap_clip_to_words(start, end, words, duration,
                                             min_duration=min_secs, max_duration=max_secs)
+        # Snapping only bounds the length when word timings exist; a chat reply
+        # that ignores the length rule must not become a 90 s short anyway.
+        if end - start > max_secs:
+            print(f"   ✂️ Clip {n}: {end - start:.1f}s is over {max_secs:.0f}s, trimmed")
+            end = start + max_secs
 
         title = item.get("video_title_for_youtube_short") or item.get("title") or ""
         pov_text = (item.get("pov_text") or item.get("caption") or "").strip()
         hook = pov_text or item.get("viral_hook_text") or item.get("hook") or title
-        reason = item.get("reason") or item.get("why_funny") or ""
+        reason = item.get("reason") or item.get("why_it_works") or item.get("why_funny") or ""
+        category = str(item.get("category") or "").strip().lower()
         desc = item.get("description") or reason or title
         raw_tags = item.get("video_tags") or item.get("tags") or ""
         if isinstance(raw_tags, list):
@@ -141,18 +147,24 @@ def load_manual_clips(path, transcript, duration):
             raw_tags = str(raw_tags).strip()
         if not raw_tags:
             tag_parts = []
+            type_tags = ["comedy", "funny moments", "sitcom"]
             try:
                 meta = json.loads(os.environ.get("COMEDY_METADATA") or "{}")
                 if meta.get("title"):
                     tag_parts.append(str(meta["title"]).strip())
                 if meta.get("episode_title"):
                     tag_parts.append(str(meta["episode_title"]).strip())
+                import comedy_studio
+                if category in comedy_studio.CATEGORIES:
+                    type_tags = comedy_studio.category_tags([category])
+                elif meta.get("categories"):
+                    type_tags = comedy_studio.category_tags(meta["categories"])
             except Exception:
                 pass
             words_clean = [w for w in re.findall(r"[A-Za-z0-9']+", title) if len(w) > 3]
             if words_clean:
                 tag_parts.extend(words_clean[:4])
-            tag_parts.extend(["comedy", "funny moments", "sitcom", "shorts", "viral"])
+            tag_parts.extend(type_tags + ["shorts", "viral"])
             seen = set()
             deduped = []
             for t in tag_parts:
@@ -175,6 +187,8 @@ def load_manual_clips(path, transcript, duration):
             "picked_by": item.get("picked_by") or "claude",
             "reason": reason,
         }
+        if category:
+            clip_entry["category"] = category
         shorts.append(clip_entry)
 
     if not shorts:

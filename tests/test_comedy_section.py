@@ -386,3 +386,54 @@ def test_pov_text_and_emoji_vertical_alignment_without_head_clipping(tmp_path):
 
 
 
+
+
+def test_categories_validate_and_shape_the_prompt():
+    import comedy_studio
+
+    meta = {"content_type": "movie", "title": "The World's Fastest Indian", "year": "2005"}
+    # No categories keeps the original comedy-only behaviour.
+    assert comedy_studio.validate_comedy_metadata(meta)["categories"] == ["comedy"]
+    # Unknown ids are refused, order follows the registry.
+    with pytest.raises(ValueError):
+        comedy_studio.validate_comedy_metadata({**meta, "categories": ["comedy", "nope"]})
+    got = comedy_studio.validate_comedy_metadata({**meta, "categories": "quote, inspirational"})
+    assert got["categories"] == ["inspirational", "quote"]
+
+    transcript = {"language": "en", "segments": [
+        {"start": 1.0, "end": 4.0, "text": "You live more in five minutes flat out than most people do in a lifetime."}]}
+    prompt = comedy_studio.build_comedy_prompt(
+        transcript, 7620.0,
+        {**meta, "categories": ["inspirational", "quote", "true_story"]})
+    assert "Inspirational" in prompt and "Quotes" in prompt and "True Story" in prompt
+    assert "Mystery" not in prompt
+    assert "comedy video editor" not in prompt
+    assert '"category"' in prompt
+    assert "15 to 59 seconds" in prompt
+    assert "NEVER more than 20" in prompt
+
+
+def test_shorts_count_band_grows_with_categories_and_caps_at_20():
+    import comedy_studio
+
+    one = comedy_studio.shorts_count_band((3, 6), 1500.0, 1)
+    three = comedy_studio.shorts_count_band((3, 6), 1500.0, 3)
+    assert three[1] > one[1]
+    assert comedy_studio.shorts_count_band((6, 10), 7620.0, 8) == (16, 20)
+    assert comedy_studio.shorts_count_band((6, 10), 7620.0, 1)[1] == 20
+
+
+def test_manual_clips_trims_overlong_and_keeps_category(tmp_path, monkeypatch):
+    import manual_clips
+
+    monkeypatch.setenv("CLIP_MAX_SECONDS", "59")
+    monkeypatch.setenv("COMEDY_METADATA", json.dumps({"title": "Film", "categories": ["quote"]}))
+    path = tmp_path / "clips.json"
+    path.write_text(json.dumps([
+        {"start": 10, "end": 100, "category": "quote", "title": "Best line", "pov_text": "Live it 💬"}]),
+        encoding="utf-8")
+    out = manual_clips.load_manual_clips(str(path), None, 7000.0)["shorts"][0]
+    assert out["end"] - out["start"] <= 59.0
+    assert out["category"] == "quote"
+    assert "movie quotes" in out["video_tags"]
+    assert "sitcom" not in out["video_tags"]
