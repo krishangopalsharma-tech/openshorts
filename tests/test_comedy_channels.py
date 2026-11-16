@@ -117,3 +117,71 @@ def test_sweeps_skip_the_channels_dir():
     import comedy_studio
 
     assert app_module.COMEDY_CHANNELS_SUBDIR == comedy_studio.CHANNELS_SUBDIR
+
+
+def test_logo_drawn_where_asked_and_clamped(tmp_path):
+    import comedy_card
+
+    logo = tmp_path / "logo.png"
+    Image.new("RGBA", (200, 100), (255, 0, 0, 255)).save(logo)
+
+    plain = tmp_path / "plain.png"
+    box = comedy_card.render_card_overlay(str(plain), pov_text="hi")
+    out = tmp_path / "br.png"
+    comedy_card.render_card_overlay(str(out), pov_text="hi", logo_path=str(logo),
+                                    logo_position="video_br", logo_size=0.2, logo_opacity=1.0)
+    im = Image.open(out).convert("RGBA")
+    # Inside the video window's bottom-right corner: opaque red over the hole.
+    x = box["x"] + box["w"] - comedy_card.LOGO_MARGIN - 10
+    y = box["y"] + box["h"] - comedy_card.LOGO_MARGIN - 10
+    assert im.getpixel((x, y)) == (255, 0, 0, 255)
+    # Without a logo that pixel is the transparent video hole.
+    assert Image.open(plain).convert("RGBA").getpixel((x, y))[3] == 0
+    # Top-left of the window stays clear.
+    assert im.getpixel((box["x"] + 40, box["y"] + 40))[3] == 0
+
+    foot = tmp_path / "footer.png"
+    comedy_card.render_card_overlay(str(foot), pov_text="hi", logo_path=str(logo),
+                                    logo_position="footer", logo_opacity=0.5)
+    fim = Image.open(foot).convert("RGBA")
+    fy = box["y"] + box["h"] + (comedy_card.CANVAS_H - box["y"] - box["h"]) // 2
+    r, g, b, a = fim.getpixel((comedy_card.CANVAS_W // 2, fy))
+    assert r > 200 and g < 200 and a == 255     # half-transparent red over white
+
+    assert comedy_card.normalize_logo_settings(
+        {"logo_position": "moon", "logo_size": 9, "logo_opacity": -1}) == {
+        "logo_position": "video_br", "logo_size": 0.4, "logo_opacity": 0.2}
+    kw = comedy_card.card_kwargs({"handle": "@a", "logo_path": str(logo), "logo_position": "footer"})
+    assert kw["logo_path"] == str(logo) and kw["logo_position"] == "footer"
+
+
+def test_channel_logo_routes_and_card_config(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import app as app_module
+    import comedy_studio as cs
+
+    monkeypatch.setattr(app_module, "OUTPUT_DIR", str(tmp_path))
+    client = TestClient(app_module.app)
+    cid = client.post("/api/comedy/channels", json={
+        "channel_name": "Logo Co", "handle": "@logoco",
+        "logo_position": "header_right", "logo_size": 0.2}).json()["id"]
+
+    img = tmp_path / "l.png"
+    Image.new("RGBA", (3000, 600), (0, 128, 255, 200)).save(img)
+    with open(img, "rb") as f:
+        r = client.post(f"/api/comedy/channels/{cid}/logo", files={"file": ("l.png", f, "image/png")})
+    body = r.json()
+    assert r.status_code == 200 and body["has_logo"] and body["logo_position"] == "header_right"
+    stored = cs.channel_logo_path(str(tmp_path), cid)
+    assert max(Image.open(stored).size) <= 1024          # downscaled on upload
+    assert client.get(f"/api/comedy/channels/{cid}/logo").status_code == 200
+
+    cfg = cs.channel_card_config(str(tmp_path), cid)
+    assert cfg["logo_path"] == stored and cfg["logo_size"] == 0.2
+    assert client.get(f"/api/comedy/preview-card?channel_id={cid}").status_code == 200
+
+    r = client.patch(f"/api/comedy/channels/{cid}", json={"logo_opacity": 0.5})
+    assert r.json()["logo_opacity"] == 0.5 and r.json()["logo_position"] == "header_right"
+
+    r = client.delete(f"/api/comedy/channels/{cid}/logo")
+    assert r.json()["has_logo"] is False and not os.path.exists(stored)

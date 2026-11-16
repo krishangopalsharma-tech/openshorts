@@ -158,6 +158,98 @@ def _render_verified_badge(size=38):
     return badge.resize((size, size), Image.LANCZOS)
 
 
+# Channel logo (watermark). Positions: four corners of the video window, the
+# empty right side of the header, or centred in the white strip under the
+# video. Size is a fraction of the video window's width; header and footer
+# placements are additionally capped by the room they have.
+LOGO_POSITIONS = ("video_br", "video_bl", "video_tr", "video_tl", "header_right", "footer")
+LOGO_DEFAULTS = {"logo_position": "video_br", "logo_size": 0.16, "logo_opacity": 0.85}
+LOGO_MARGIN = 24
+
+
+def normalize_logo_settings(cfg):
+    """Clamp logo settings from a channel / request dict. Bad values degrade
+    to the defaults, never to a broken render."""
+    cfg = cfg or {}
+    pos = str(cfg.get("logo_position") or LOGO_DEFAULTS["logo_position"])
+    if pos not in LOGO_POSITIONS:
+        pos = LOGO_DEFAULTS["logo_position"]
+
+    def _num(key, lo, hi):
+        try:
+            v = float(cfg.get(key, LOGO_DEFAULTS[key]))
+        except (TypeError, ValueError):
+            v = LOGO_DEFAULTS[key]
+        return round(min(max(v, lo), hi), 3)
+
+    return {
+        "logo_position": pos,
+        "logo_size": _num("logo_size", 0.06, 0.4),
+        "logo_opacity": _num("logo_opacity", 0.2, 1.0),
+    }
+
+
+def card_kwargs(cfg):
+    """render_card_overlay / apply_comedy_card keyword args from a stored
+    card config (channel config, COMEDY_CARD_CONFIG or a clip's comedy_card),
+    so every caller passes the same set and a new field cannot be dropped by
+    one of them."""
+    cfg = cfg or {}
+    out = {
+        "channel_name": cfg.get("channel_name", "Cheerful Videos"),
+        "handle": cfg.get("handle", "@Cheerfulvids"),
+        "verified": bool(cfg.get("verified", True)),
+        "avatar_path": cfg.get("avatar_path"),
+        "logo_path": cfg.get("logo_path"),
+    }
+    out.update(normalize_logo_settings(cfg))
+    return out
+
+
+def _place_logo(card, logo_path, box, position, size, opacity):
+    """Composite the logo onto ``card`` (after the video hole is cut, so a
+    logo over the video window keeps its own alpha there)."""
+    if not logo_path or not os.path.exists(logo_path):
+        return
+    try:
+        logo = Image.open(logo_path).convert("RGBA")
+    except Exception:
+        return
+    lw, lh = logo.size
+    if not lw or not lh:
+        return
+    max_w = max(8, int(box["w"] * size))
+    if position == "header_right":
+        max_h = 112  # the avatar's height
+        max_w = min(max_w, 260)  # leave the name and handle their room
+    elif position == "footer":
+        max_h = max(8, CANVAS_H - (box["y"] + box["h"]) - 2 * 20)
+    else:
+        max_h = int(box["h"] * 0.4)
+    scale = min(max_w / lw, max_h / lh)
+    w, h = max(1, int(lw * scale)), max(1, int(lh * scale))
+    logo = logo.resize((w, h), Image.LANCZOS)
+    if opacity < 1.0:
+        a = logo.getchannel("A").point(lambda v: int(v * opacity))
+        logo.putalpha(a)
+
+    m = LOGO_MARGIN
+    bx, by, bw, bh = box["x"], box["y"], box["w"], box["h"]
+    if position == "video_tl":
+        x, y = bx + m, by + m
+    elif position == "video_tr":
+        x, y = bx + bw - w - m, by + m
+    elif position == "video_bl":
+        x, y = bx + m, by + bh - h - m
+    elif position == "header_right":
+        x, y = CANVAS_W - 76 - w, 48 + (112 - h) // 2
+    elif position == "footer":
+        x, y = (CANVAS_W - w) // 2, by + bh + (CANVAS_H - by - bh - h) // 2
+    else:  # video_br
+        x, y = bx + bw - w - m, by + bh - h - m
+    card.alpha_composite(logo, (int(x), int(y)))
+
+
 def render_card_overlay(
     output_png,
     channel_name="Cheerful Videos",
@@ -165,6 +257,10 @@ def render_card_overlay(
     pov_text="",
     verified=True,
     avatar_path=None,
+    logo_path=None,
+    logo_position=LOGO_DEFAULTS["logo_position"],
+    logo_size=LOGO_DEFAULTS["logo_size"],
+    logo_opacity=LOGO_DEFAULTS["logo_opacity"],
 ):
     """Render the 1080x1920 RGBA Twitter/X comedy card PNG with a transparent
     rounded-corner cutout for the video frame.
@@ -257,6 +353,12 @@ def render_card_overlay(
     alpha.paste(hole, (box_x, box_y))
     card.putalpha(alpha)
 
+    # 5. Channel logo
+    logo = normalize_logo_settings({"logo_position": logo_position,
+                                    "logo_size": logo_size, "logo_opacity": logo_opacity})
+    _place_logo(card, logo_path, {"x": box_x, "y": box_y, "w": box_w, "h": box_h},
+                logo["logo_position"], logo["logo_size"], logo["logo_opacity"])
+
     os.makedirs(os.path.dirname(os.path.abspath(output_png)), exist_ok=True)
     card.save(output_png, "PNG")
     return {
@@ -289,6 +391,10 @@ def apply_comedy_card(
     pov_text="",
     verified=True,
     avatar_path=None,
+    logo_path=None,
+    logo_position=LOGO_DEFAULTS["logo_position"],
+    logo_size=LOGO_DEFAULTS["logo_size"],
+    logo_opacity=LOGO_DEFAULTS["logo_opacity"],
 ):
     """Composite ``video_path`` into the Twitter/X comedy layout card.
 
@@ -313,6 +419,10 @@ def apply_comedy_card(
             pov_text=pov_text,
             verified=verified,
             avatar_path=avatar_path,
+            logo_path=logo_path,
+            logo_position=logo_position,
+            logo_size=logo_size,
+            logo_opacity=logo_opacity,
         )
         fg = build_ffmpeg_filtergraph(box)
         cmd = [

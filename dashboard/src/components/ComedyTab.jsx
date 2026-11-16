@@ -45,6 +45,19 @@ const FALLBACK_CATEGORIES = [
   { id: 'horror', label: 'Horror / Creepy', emoji: '👻' },
 ];
 
+// Same ids as comedy_card.LOGO_POSITIONS.
+const LOGO_POSITIONS = [
+  { value: 'video_br', label: 'Video · bottom right' },
+  { value: 'video_bl', label: 'Video · bottom left' },
+  { value: 'video_tr', label: 'Video · top right' },
+  { value: 'video_tl', label: 'Video · top left' },
+  { value: 'header_right', label: 'Header · right of name' },
+  { value: 'footer', label: 'Under the video' },
+];
+
+// The preview card is 300px wide for a 1080px frame.
+const PREVIEW_SCALE = 300 / 1080;
+
 const clipLength = (clip) => {
   const s = Number(clip.start);
   const e = Number(clip.end);
@@ -89,6 +102,13 @@ export default function ComedyTab({ onJobStarted }) {
   const [burnSubtitles, setBurnSubtitles] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState(null);
   const [pendingAvatar, setPendingAvatar] = useState(null); // File, uploaded on save
+  // Channel logo / watermark
+  const [logoUrl, setLogoUrl] = useState(null);
+  const [pendingLogo, setPendingLogo] = useState(null); // File, uploaded on save
+  const [removeLogo, setRemoveLogo] = useState(false);
+  const [logoPosition, setLogoPosition] = useState('video_br');
+  const [logoSize, setLogoSize] = useState(0.16);
+  const [logoOpacity, setLogoOpacity] = useState(0.85);
   const [defaultsSaved, setDefaultsSaved] = useState(false);
   const [previewPov, setPreviewPov] = useState('Zero survival instinct 😂');
 
@@ -187,6 +207,12 @@ export default function ComedyTab({ onJobStarted }) {
     setBurnSubtitles(ch ? Boolean(ch.burn_subtitles) : false);
     setAvatarUrl(ch?.avatar_url ? `${getApiUrl(ch.avatar_url)}?t=${Date.now()}` : null);
     setPendingAvatar(null);
+    setLogoUrl(ch?.logo_url ? `${getApiUrl(ch.logo_url)}?t=${Date.now()}` : null);
+    setPendingLogo(null);
+    setRemoveLogo(false);
+    setLogoPosition(ch?.logo_position || 'video_br');
+    setLogoSize(ch?.logo_size ?? 0.16);
+    setLogoOpacity(ch?.logo_opacity ?? 0.85);
   }, []);
 
   const selectChannel = useCallback(
@@ -380,6 +406,19 @@ export default function ComedyTab({ onJobStarted }) {
     setAvatarUrl(URL.createObjectURL(file));
   };
 
+  const pickLogo = (file) => {
+    if (!file) return;
+    setPendingLogo(file);
+    setRemoveLogo(false);
+    setLogoUrl(URL.createObjectURL(file));
+  };
+
+  const clearLogo = () => {
+    setPendingLogo(null);
+    setRemoveLogo(true);
+    setLogoUrl(null);
+  };
+
   const saveChannel = async () => {
     setError('');
     if (!channelName.trim() || !handle.trim()) {
@@ -393,6 +432,9 @@ export default function ComedyTab({ onJobStarted }) {
         handle: handle.trim(),
         verified,
         burn_subtitles: burnSubtitles,
+        logo_position: logoPosition,
+        logo_size: logoSize,
+        logo_opacity: logoOpacity,
         ...(channelMode === 'new' ? { categories } : {}),
       };
       const isNew = channelMode === 'new';
@@ -415,6 +457,18 @@ export default function ComedyTab({ onJobStarted }) {
         });
         const aData = await aRes.json().catch(() => ({}));
         if (!aRes.ok) throw new Error(aData.detail || 'Avatar upload failed');
+      }
+      if (pendingLogo) {
+        const fd = new FormData();
+        fd.append('file', pendingLogo);
+        const lRes = await apiFetch(`/api/comedy/channels/${data.id}/logo`, {
+          method: 'POST',
+          body: fd,
+        });
+        const lData = await lRes.json().catch(() => ({}));
+        if (!lRes.ok) throw new Error(lData.detail || 'Logo upload failed');
+      } else if (removeLogo && !isNew) {
+        await apiFetch(`/api/comedy/channels/${data.id}/logo`, { method: 'DELETE' });
       }
       await loadChannels(data.id);
     } catch (e) {
@@ -852,6 +906,94 @@ export default function ComedyTab({ onJobStarted }) {
                     className="accent-[var(--color-accent)]"
                   />
                 </label>
+              </div>
+
+              {/* Channel logo / watermark */}
+              <div className="rounded-input border border-rule bg-paper3 p-3 space-y-2.5">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="w-14 h-10 rounded border border-rule bg-[repeating-conic-gradient(#3a3a3a_0_25%,#2a2a2a_0_50%)] bg-[length:10px_10px] flex items-center justify-center overflow-hidden shrink-0">
+                    {logoUrl ? (
+                      <img src={logoUrl} alt="Logo" className="max-w-full max-h-full object-contain" />
+                    ) : (
+                      <span className="text-[10px] text-muted">no logo</span>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-ink2">Channel logo / watermark</p>
+                    <p className="text-[11px] text-muted">
+                      {logoUrl
+                        ? `${LOGO_POSITIONS.find((p) => p.value === logoPosition)?.label || ''} · ${Math.round(
+                            logoSize * 100
+                          )}% wide · ${Math.round(logoOpacity * 100)}% opacity`
+                        : 'PNG with a transparent background works best.'}
+                    </p>
+                  </div>
+                  {channelEditable && (
+                    <div className="flex items-center gap-1.5">
+                      <label className="btn-quiet text-xs cursor-pointer inline-flex items-center gap-1.5 px-2.5 py-1">
+                        <Upload size={12} /> {logoUrl ? 'Change' : 'Upload logo'}
+                        <input
+                          type="file"
+                          accept="image/png,image/webp,image/jpeg"
+                          className="hidden"
+                          onChange={(e) => pickLogo(e.target.files?.[0])}
+                        />
+                      </label>
+                      {logoUrl && (
+                        <button
+                          type="button"
+                          onClick={clearLogo}
+                          className="btn-quiet text-xs px-2 py-1 hover:text-warn"
+                          title="Remove logo"
+                        >
+                          <X size={12} />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {channelEditable && logoUrl && (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <label className="space-y-1 block">
+                      <span className="text-[11px] text-muted">Position</span>
+                      <select
+                        value={logoPosition}
+                        onChange={(e) => setLogoPosition(e.target.value)}
+                        className="input-field text-xs py-1.5"
+                      >
+                        {LOGO_POSITIONS.map((p) => (
+                          <option key={p.value} value={p.value}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="space-y-1 block">
+                      <span className="text-[11px] text-muted">Size {Math.round(logoSize * 100)}%</span>
+                      <input
+                        type="range"
+                        min="0.06"
+                        max="0.4"
+                        step="0.01"
+                        value={logoSize}
+                        onChange={(e) => setLogoSize(Number(e.target.value))}
+                        className="w-full accent-[var(--color-accent)]"
+                      />
+                    </label>
+                    <label className="space-y-1 block">
+                      <span className="text-[11px] text-muted">Opacity {Math.round(logoOpacity * 100)}%</span>
+                      <input
+                        type="range"
+                        min="0.2"
+                        max="1"
+                        step="0.05"
+                        value={logoOpacity}
+                        onChange={(e) => setLogoOpacity(Number(e.target.value))}
+                        className="w-full accent-[var(--color-accent)]"
+                      />
+                    </label>
+                  </div>
+                )}
               </div>
 
               {channelEditable && (
@@ -1542,7 +1684,7 @@ export default function ComedyTab({ onJobStarted }) {
 
               {/* 9:16 White Twitter/X Card Mockup */}
               <div
-                className="mx-auto w-[300px] max-w-full rounded-2xl border border-rule2 shadow-lg flex flex-col px-3.5 pt-3 pb-8 select-none"
+                className="relative mx-auto w-[300px] max-w-full rounded-2xl border border-rule2 shadow-lg flex flex-col px-3.5 pt-3 pb-8 select-none"
                 style={{ backgroundColor: '#FFFFFF', color: '#0F1419', height: '533px' }}
               >
                 {/* Profile Header */}
@@ -1578,6 +1720,18 @@ export default function ComedyTab({ onJobStarted }) {
                       </div>
                     )}
                   </div>
+                  {logoUrl && logoPosition === 'header_right' && (
+                    <img
+                      src={logoUrl}
+                      alt=""
+                      className="ml-auto object-contain shrink-0"
+                      style={{
+                        width: `${Math.min(logoSize * 272, 260 * PREVIEW_SCALE)}px`,
+                        maxHeight: '36px',
+                        opacity: logoOpacity,
+                      }}
+                    />
+                  )}
                 </div>
 
                 {/* POV Caption Text */}
@@ -1608,6 +1762,21 @@ export default function ComedyTab({ onJobStarted }) {
                     </div>
                   )}
 
+                  {logoUrl && logoPosition.startsWith('video_') && (
+                    <img
+                      src={logoUrl}
+                      alt=""
+                      className="absolute object-contain pointer-events-none"
+                      style={{
+                        width: `${logoSize * 100}%`,
+                        maxHeight: '40%',
+                        opacity: logoOpacity,
+                        ...(logoPosition.endsWith('l') ? { left: '7px' } : { right: '7px' }),
+                        ...(logoPosition.includes('_t') ? { top: '7px' } : { bottom: '7px' }),
+                      }}
+                    />
+                  )}
+
                   {burnSubtitles && (
                     <div className="absolute bottom-3 inset-x-3 text-center">
                       <span className="px-2 py-0.5 rounded bg-black/75 text-white text-[10px] font-bold uppercase tracking-wide">
@@ -1616,6 +1785,14 @@ export default function ComedyTab({ onJobStarted }) {
                     </div>
                   )}
                 </div>
+                {logoUrl && logoPosition === 'footer' && (
+                  <img
+                    src={logoUrl}
+                    alt=""
+                    className="absolute left-1/2 -translate-x-1/2 bottom-1.5 object-contain"
+                    style={{ width: `${logoSize * 272}px`, maxHeight: '22px', opacity: logoOpacity }}
+                  />
+                )}
               </div>
 
               <div className="space-y-1.5">

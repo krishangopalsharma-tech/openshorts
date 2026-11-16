@@ -499,7 +499,8 @@ def load_profile(output_root: str) -> Dict[str, Any]:
 # volume Docker keeps; both output sweeps skip it (see app.py).
 # ---------------------------------------------------------------------------
 CHANNELS_SUBDIR = ".comedy_channels"
-CHANNEL_FIELDS = ("channel_name", "handle", "verified", "burn_subtitles", "categories")
+CHANNEL_FIELDS = ("channel_name", "handle", "verified", "burn_subtitles", "categories",
+                  "logo_position", "logo_size", "logo_opacity")
 _CHANNEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
@@ -531,6 +532,10 @@ def _normalize_channel(data: Dict[str, Any], base: Optional[Dict[str, Any]] = No
             out[k] = bool(data[k])
     if "categories" in data:
         out["categories"] = normalize_categories(data["categories"])
+    import comedy_card
+    logo_in = {k: data[k] for k in ("logo_position", "logo_size", "logo_opacity")
+               if data.get(k) is not None}
+    out.update(comedy_card.normalize_logo_settings({**out, **logo_in}))
     out.setdefault("verified", True)
     out.setdefault("burn_subtitles", False)
     out.setdefault("categories", list(DEFAULT_CATEGORIES))
@@ -558,10 +563,15 @@ def _read_channel(output_root: str, channel_id: str) -> Optional[Dict[str, Any]]
         return None
     if not isinstance(data, dict):
         return None
+    import comedy_card
     avatar = os.path.join(path, "avatar.png")
+    logo = os.path.join(path, "logo.png")
+    data.update(comedy_card.normalize_logo_settings(data))
     data["id"] = channel_id
     data["has_avatar"] = os.path.isfile(avatar)
     data["avatar_path"] = avatar if data["has_avatar"] else None
+    data["has_logo"] = os.path.isfile(logo)
+    data["logo_path"] = logo if data["has_logo"] else None
     return data
 
 
@@ -636,21 +646,24 @@ def update_channel(output_root: str, channel_id: str, patch: Dict[str, Any]) -> 
 
 
 def delete_channel(output_root: str, channel_id: str) -> None:
-    """Remove a channel's profile. Its avatar.png stays in the folder (which
-    no longer lists, and whose id is never reused) so clips already rendered
-    for it still re-render with that face."""
+    """Remove a channel's profile. Its avatar.png and logo.png stay in the
+    folder (which no longer lists, and whose id is never reused) so clips
+    already rendered for it still re-render with the same header."""
     get_channel(output_root, channel_id)
     path = _channel_path(output_root, channel_id)
     os.remove(os.path.join(path, "profile.json"))
-    if not os.path.exists(os.path.join(path, "avatar.png")):
-        try:
-            os.rmdir(path)
-        except OSError:
-            pass
+    try:
+        os.rmdir(path)  # only succeeds when no avatar / logo is left in it
+    except OSError:
+        pass
 
 
 def channel_avatar_path(output_root: str, channel_id: str) -> str:
     return os.path.join(_channel_path(output_root, channel_id), "avatar.png")
+
+
+def channel_logo_path(output_root: str, channel_id: str) -> str:
+    return os.path.join(_channel_path(output_root, channel_id), "logo.png")
 
 
 def channel_card_config(output_root: str, channel_id: str) -> Dict[str, Any]:
@@ -664,6 +677,10 @@ def channel_card_config(output_root: str, channel_id: str) -> Dict[str, Any]:
         "burn_subtitles": bool(ch.get("burn_subtitles", False)),
         "avatar_path": ch["avatar_path"],
         "has_avatar": ch["has_avatar"],
+        "logo_path": ch["logo_path"],
+        "logo_position": ch["logo_position"],
+        "logo_size": ch["logo_size"],
+        "logo_opacity": ch["logo_opacity"],
     }
 
 

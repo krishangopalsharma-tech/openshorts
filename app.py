@@ -894,11 +894,8 @@ def _clip_layer_hooks(output_dir, clip, reapply_comedy_card=False):
                 import comedy_card
                 comedy_card.apply_comedy_card(
                     clean_path,
-                    channel_name=card_cfg.get("channel_name", "Cheerful Videos"),
-                    handle=card_cfg.get("handle", "@Cheerfulvids"),
                     pov_text=card_cfg.get("pov_text", ""),
-                    verified=bool(card_cfg.get("verified", True)),
-                    avatar_path=card_cfg.get("avatar_path"),
+                    **comedy_card.card_kwargs(card_cfg),
                 )
             except Exception as e:
                 print(f"⚠️ Comedy card re-apply failed on {clean_path}: {e}")
@@ -3401,6 +3398,12 @@ def _channel_public(ch):
         "has_avatar": bool(ch.get("has_avatar")),
         "avatar_url": (f"/api/comedy/channels/{ch['id']}/avatar"
                        if ch.get("has_avatar") else None),
+        "has_logo": bool(ch.get("has_logo")),
+        "logo_url": (f"/api/comedy/channels/{ch['id']}/logo"
+                     if ch.get("has_logo") else None),
+        "logo_position": ch.get("logo_position"),
+        "logo_size": ch.get("logo_size"),
+        "logo_opacity": ch.get("logo_opacity"),
     }
 
 
@@ -3487,6 +3490,60 @@ async def serve_comedy_channel_avatar(channel_id: str):
         data = f.read()
     return Response(content=data, media_type="image/png",
                     headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/comedy/channels/{channel_id}/logo")
+async def upload_comedy_channel_logo(channel_id: str, file: UploadFile = File(...)):
+    """Channel logo / watermark. Kept as PNG with its transparency."""
+    _comedy_local_only()
+    import comedy_studio
+    from PIL import Image
+    import io
+    try:
+        comedy_studio.get_channel(OUTPUT_DIR, channel_id)
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=404, detail="No such channel")
+    raw = await file.read()
+    try:
+        im = Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image file: {e}")
+    # A 4000px logo is never drawn above ~400px; keep the file small.
+    im.thumbnail((1024, 1024), Image.LANCZOS)
+    im.save(comedy_studio.channel_logo_path(OUTPUT_DIR, channel_id), "PNG")
+    return _channel_public(comedy_studio.get_channel(OUTPUT_DIR, channel_id))
+
+
+@app.get("/api/comedy/channels/{channel_id}/logo")
+async def serve_comedy_channel_logo(channel_id: str):
+    _comedy_local_only()
+    import comedy_studio
+    try:
+        path = comedy_studio.channel_logo_path(OUTPUT_DIR, channel_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="No such channel")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No logo for this channel")
+    with open(path, "rb") as f:
+        data = f.read()
+    return Response(content=data, media_type="image/png",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.delete("/api/comedy/channels/{channel_id}/logo")
+async def delete_comedy_channel_logo(channel_id: str):
+    """Stop putting a logo on this channel's renders (a re-render of an older
+    clip follows the channel's current branding, same as the avatar)."""
+    _comedy_local_only()
+    import comedy_studio
+    try:
+        comedy_studio.get_channel(OUTPUT_DIR, channel_id)
+        path = comedy_studio.channel_logo_path(OUTPUT_DIR, channel_id)
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=404, detail="No such channel")
+    if os.path.isfile(path):
+        os.remove(path)
+    return _channel_public(comedy_studio.get_channel(OUTPUT_DIR, channel_id))
 
 
 @app.get("/api/comedy/profile")
@@ -3579,13 +3636,17 @@ async def preview_comedy_card(
     fd, tmp_png = tempfile.mkstemp(suffix=".png")
     os.close(fd)
     try:
+        kw = comedy_card.card_kwargs(prof)
+        if channel_name is not None:
+            kw["channel_name"] = channel_name
+        if handle is not None:
+            kw["handle"] = handle
+        if verified is not None:
+            kw["verified"] = bool(verified)
         comedy_card.render_card_overlay(
             tmp_png,
-            channel_name=channel_name if channel_name is not None else prof["channel_name"],
-            handle=handle if handle is not None else prof["handle"],
             pov_text=pov_text or "Zero survival instinct 😂",
-            verified=prof["verified"] if verified is None else bool(verified),
-            avatar_path=prof["avatar_path"],
+            **kw,
         )
         with open(tmp_png, "rb") as f:
             png_bytes = f.read()

@@ -2218,21 +2218,15 @@ if __name__ == '__main__':
                                 or clip.get("video_title_for_youtube_short")
                                 or ""
                             )
+                            card_kw = comedy_card.card_kwargs(cfg)
                             comedy_card.apply_comedy_card(
-                                clip_final_path,
-                                channel_name=cfg.get("channel_name", "Cheerful Videos"),
-                                handle=cfg.get("handle", "@Cheerfulvids"),
-                                pov_text=pov_text,
-                                verified=bool(cfg.get("verified", True)),
-                                avatar_path=cfg.get("avatar_path"),
-                            )
+                                clip_final_path, pov_text=pov_text, **card_kw)
                             deliver_path = clip_final_path
+                            # Everything needed to put the same header back on
+                            # a re-render, logo included.
                             clip["comedy_card"] = {
-                                "channel_name": cfg.get("channel_name", "Cheerful Videos"),
-                                "handle": cfg.get("handle", "@Cheerfulvids"),
+                                **card_kw,
                                 "pov_text": pov_text,
-                                "verified": bool(cfg.get("verified", True)),
-                                "avatar_path": cfg.get("avatar_path"),
                                 "channel_id": cfg.get("channel_id"),
                             }
                             print(f"   🐦 Applied Twitter/X comedy card: {pov_text!r}")
