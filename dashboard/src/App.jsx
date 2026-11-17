@@ -1069,6 +1069,29 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isManaged, jobId, status, results?.clips?.length]);
 
+  // A job that failed AFTER rendering (bookkeeping error, restart) still has
+  // its clips on disk: re-read them instead of re-running the whole job.
+  const [recovering, setRecovering] = useState(false);
+  const [recoverMsg, setRecoverMsg] = useState('');
+  useEffect(() => { setRecoverMsg(''); }, [jobId]);
+  const recoverFailedJob = async () => {
+    if (!jobId) return;
+    setRecovering(true);
+    setRecoverMsg('');
+    try {
+      const res = await apiFetch(`/api/job/${jobId}/recover`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Recovery failed (${res.status})`);
+      setResults(data.result);
+      setLogs(data.logs || []);
+      setStatus('complete');
+    } catch (e) {
+      setRecoverMsg(e.message);
+    } finally {
+      setRecovering(false);
+    }
+  };
+
   useEffect(() => {
     let interval;
     if ((status === 'processing' || status === 'completed') && jobId) {
@@ -2975,8 +2998,24 @@ function App() {
                         </p>
                       </div>
                     ) : status === 'error' ? (
-                      <div className="h-full min-h-[120px] flex flex-col items-center justify-center text-danger space-y-2">
+                      <div className="h-full min-h-[120px] flex flex-col items-center justify-center text-danger space-y-3 text-center px-4">
                         <p>Generation failed.</p>
+                        {!billingEnabled && jobId && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={recoverFailedJob}
+                              disabled={recovering}
+                              className="btn-quiet text-xs px-3 py-1.5 inline-flex items-center gap-1.5 text-ink"
+                            >
+                              {recovering ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                              Recover finished clips from disk
+                            </button>
+                            <p className="text-xs text-muted max-w-[34ch] leading-snug">
+                              {recoverMsg || 'If clips were rendered before the error, this brings them back without re-rendering.'}
+                            </p>
+                          </>
+                        )}
                       </div>
                     ) : null
                   )}

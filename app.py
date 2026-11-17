@@ -4278,6 +4278,74 @@ def _presented_status(job_id, job):
     return job['status']
 
 
+def _rendered_result_from_disk(job_id, output_dir):
+    """(clips, cost_analysis, missing) for the clips really on disk in a job
+    dir, or None when there is no metadata to read."""
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        return None
+    with open(json_files[0], 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    clips = data.get('shorts', [])
+    rendered, missing = _clips_actually_rendered(job_id, output_dir, base_name, clips)
+    return rendered, data.get('cost_analysis'), missing
+
+
+@app.post("/api/job/{job_id}/recover")
+async def recover_job(job_id: str, request: Request):
+    """Bring back a job that FAILED after its clips were rendered.
+
+    The job record lives in memory, and anything that breaks between the last
+    clip and the final bookkeeping (a metadata read that once crashed on emoji
+    under cp1252, a killed process, a restart) leaves finished clips on disk
+    behind a "Generation failed." screen. This re-reads the job folder, keeps
+    the clips whose files really exist and marks the job completed. Nothing is
+    re-rendered. Self-host only: in cloud mode a failed job has already
+    released its reserved minutes, so recovering it would hand over clips for
+    free.
+    """
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _JOB_ID_RE.match(job_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    job = jobs.get(job_id)
+    if job is not None:
+        await _assert_job_owner(request, job)
+        if job.get('status') in ACTIVE_STATUSES:
+            raise HTTPException(status_code=409, detail="This job is still running.")
+    output_dir = (job or {}).get('output_dir') or os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail="No folder for this job on disk.")
+    try:
+        found = _rendered_result_from_disk(job_id, output_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not read the job's metadata: {e}")
+    if found is None:
+        raise HTTPException(status_code=404,
+                            detail="This job never wrote its clip list, so there is nothing to recover.")
+    clips, cost_analysis, missing = found
+    if not clips:
+        raise HTTPException(status_code=404, detail="No rendered clip files were found for this job.")
+
+    note = f"♻️ Recovered {len(clips)} clip(s) from disk."
+    if missing:
+        note += f" {missing} never rendered."
+    if job is None:
+        job = {'logs': [], 'output_dir': output_dir, 'user_id': None}
+        jobs[job_id] = job
+    job['status'] = 'completed'
+    job['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+    job.setdefault('logs', []).append(note)
+    return {
+        "status": "completed",
+        "logs": _visible_logs(job['logs']),
+        "result": job['result'],
+        "recovered": len(clips),
+        "missing": missing,
+    }
+
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, request: Request):
     job = jobs.get(job_id)

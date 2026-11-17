@@ -955,6 +955,7 @@ request degrades to "no effect", never to a broken filtergraph.
 | GET | `/api/local/brief/{job_id}` | The `paste_into_chat.txt` a transcribe-only job wrote (self-host only) |
 | POST | `/api/process` | Submit video for processing (`language`: whisper code, `auto` or `hinglish`; `transcribe_prompt`: names/terms for the decode; `isolate_vocals`: transcribe the voice alone on noisy sources) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
+| POST | `/api/job/{job_id}/recover` | Mark a job that failed AFTER rendering as completed with the clips really on disk (no re-render). Self-host only: a cloud failure already released its minutes |
 | POST | `/api/edit` | Apply AI video effects |
 | POST | `/api/subtitle` | Burn captions on one clip: `preset` + `overrides` (caption_styles) or the legacy fields; auto-transcribes dubbed videos |
 | GET | `/api/caption-styles` | Presets, themes, override vocabulary, fonts (files under `/fonts/`) |
